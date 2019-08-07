@@ -399,12 +399,19 @@ noinline void __ref rest_init(void)
 	struct task_struct *tsk;
 	int pid;
 
+	/*使能rcu*/
 	rcu_scheduler_starting();
 	/*
 	 * We need to spawn init first so that it obtains pid 1, however
 	 * the init task will end up wanting to create kthreads, which, if
 	 * we schedule it before we create kthreadd, will OOPS.
 	 */
+	 /*创建init进程，然后进入kernel_init()， pid=1，即init进程 
+	 kernel_init(): 挂载根文件系统。
+	 通过kernel_thread创建，在内核空间完成初始化后，加载init程序，并最终运行用户空间。
+	 是系统中所有其他用户进程的祖先进程。linux中的所有进程都是由init进程创建并运行的，首先linux
+	 内核启动init进程，再启动其他系统进程，再系统启动完成后，init将变成守护进程见识系统其他进程。
+	 在kthread后运行*/
 	pid = kernel_thread(kernel_init, NULL, CLONE_FS);
 	/*
 	 * Pin init on the boot CPU. Task migration is not properly working
@@ -417,6 +424,9 @@ noinline void __ref rest_init(void)
 	rcu_read_unlock();
 
 	numa_default_policy();
+	/*创建kthread内核线程， pid=2, 内核的守护进程。
+	由idle通过kernel_thread创建，并最终运行在内核空间，负责所有内核线程的调度和管理。
+	运行kthread_create_list全局链表中维护的kthread，当我们用kernel_thread创建的内核线程会被加入到该链表*/
 	pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
 	rcu_read_lock();
 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
@@ -431,14 +441,19 @@ noinline void __ref rest_init(void)
 	 */
 	system_state = SYSTEM_SCHEDULING;
 
+	/*通知kernel_init进程kthreadd进程已创建完成*/
 	complete(&kthreadd_done);
 
 	/*
 	 * The boot idle thread must execute schedule()
 	 * at least once to get things moving:
 	 */
+	 /*主动调用进程调度，并禁止内核抢占*/
 	schedule_preempt_disabled();
 	/* Call into cpu_idle with preempt disabled */
+	/*完成kernel初始化工作，进入idle循环，化身为idle进程。 pid=0,空闲进程
+	 运行在内核态，是唯一一个没有通过fork或者kernel_thread创建的进程。
+	*/
 	cpu_startup_entry(CPUHP_ONLINE);
 }
 
@@ -539,12 +554,19 @@ asmlinkage __visible void __init start_kernel(void)
 	char *command_line;
 	char *after_dashes;
 
+	/*init_task在init_task.c中定义*/
+	/*该函数在fork.c中定义，用于获取栈边界，把STACK_END_MAGIC设置为栈溢出标志。14*/
+	pr_notice("THREAD_SHIFT: %d", THREAD_SHIFT);
 	set_task_stack_end_magic(&init_task);
+	/*设置SMP模型的处理器id*/
 	smp_setup_processor_id();
+	/*用于对obj_hash, obj_static_pool这两个全局变量初始化，在调试时会用到。*/
 	debug_objects_early_init();
 
+	/*初始化cgroup所需要的参数的。*/
 	cgroup_init_early();
 
+	/*关中断*/
 	local_irq_disable();
 	early_boot_irqs_disabled = true;
 
@@ -552,29 +574,42 @@ asmlinkage __visible void __init start_kernel(void)
 	 * Interrupts are still disabled. Do necessary setups, then
 	 * enable them.
 	 */
+	/*初始化第一个CPU*/
 	boot_cpu_init();
+	/*页地址初始化操作*/
 	page_address_init();
 	pr_notice("%s", linux_banner);
+	/*体系结构相关的内核初始化，处理uboot传递进来的atag参数*/
 	setup_arch(&command_line);
 	/*
 	 * Set up the the initial canary and entropy after arch
 	 * and after adding latent and command line entropy.
 	 */
 	add_latent_entropy();
+	/*维护一个熵，用于产生真正的随机数序列*/
 	add_device_randomness(command_line, strlen(command_line));
+	/*在堆和栈中介处设置一个标记位canary word，用于防止堆栈溢出攻击。*/
 	boot_init_stack_canary();
+	/*初始化init_mm结构体，每个任务都有一个mm_struct结构以管理内存空间。*/
 	mm_init_cpumask(&init_mm);
+	/*保存command line，以备将来使用。*/
 	setup_command_line(command_line);
+	/*和CONFIG_SMP配置相关*/
 	setup_nr_cpu_ids();
+	/*为每个cpu的per_cpu变量副本分配空间*/
 	setup_per_cpu_areas();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 	boot_cpu_hotplug_init();
 
+	/*初始化所有内存管理节点列表，以便后面进行内存管理初始化*/
 	build_all_zonelists(NULL);
+	/*内存页初始化，设置内存页分配器*/
 	page_alloc_init();
 
 	pr_notice("Kernel command line: %s\n", boot_command_line);
+	/*解析需要早做处理的启动参数*/
 	parse_early_param();
+	/*解析cmdline中的启动参数*/
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,
@@ -583,21 +618,29 @@ asmlinkage __visible void __init start_kernel(void)
 		parse_args("Setting init args", after_dashes, NULL, 0, -1, -1,
 			   NULL, set_init_arg);
 
+	/*处理静态定义的跳转标号*/
 	jump_label_init();
 
 	/*
 	 * These use large bootmem allocations and must precede
 	 * kmem_cache_init()
 	 */
+	 /*使用memblock_alloc分配一个启动的log缓冲区*/
 	setup_log_buf(0);
+	/*虚拟文件系统早期初始化，包括dentry和inode的hash表初始化*/
 	vfs_caches_init_early();
+	/*对内核异常向量表进行排序*/
 	sort_main_extable();
+	/*对内核陷阱异常进程初始化*/
 	trap_init();
+	/*初始化内核分配器，过渡到伙伴系统，启动slab机制，初始化非连续内存区*/
 	mm_init();
 
+	/*功能跟踪调试机制初始化，初始化内核跟踪模块*/
 	ftrace_init();
 
 	/* trace_printk can be enabled here */
+	/*使能trace_printk*/
 	early_trace_init();
 
 	/*
@@ -605,15 +648,18 @@ asmlinkage __visible void __init start_kernel(void)
 	 * timer interrupt). Full topology setup happens at smp_init()
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
+	 /*初始化进程调度器数据结构，并创建运行队列*/
 	sched_init();
 	/*
 	 * Disable preemption - early bootup scheduling is extremely
 	 * fragile until we cpu_idle() for the first time.
 	 */
+	 /*禁止进程内核抢占，早期启动时期，调度极其脆弱*/
 	preempt_disable();
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
 		local_irq_disable();
+	/*初始化radix树算法*/
 	radix_tree_init();
 
 	/*
@@ -627,11 +673,14 @@ asmlinkage __visible void __init start_kernel(void)
 	 * early.  Work item execution depends on kthreads and starts after
 	 * workqueue_init().
 	 */
+	 /*工作队列早期初始化*/
 	workqueue_init_early();
 
+	/*初始化rcu机制，写时拷贝*/
 	rcu_init();
 
 	/* Trace events are available after this */
+	/*跟踪事件初始化*/
 	trace_init();
 
 	if (initcall_debug)
@@ -639,17 +688,26 @@ asmlinkage __visible void __init start_kernel(void)
 
 	context_tracking_init();
 	/* init some links before init_ISA_irqs() */
+	/*早期外部中断描述初始化*/
 	early_irq_init();
+	/*架构相关中断初始化*/
 	init_IRQ();
+	/*初始化时钟滴答控制器*/
 	tick_init();
 	rcu_init_nohz();
+	/*初始化引导CPU的时钟相关的数据结构*/
 	init_timers();
+	/*初始化高精度的定时器*/
 	hrtimers_init();
+	/*初始化软件中断*/
 	softirq_init();
+	/*初始化系统时钟计时*/
 	timekeeping_init();
+	/*初始化系统时钟*/
 	time_init();
 	printk_safe_init();
 	perf_event_init();
+	/*profile初始化*/
 	profile_init();
 	call_function_init();
 	WARN(!irqs_disabled(), "Interrupts were enabled early\n");
@@ -657,6 +715,12 @@ asmlinkage __visible void __init start_kernel(void)
 	early_boot_irqs_disabled = false;
 	local_irq_enable();
 
+	/*slab分配器后期初始化， slob, slub, slab*/
+	/*内核启动时使用临时内存分配器bootmem，之后由slab接管。
+	kmem_cache_init_late()初始化了slab分配器（内核高速缓存分配器），
+	这意味着bootmem的结束，同时内核的内存管理系统正式开始工作。
+	bootmem的分配必须先于kmem_cache_init_late()。
+	*/
 	kmem_cache_init_late();
 
 	/*
@@ -664,6 +728,7 @@ asmlinkage __visible void __init start_kernel(void)
 	 * we've done PCI setups etc, and console_init() must be aware of
 	 * this. But we do want output early, in case something goes wrong.
 	 */
+	 /*控制台初始化，从这个函数后，就可以输出内容到控制台了，之前的是保存到输出缓冲区*/
 	console_init();
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,
@@ -695,47 +760,76 @@ asmlinkage __visible void __init start_kernel(void)
 		initrd_start = 0;
 	}
 #endif
+	/*内存泄漏检测机制的初始化*/
 	kmemleak_init();
+	/*为每个CPU分配页集合，并初始化*/
 	setup_per_cpu_pageset();
+	/*初始化NUMA的内存访问策略，提高多个CPU的内存访问速度。*/
 	numa_policy_init();
+	/*acpi早期初始化*/
 	acpi_early_init();
 	if (late_time_init)
 		late_time_init();
 	sched_clock_init();
+	/*计算CPU需要校准的时间*/
 	calibrate_delay();
+	/*初始化pid idr*/
 	pid_idr_init();
+	/*初始化EFI的接口，并进入虚拟模式*/
 	anon_vma_init();
 #ifdef CONFIG_X86
 	if (efi_enabled(EFI_RUNTIME_SERVICES))
 		efi_enter_virtual_mode();
 #endif
+	/*进程栈缓存初始化*/
 	thread_stack_cache_init();
+	/*任务信用系统初始化*/
 	cred_init();
+	/*根据当前物理内存计算出来可以创建进程的最大数量，并进行
+	进程环境初始化，为task_struct分配空间。 进程创建机制初始化*/
 	fork_init();
+	/*进程缓存初始化*/
 	proc_caches_init();
 	uts_ns_init();
+	/*文件系统的缓冲区初始化*/
 	buffer_init();
+	/*初始化内核安全键管理列表和结构，内核秘钥管理系统*/
 	key_init();
+	/*初始化内核安全管理框架，以便提供文件\登陆等权限*/
 	security_init();
+	/*内核调试系统后期初始化。*/
 	dbg_late_init();
+	/*虚拟文件系统进行缓存初始化，提高虚拟文件系统的访问速度。*/
 	vfs_caches_init();
+	/*完成页缓存初始化*/
 	pagecache_init();
+	/*完成信号初始化*/
 	signals_init();
 	seq_file_init();
+	/*初始化系统进程文件系统，主要提供内核与用户进行交互的平台，方便用户实时查看进程的信息。*/
 	proc_root_init();
+	/*初始化nsfs*/
 	nsfs_init();
+	/*初始化CPUSET。CPUSET主要为控制组提供CPU和内存节点的管理的结构。*/
 	cpuset_init();
+	/*进程控制组正式初始化，主要用来为进程和它的子进程提供性能控制。*/
 	cgroup_init();
+	/*任务状态早期初始化，为结构体获取高速缓存，并初始化互斥机制。*/
 	taskstats_init_early();
+	/*任务延迟机制初始化，初始化每个任务延时计数。当一个任务等待CPU或者IO同步的时候，都需要计算等待时间。*/
 	delayacct_init();
 
+	/*检查CPU配置、FPU等是否非法使用不具备的功能，检查CPU BUG，软件规避BUG。*/
 	check_bugs();
 
+	/*acpi子系统初始化*/
 	acpi_subsystem_init();
 	arch_post_acpi_subsys_init();
+	/*simple fireware interface 初始化*/
 	sfi_init_late();
 
 	/* Do the rest non-__init'ed, we're now alive */
+	/*最后一个初始化函数，负责内核的其余初始化工作*/
 	arch_call_rest_init();
 }
 
@@ -1051,6 +1145,7 @@ static int __ref kernel_init(void *unused)
 {
 	int ret;
 
+	/*重要*/
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
@@ -1070,6 +1165,7 @@ static int __ref kernel_init(void *unused)
 	rcu_end_inkernel_boot();
 
 	if (ramdisk_execute_command) {
+		/*运行init程序，从一个内核进程变成用户进程*/
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
 			return 0;
@@ -1136,22 +1232,27 @@ static noinline void __init kernel_init_freeable(void)
 	do_basic_setup();
 
 	/* Open the /dev/console on the rootfs, this should never fail */
+	/*打开/dev/console， 文件号0，作为init进程标准输入*/
 	if (ksys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
 		pr_err("Warning: unable to open an initial console.\n");
 
+	/*标准输入*/
 	(void) ksys_dup(0);
+	/*标准输出*/
 	(void) ksys_dup(0);
 	/*
 	 * check if there is an early userspace init.  If yes, let it do all
 	 * the work
 	 */
 
+	/*init程序*/
 	if (!ramdisk_execute_command)
 		ramdisk_execute_command = "/init";
 
 	if (ksys_access((const char __user *)
 			ramdisk_execute_command, 0) != 0) {
 		ramdisk_execute_command = NULL;
+		/*创建根文件系统*/
 		prepare_namespace();
 	}
 
