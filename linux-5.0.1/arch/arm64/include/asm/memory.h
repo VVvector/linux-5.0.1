@@ -29,6 +29,21 @@
 #include <asm/sizes.h>
 
 /*
+1. VA_START: 内核地址空间的起始地址
+2. TEXT_OFFSET: bootloader把kernel image从外设copy到RAM中的 TEXT_OFFSET开始的地方。
+				TEXT: 指的是kernel text segment
+				OFFSET: 相对于RAM的首地址而言。
+				TEXT_OFFSET必须要4k对齐，并且size不能大于2M。
+3. PAGE_OFFSET: kernel image的其实虚拟地址，一般而言也就是系统中RAM的首地址，在该地址TEXT_OFFSET
+				之后保存了kernel image。
+				PAGE_OFFSET必须要2M对齐。
+4. TASK_SIZE: 一般而言，用户地址空间从0开始，大小就是TASK_SIZE, 即task userspace size.
+				有两种：TASK_SIZE_32和TASK_SIZE_64
+5. PHYS_OFFSET: 系统内存的起始物理地址。在系统初始化的过程中，会把PHYS_OFFSET开始的物理地址映射
+				到PAGE_OFFSET的虚拟内存上去。
+*/
+
+/*
  * Size of the PCI I/O space. This must remain a power of two so that
  * IO_SPACE_LIMIT acts as a mask for the low bits of I/O addresses.
  */
