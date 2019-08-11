@@ -22,6 +22,11 @@
 
 #define NR_IPI	7
 
+/*多个软中断可以同时在多个cpu运行，就算是同一种软中断，也有可能同时在多个cpu上运行。
+内核为每个cpu都管理着一个待决软中断变量（pending）
+
+__softirq_pending字段中的每一个bit，对应着某一个软中断，某个bit被置位，说明有相应的软中断等待处理。
+*/
 typedef struct {
 	unsigned int __softirq_pending;
 	unsigned int ipi_irqs[NR_IPI];

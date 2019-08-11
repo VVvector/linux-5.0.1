@@ -66,6 +66,7 @@ static void init_irq_stacks(void)
 }
 #endif
 
+/*初始化irq_desc,注册中断控制器驱动*/
 void __init init_IRQ(void)
 {
 	init_irq_stacks();

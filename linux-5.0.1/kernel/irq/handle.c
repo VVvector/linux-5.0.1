@@ -134,6 +134,7 @@ void __irq_wake_thread(struct irq_desc *desc, struct irqaction *action)
 	wake_up_process(action->thread);
 }
 
+/*执行我们driver中注册的irq handler*/
 irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags)
 {
 	irqreturn_t retval = IRQ_NONE;
@@ -146,6 +147,8 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags
 		irqreturn_t res;
 
 		trace_irq_handler_entry(irq, action);
+		/*如果中断时共享的，此函数中一定要判断一下是不是自己设备的中断。
+		这就是我们driver中注册的irq handler。*/
 		res = action->handler(irq, action->dev_id);
 		trace_irq_handler_exit(irq, action, res);
 
@@ -181,11 +184,15 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags
 	return retval;
 }
 
+/*此阶段才是真正执行driver注册的 irq handler，
+会循环执行每一个irqaction (action->handler, 或thread)
+*/
 irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 {
 	irqreturn_t retval;
 	unsigned int flags = 0;
 
+	/*循环执行irq注册的所有irq handler*/
 	retval = __handle_irq_event_percpu(desc, &flags);
 
 	add_interrupt_randomness(desc->irq_data.irq, flags);
@@ -195,6 +202,9 @@ irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 	return retval;
 }
 
+/*在执行generic_handle_irq_desc()函数时，会调用 irq_desc->handle_irq，
+handle_irq是在申请中断的时候被设置，不过不管被设置成哪个函数最后都会调用handle_irq_event
+*/
 irqreturn_t handle_irq_event(struct irq_desc *desc)
 {
 	irqreturn_t ret;
@@ -210,6 +220,7 @@ irqreturn_t handle_irq_event(struct irq_desc *desc)
 	return ret;
 }
 
+/*该函数在irq_gic_v3.c中被调用，即handle_arch_irq被设定。*/
 #ifdef CONFIG_GENERIC_IRQ_MULTI_HANDLER
 int __init set_handle_irq(void (*handle_irq)(struct pt_regs *))
 {

@@ -473,6 +473,7 @@ int irq_set_vcpu_affinity(unsigned int irq, void *vcpu_info)
 }
 EXPORT_SYMBOL_GPL(irq_set_vcpu_affinity);
 
+/*只有之前depth为0时，才会调用irq_disable().*/
 void __disable_irq(struct irq_desc *desc)
 {
 	if (!desc->depth++)
@@ -502,6 +503,7 @@ static int __disable_irq_nosync(unsigned int irq)
  *
  *	This function may be called from IRQ context.
  */
+ /*可用于中断上下文*/
 void disable_irq_nosync(unsigned int irq)
 {
 	__disable_irq_nosync(irq);
@@ -520,6 +522,12 @@ EXPORT_SYMBOL(disable_irq_nosync);
  *
  *	This function may be called - with care - from IRQ context.
  */
+/*
+	disable_irq可以被多次嵌套调用，要想重新打开irq，enable_irq必须也要被调用同样的次数，
+	为此，irq_desc结构中的depth字段专门用于这两个API嵌套深度的管理。当某个irq首次被驱动程序申请时，
+	默认情况下，设置depth的初始值是0，对应的irq处于打开状态。
+	不能用于中断上下文
+*/
 void disable_irq(unsigned int irq)
 {
 	if (!__disable_irq_nosync(irq))
@@ -553,6 +561,11 @@ bool disable_hardirq(unsigned int irq)
 }
 EXPORT_SYMBOL_GPL(disable_hardirq);
 
+/*
+	当depth的值为1时，才真正地调用irq_enable()，它最终通过chip->unmask或chip->enable回调开启中断控制器中相应的中断线，
+	如果depth不是1，只是简单地减去1。如果已经是0，驱动还要调用enable_irq，说明驱动程序处理不当，
+	造成enable与disable不平衡，内核会打印一句警告信息：Unbalanced enable for IRQ xxx。
+*/
 void __enable_irq(struct irq_desc *desc)
 {
 	switch (desc->depth) {
@@ -592,6 +605,9 @@ void __enable_irq(struct irq_desc *desc)
  *	This function may be called from IRQ context only when
  *	desc->irq_data.chip->bus_lock and desc->chip->bus_sync_unlock are NULL !
  */
+/*
+	使能irq
+*/
 void enable_irq(unsigned int irq)
 {
 	unsigned long flags;
@@ -1184,6 +1200,9 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
  * interrupt related functions. desc->request_mutex solely serializes
  * request/free_irq().
  */
+/*当中断发生时，处理的路径将会沿着：irq_desc.handle_irq，irqaction.handler，
+ irqaction.thread_fn（irqaction.handler的返回值是IRQ_WAKE_THREAD）这个过程进行处理。
+ */
 static int
 __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 {
@@ -1237,6 +1256,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * and the interrupt does not nest into another interrupt
 	 * thread.
 	 */
+	 /*如何设置了中断线程，则会创建中断对应的内核线程*/
 	if (new->thread_fn && !nested) {
 		ret = setup_irq_thread(new, irq, false);
 		if (ret)
@@ -1495,11 +1515,13 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * Strictly no need to wake it up, but hung_task complains
 	 * when no hard interrupt wakes the thread up.
 	 */
+	 /*唤醒中断线程*/
 	if (new->thread)
 		wake_up_process(new->thread);
 	if (new->secondary)
 		wake_up_process(new->secondary->thread);
 
+	/*注册相关的/proc文件节点*/
 	register_irq_proc(irq, desc);
 	new->dir = NULL;
 	register_handler_proc(irq, new);
@@ -1798,6 +1820,12 @@ EXPORT_SYMBOL(free_irq);
  *	IRQF_TRIGGER_*		Specify active edge(s) or level
  *
  */
+/*
+	函数先是根据irq编号取出对应的irq_desc实例的指针，然后分配了一个irqaction结构，
+	用参数handler，thread_fn，irqflags，devname，dev_id初始化irqaction结构的各字段，
+	同时做了一些必要的条件判断：该irq是否禁止申请？handler和thread_fn不允许同时为NULL，
+	最后把大部分工作委托给__setup_irq函数。
+*/
 int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 			 irq_handler_t thread_fn, unsigned long irqflags,
 			 const char *devname, void *dev_id)

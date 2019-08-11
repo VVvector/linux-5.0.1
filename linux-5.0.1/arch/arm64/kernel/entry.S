@@ -398,6 +398,12 @@ tsk	.req	x28		// current thread_info
 /*
  * Interrupt handling.
  */
+/*
+el0_irq, el1_irq会调用到。
+handle_arch_irq 是一个全局函数变量，通过函数 set_handle_irq (handler.c)将该变量设置上
+并提供给 setup.S 中的 irq_handler 执行，也就是异常向量表也就可以执行到当前位置。
+其实最终调用的irq-gic-v3.c中的gic_handle_irq()。
+*/
 	.macro	irq_handler
 	ldr_l	x1, handle_arch_irq
 	mov	x0, sp
@@ -411,6 +417,11 @@ tsk	.req	x28		// current thread_info
 /*
  * Exception vectors.
  */
+/*
+	对于一些硬件资源的访问，一般都是存在一些寄存器提供访问的，同时为了让 CPU 也能按照预期执行，
+	会设置一些基址供给 CPU 在某些情况下调用，比如异常向量表就是这样的一个寄存器，
+	他需要你告诉 CPU 在发生异常时如何处理。	
+*/
 	.pushsection ".entry.text", "ax"
 
 	.align	11
@@ -420,13 +431,15 @@ ENTRY(vectors)
 	kernel_ventry	1, fiq_invalid			// FIQ EL1t
 	kernel_ventry	1, error_invalid		// Error EL1t
 
+	/*在kernel时，发生异常*/
 	kernel_ventry	1, sync				// Synchronous EL1h
-	kernel_ventry	1, irq				// IRQ EL1h
+	kernel_ventry	1, irq				// IRQ EL1h (el1_irq)
 	kernel_ventry	1, fiq_invalid			// FIQ EL1h
 	kernel_ventry	1, error			// Error EL1h
 
+	/*在userspace时，发生异常*/
 	kernel_ventry	0, sync				// Synchronous 64-bit EL0
-	kernel_ventry	0, irq				// IRQ 64-bit EL0
+	kernel_ventry	0, irq				// IRQ 64-bit EL0 (el0_irq)
 	kernel_ventry	0, fiq_invalid			// FIQ 64-bit EL0
 	kernel_ventry	0, error			// Error 64-bit EL0
 

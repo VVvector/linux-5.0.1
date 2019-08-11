@@ -1137,6 +1137,8 @@ static int __init gic_init_bases(void __iomem *dist_base,
 			pr_err("Failed to initialize MBIs\n");
 	}
 
+	/*注册handle_arch_irq回调函数， 当CPU捕获到中断异常后，最终可以进入到gic_handler_irq函数中，
+	这个就是当前的中断处理的入口函数，通过它可以查表等获取到最终是哪一个中断号发生的中断。*/
 	set_handle_irq(gic_handle_irq);
 
 	gic_update_vlpi_properties();

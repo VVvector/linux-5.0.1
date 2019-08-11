@@ -26,6 +26,8 @@ extern struct of_device_id __irqchip_of_table[];
 
 void __init irqchip_init(void)
 {
+	/*__irqchip_of_table 就是内核irq chip table的首地址，这个table也就保存了kernel支持的所有的中断控制器
+	的驱动代码初始化函数和DT compatible string的对应关系。*/
 	of_irq_init(__irqchip_of_table);
 	acpi_probe_device_table(irqchip);
 }

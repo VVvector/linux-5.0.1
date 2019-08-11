@@ -462,6 +462,7 @@ __primary_switched:
 	adr_l	x5, init_task
 	msr	sp_el0, x5			// Save thread_info
 
+	/*设定异常向量表*/
 	adr_l	x8, vectors			// load VBAR_EL1 with virtual
 	msr	vbar_el1, x8			// vector table address
 	isb
@@ -766,6 +767,11 @@ secondary_startup:
 ENDPROC(secondary_startup)
 
 __secondary_switched:
+	/*
+	设定异常向量表:
+		将vectors的值赋值给 vbar_el1 寄存器，相当于告诉CPU我们的异常向量表位置何在。
+		CPU通过自己的判断，观察异常发生的类型，跳转到对应的异常处理函数中。
+	*/
 	adr_l	x5, vectors
 	msr	vbar_el1, x5
 	isb

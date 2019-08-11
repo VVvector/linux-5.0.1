@@ -350,6 +350,8 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 }
 #endif
 
+/*第一阶段的执行都是用汇编写的，开始进入el1的中断向量入口，
+然后会调用到handle_arch_irq，此变量为全局的，会在中断控制器初始化的时候设置函数变量*/
 static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 {
 	u32 irqstat, irqnr;
@@ -364,6 +366,7 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 			if (static_branch_likely(&supports_deactivate_key))
 				writel_relaxed(irqstat, cpu_base + GIC_CPU_EOI);
 			isb();
+			/*进入irq处理第二阶段*/
 			handle_domain_irq(gic->domain, irqnr, regs);
 			continue;
 		}

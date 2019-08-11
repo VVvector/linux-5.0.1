@@ -38,6 +38,9 @@ struct irqaction chained_action = {
  *	@irq:	irq number
  *	@chip:	pointer to irq chip description structure
  */
+/*
+	通过irq编号，设置irq_chip结构指针
+*/
 int irq_set_chip(unsigned int irq, struct irq_chip *chip)
 {
 	unsigned long flags;
@@ -65,6 +68,9 @@ EXPORT_SYMBOL(irq_set_chip);
  *	@irq:	irq number
  *	@type:	IRQ_TYPE_{LEVEL,EDGE}_* value - see include/linux/irq.h
  */
+/*
+	用于设置中断的电气类型。 例如：IRQ_TYPE_EDGE_RISING...
+*/
 int irq_set_irq_type(unsigned int irq, unsigned int type)
 {
 	unsigned long flags;
@@ -87,6 +93,11 @@ EXPORT_SYMBOL(irq_set_irq_type);
  *
  *	Set the hardware irq controller data for an irq
  */
+/*
+	通过irq编号， 设置irq_desc.irq_common_data.handler_data字段，该字段
+	时每个irq的私有数据，通常用于硬件封装层。例如中断控制器级联时，
+	父irq用该字段保存子irq的起始编号。
+*/
 int irq_set_handler_data(unsigned int irq, void *data)
 {
 	unsigned long flags;
@@ -142,6 +153,10 @@ int irq_set_msi_desc(unsigned int irq, struct msi_desc *entry)
  *
  *	Set the hardware irq chip data for an irq
  */
+/*
+	通过irq编号，设置irq_desc.irq_data.chip_data字段，该字段是每个中断控制器
+	的私有数据，通常用于硬件封装层。
+*/
 int irq_set_chip_data(unsigned int irq, void *data)
 {
 	unsigned long flags;
@@ -155,6 +170,7 @@ int irq_set_chip_data(unsigned int irq, void *data)
 }
 EXPORT_SYMBOL(irq_set_chip_data);
 
+/*通过irq编号，获取irq_data结构指针*/
 struct irq_data *irq_get_irq_data(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
@@ -374,6 +390,9 @@ static void __irq_disable(struct irq_desc *desc, bool mask)
  * device level under certain circumstances and have to use
  * disable_irq[_nosync] instead.
  */
+/*
+	实际最终会调用irq对应的chip的 irq_disable() API.
+*/
 void irq_disable(struct irq_desc *desc)
 {
 	__irq_disable(desc, irq_settings_disable_unlazy(desc));
@@ -449,6 +468,13 @@ void unmask_threaded_irq(struct irq_desc *desc)
  *	handler. The handler function is called inside the calling
  *	threads context.
  */
+/*用于处理使用线程的嵌套中断
+	该函数用于实现其中一种中断共享机制，当多个中断共享某一根中断线时，我们可以把这个中断线作为父中断，
+	共享该中断的各个设备作为子中断，在父中断的中断线程中决定和分发响应哪个设备的请求，在得出真正发出请求的子设备后，
+	调用handle_nested_irq来响应中断。所以，该函数是在进程上下文执行的，我们也无需扫描和执行irq_desc结构中的action链表。
+	父中断在初始化时必须通过irq_set_nested_thread函数明确告知中断子系统：这些子中断属于线程嵌套中断类型，
+	这样驱动程序在申请这些子中断时，内核不会为它们建立自己的中断线程，所有的子中断共享父中断的中断线程。
+*/
 void handle_nested_irq(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
@@ -529,6 +555,11 @@ static bool irq_may_run(struct irq_desc *desc)
  *	Note: The caller is expected to handle the ack, clear, mask and
  *	unmask issues if necessary.
  */
+ /*用于简易流控处理
+	该函数没有实现任何实质性的流控操作，在把irq_desc结构锁住后，直接调用handle_irq_event处理irq_desc中的action链表，
+	它通常用于多路复用（类似于中断控制器级联）中的子中断，由父中断的流控回调中调用。
+	或者用于无需进行硬件控制的中断中。
+*/
 void handle_simple_irq(struct irq_desc *desc)
 {
 	raw_spin_lock(&desc->lock);
@@ -621,6 +652,34 @@ static void cond_unmask_irq(struct irq_desc *desc)
  *	it after the associated handler has acknowledged the device, so the
  *	interrupt line is back to inactive.
  */
+ /*用于电平触发中断的流控处理
+	电平中断的特点是，只要设备的中断请求引脚（中断线）保持在预设的触发电平，中断就会一直被请求，
+	所以，为了避免同一中断被重复响应，必须在处理中断前先把mask irq，然后ack irq，以便复位设备的中断请求引脚，
+	响应完成后再unmask irq。
+
+	实际的情况稍稍复杂一点，在mask和ack之后，还要判断IRQ_INPROGRESS标志位，
+	如果该标志已经置位，则直接退出，不再做实质性的处理，IRQ_INPROGRESS标志在handle_irq_event的开始设置，
+	在handle_irq_event结束时清除，如果监测到IRQ_INPROGRESS被置位，表明该irq正在被另一个CPU处理中，
+	所以直接退出，对电平中断来说是正确的处理方法。
+
+	但是我觉得在ARM系统中，这种情况根本就不会发生，因为在没有进入handle_level_irq之前，中断控制器没有收到ack通知，
+	它不会向第二个CPU再次发出中断请求，而当程序进入handle_level_irq之后，第一个动作就是mask irq，然后ack irq
+	（通常是联合起来的：mask_ack_irq），这时候就算设备再次发出中断请求，也是在handle_irq_event结束，
+	unmask irq之后，这时IRQ_INPROGRESS标志已经被清除。
+*/
+
+/*
+注意：
+	虽然handle_level_irq对电平中断的流控进行了必要的处理，因为电平中断的特性：只要没有ack irq，
+	中断线会一直有效，所以我们不会错过某次中断请求，但是驱动程序的开发人员如果对该过程理解不透彻，
+	特别容易发生某次中断被多次处理的情况。特别是使用了中断线程（action->thread_fn）来响应中断的时候：
+	通常mask_ack_irq只会清除中断控制器的pending状态，很多慢速设备（例如通过i2c或spi控制的设备）
+	需要在中断线程中清除中断线的pending状态，但是未等到中断线程被调度执行的时候，handle_level_irq早就返回了，
+	这时已经执行过unmask_irq，设备的中断线pending处于有效状态，中断控制器会再次发出中断请求，
+	结果是设备的一次中断请求，产生了两次中断响应。要避免这种情况，最好的办法就是不要单独使用中断线程处理中断，
+	而是要实现request_threaded_irq()的第二个参数irq_handler_t：handler，在handle回调中使用disable_irq()关闭该irq，
+	然后在退出中断线程回调前再enable_irq()。
+*/
 void handle_level_irq(struct irq_desc *desc)
 {
 	raw_spin_lock(&desc->lock);
@@ -690,6 +749,13 @@ static void cond_unmask_eoi_irq(struct irq_desc *desc, struct irq_chip *chip)
  *	for modern forms of interrupt handlers, which handle the flow
  *	details in hardware, transparently.
  */
+ /*用于需要响应eoi的中断控制器
+	现代的中断控制器通常会在硬件上实现了中断流控功能，例如ARM体系中的GIC通用中断控制器。
+	对于这种中断控制器，CPU只需要在每次处理完中断后发出一个end of interrupt（eoi），
+	我们无需关注何时mask，何时unmask。不过虽然想着很完美，事情总有特殊的时候，
+	所以内核还是给了我们插手的机会，它利用irq_desc结构中的preflow_handler字段，
+	在正式处理中断前会通过preflow_handler函数调用该回调。
+*/
 void handle_fasteoi_irq(struct irq_desc *desc)
 {
 	struct irq_chip *chip = desc->irq_data.chip;
@@ -715,6 +781,7 @@ void handle_fasteoi_irq(struct irq_desc *desc)
 	if (desc->istate & IRQS_ONESHOT)
 		mask_irq(desc);
 
+	/*给开发人员做自己的逻辑的地方*/
 	preflow_handler(desc);
 	handle_irq_event(desc);
 
@@ -744,6 +811,15 @@ EXPORT_SYMBOL_GPL(handle_fasteoi_irq);
  *	the handler was running. If all pending interrupts are handled, the
  *	loop is left.
  */
+/*用于边沿触发中断的流控处理
+	边沿触发中断的特点是，只有设备的中断请求引脚（中断线）的电平发生跳变时（由高变低或者有低变高），
+	才会发出中断请求，因为跳变是一瞬间，而且不会像电平中断能保持住电平，所以处理不当就特别容易漏掉一次中断请求，
+	为了避免这种情况，屏蔽中断的时间必须越短越好。内核的开发者们显然意识到这一点，在正式处理中断前，
+	判断IRQ_PROGRESS标志没有被设置的情况下，只是ack irq，并没有mask irq，以便复位设备的中断请求引脚，
+	在这之后的中断处理期间，另外的cpu可以再次响应同一个irq请求，如果IRQ_PROGRESS已经置位，
+	表明另一个CPU正在处理该irq的上一次请求，这种情况下，他只是简单地设置IRQS_PENDING标志，
+	然后mask_ack_irq后退出，中断请求交由原来的CPU继续处理。因为是mask_ack_irq，所以系统实际上只允许挂起一次中断。
+*/
 void handle_edge_irq(struct irq_desc *desc)
 {
 	raw_spin_lock(&desc->lock);
@@ -769,8 +845,14 @@ void handle_edge_irq(struct irq_desc *desc)
 	kstat_incr_irqs_this_cpu(desc);
 
 	/* Start handling the irq */
+	/*只是ack该irq*/
 	desc->irq_data.chip->irq_ack(&desc->irq_data);
 
+	/*处理中断期间，另一次请求可能由另一个cpu响应后挂起，所以在处理完本次请求后还要判断IRQS_PENDING标志，
+	如果被置位，当前cpu要接着处理被另一个cpu“委托”的请求。内核在这里设置了一个循环来处理这种情况，
+	直到IRQS_PENDING标志无效为止，而且因为另一个cpu在响应并挂起irq时，会mask irq，所以在循环中要再次unmask irq，
+	以便另一个cpu可以再次响应并挂起irq
+	*/
 	do {
 		if (unlikely(!desc->action)) {
 			mask_irq(desc);
@@ -851,6 +933,10 @@ out_eoi:
  *
  *	Per CPU interrupts on SMP machines without locking requirements
  */
+ /*用于只在单一cpu响应的中断
+	该函数用于smp系统，当某个irq只在一个cpu上处理时，我们可以无需用自旋锁对数据进行保护，
+	也无需处理cpu之间的中断嵌套重入
+*/
 void handle_percpu_irq(struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_desc_get_chip(desc);
@@ -978,6 +1064,7 @@ __irq_do_set_handler(struct irq_desc *desc, irq_flow_handler_t handle,
 	}
 }
 
+/*可用于设置irq流控函数*/
 void
 __irq_set_handler(unsigned int irq, irq_flow_handler_t handle, int is_chained,
 		  const char *name)
@@ -1010,6 +1097,7 @@ irq_set_chained_handler_and_data(unsigned int irq, irq_flow_handler_t handle,
 }
 EXPORT_SYMBOL_GPL(irq_set_chained_handler_and_data);
 
+/*可用于设置irq的流控函数*/
 void
 irq_set_chip_and_handler_name(unsigned int irq, struct irq_chip *chip,
 			      irq_flow_handler_t handle, const char *name)

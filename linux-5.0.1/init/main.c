@@ -688,9 +688,11 @@ asmlinkage __visible void __init start_kernel(void)
 
 	context_tracking_init();
 	/* init some links before init_ISA_irqs() */
-	/*早期外部中断描述初始化*/
+	/*中断子系统初始化1: 
+		irq_desc结构体分配资源，填充默认值*/
 	early_irq_init();
-	/*架构相关中断初始化*/
+	/*中断子系统初始化2：
+		初始化irq_desc，注册中断控制器驱动*/
 	init_IRQ();
 	/*初始化时钟滴答控制器*/
 	tick_init();

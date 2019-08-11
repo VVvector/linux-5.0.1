@@ -170,6 +170,9 @@ struct irq_common_data {
  * @chip_data:		platform-specific per-chip private data for the chip
  *			methods, to allow shared chip implementations
  */
+/*
+经常需要用的成员， irq_chip的api的入参基本是irq_data。
+*/
 struct irq_data {
 	u32			mask;
 	unsigned int		irq;
@@ -444,22 +447,39 @@ static inline irq_hw_number_t irqd_to_hwirq(struct irq_data *d)
  * @ipi_send_mask:	send an IPI to destination cpus in cpumask
  * @flags:		chip specific flags
  */
+/*
+	通用中断子系统把中断控制器抽象为一个数据结构 struct irq_chip。
+	
+	根据设备使用的中断控制器的类型，体系架构的底层的开发只要实现上述接口中的各个回调函数，
+	然后把它们填充到irq_chip结构的实例中，最终把该irq_chip实例注册到irq_desc.irq_data.chip字段中，
+	这样各个irq和中断控制器就进行了关联，只要知道irq编号，即可得到对应到irq_desc结构，
+	进而可以通过chip指针访问中断控制器。
+*/
 struct irq_chip {
 	struct device	*parent_device;
+	/*中断控制器的名字，会出现在/proc/interrupts中*/
 	const char	*name;
 	unsigned int	(*irq_startup)(struct irq_data *data);
 	void		(*irq_shutdown)(struct irq_data *data);
+	/*使能该irq，通常直接调用irq_unmask()*/
 	void		(*irq_enable)(struct irq_data *data);
+	/*失能该irq，通常直接调用irq_mask()
+	注： disable表示中断控制器根本就不响应该irq，而mask时，中断控制器可能响应该irq，只是不通知CPU，
+	这时，该irq处于pending状态。*/
 	void		(*irq_disable)(struct irq_data *data);
 
+	/*用于CPU对irq的回应，通常表示cpu希望要清除该irq的pending状态，准备接受下一个irq请求。*/
 	void		(*irq_ack)(struct irq_data *data);
 	void		(*irq_mask)(struct irq_data *data);
 	void		(*irq_mask_ack)(struct irq_data *data);
 	void		(*irq_unmask)(struct irq_data *data);
 	void		(*irq_eoi)(struct irq_data *data);
 
+	/*用于设置该irq和cpu之间的亲缘关系，就是通知中断控制器，该irq发生时，那些cpu有权响应该irq。
+	当然，中断控制器会在软件的配合下，最终只会让一个cpu处理本次请求。*/
 	int		(*irq_set_affinity)(struct irq_data *data, const struct cpumask *dest, bool force);
 	int		(*irq_retrigger)(struct irq_data *data);
+	/*设置irq的电气触发条件，例 IRQ_TYPE_LEVEL_HIGH, IRQ_TYPE_EDGE_RISING*/
 	int		(*irq_set_type)(struct irq_data *data, unsigned int flow_type);
 	int		(*irq_set_wake)(struct irq_data *data, unsigned int on);
 
@@ -630,10 +650,12 @@ extern int can_request_irq(unsigned int irq, unsigned long irqflags);
 extern struct irq_chip no_irq_chip;
 extern struct irq_chip dummy_irq_chip;
 
+/*同时设置中断流控回调字段和irq_chip指针：irq_desc.handle_irq和irq_desc.irq_data.chip。*/
 extern void
 irq_set_chip_and_handler_name(unsigned int irq, struct irq_chip *chip,
 			      irq_flow_handler_t handle, const char *name);
 
+/*同时设置中断流控回调字段和irq_chip指针以及irq名字：irq_desc.handle_irq、irq_desc.irq_data.chip、irq_desc.name。*/
 static inline void irq_set_chip_and_handler(unsigned int irq, struct irq_chip *chip,
 					    irq_flow_handler_t handle)
 {
@@ -650,6 +672,7 @@ extern void
 __irq_set_handler(unsigned int irq, irq_flow_handler_t handle, int is_chained,
 		  const char *name);
 
+/*可用于设置irq的流控函数, irq_desc.handle_irq，参数handle的类型是irq_flow_handler_t。*/
 static inline void
 irq_set_handler(unsigned int irq, irq_flow_handler_t handle)
 {
@@ -661,6 +684,12 @@ irq_set_handler(unsigned int irq, irq_flow_handler_t handle)
  * (a chained handler is automatically enabled and set to
  *  IRQ_NOREQUEST, IRQ_NOPROBE, and IRQ_NOTHREAD)
  */
+/*
+ 在中断控制器的级联场景：
+ 	用于设置根控制器与子控制器相连的irq所对应的irq_desc.handle_irq()回调函数。
+ 	并且设置IRQ_NOPROBE和IRQ_NOTHREAD以及IRQ_NOREQUEST标志，这几个标志保证驱动程序不会错误地申请该irq，
+ 	因为该irq已经被作为级联irq使用。
+*/
 static inline void
 irq_set_chained_handler(unsigned int irq, irq_flow_handler_t handle)
 {
@@ -739,6 +768,7 @@ static inline struct irq_chip *irq_get_chip(unsigned int irq)
 	return d ? d->chip : NULL;
 }
 
+/*通过irq_data指针，获取irq_chip字段*/
 static inline struct irq_chip *irq_data_get_irq_chip(struct irq_data *d)
 {
 	return d->chip;
@@ -750,6 +780,7 @@ static inline void *irq_get_chip_data(unsigned int irq)
 	return d ? d->chip_data : NULL;
 }
 
+/*通过irq_data指针，获取chip_data字段*/
 static inline void *irq_data_get_irq_chip_data(struct irq_data *d)
 {
 	return d->chip_data;
@@ -761,6 +792,7 @@ static inline void *irq_get_handler_data(unsigned int irq)
 	return d ? d->common->handler_data : NULL;
 }
 
+/*通过irq_data指针，获取handler_data字段*/
 static inline void *irq_data_get_irq_handler_data(struct irq_data *d)
 {
 	return d->common->handler_data;

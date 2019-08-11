@@ -132,6 +132,7 @@ EXPORT_SYMBOL_GPL(nr_irqs);
 static DEFINE_MUTEX(sparse_irq_lock);
 static DECLARE_BITMAP(allocated_irqs, IRQ_BITMAP_BITS);
 
+/*基于基数分配irq_desc*/
 #ifdef CONFIG_SPARSE_IRQ
 
 static void irq_kobj_release(struct kobject *kobj);
@@ -540,6 +541,7 @@ struct irq_desc irq_desc[NR_IRQS] __cacheline_aligned_in_smp = {
 	}
 };
 
+/*初始化irq_desc结构体*/
 int __init early_irq_init(void)
 {
 	int count, i, node = first_online_node;
@@ -619,6 +621,14 @@ void irq_init_desc(unsigned int irq)
  * @irq:	The irq number to handle
  *
  */
+/*
+根据virq找到irq_desc，然后调用irq_desc->handle_irq，这里handle_irq是在申请中断的时候被设置，
+不过不管被设置成哪个函数最后都会调用handle_irq_event,此时进入第三阶段。
+注：
+chip.c:
+	可能是 handle_level_irq() -->handle_irq_event() -->action->handler
+	可能是 handle_edge_irq() -->ack_irq() -->handle_irq_event() -->action->handler
+*/
 int generic_handle_irq(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
@@ -662,6 +672,7 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 		ack_bad_irq(irq);
 		ret = -EINVAL;
 	} else {
+		/*根据virq找到irq_desc，然后调用irq_desc->handle_irq.*/
 		generic_handle_irq(irq);
 	}
 

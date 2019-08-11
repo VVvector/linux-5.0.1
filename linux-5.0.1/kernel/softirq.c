@@ -53,6 +53,7 @@ DEFINE_PER_CPU_ALIGNED(irq_cpustat_t, irq_stat);
 EXPORT_PER_CPU_SYMBOL(irq_stat);
 #endif
 
+/*与10种类型的软件中断对应*/
 static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
 
 DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
@@ -246,6 +247,24 @@ static inline bool lockdep_softirq_start(void) { return false; }
 static inline void lockdep_softirq_end(bool in_hardirq) { }
 #endif
 
+/*处理软中断流程:
+	1. 首先取出pending的状态；
+	2. 禁止软中断，主要是为了防止和软中断守护进程发生竞争；
+	3. 清除所有的软中断待决标志；
+	4. 打开本地cpu中断；
+	5. 循环执行待决软中断的回调函数；
+	6. 如果循环完毕，发现新的软中断被触发，则重新启动循环，直到以下条件满足，才退出：
+	    没有新的软中断等待执行；
+	    循环已经达到最大的循环次数MAX_SOFTIRQ_RESTART，目前的设定值时10次；
+
+	6. 如果经过MAX_SOFTIRQ_RESTART次循环后还未处理完，则激活守护进程，处理剩下的软中断；
+	7. 退出前恢复软中断；
+
+注：
+	ksoftirqd守护进程最终也会调用__do_softirq执行软中断的回调，具体的代码位于 run_ksoftirqd 函数中，
+	内核会关闭抢占的情况下执行__do_softirq
+
+*/
 asmlinkage __visible void __softirq_entry __do_softirq(void)
 {
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
@@ -289,6 +308,7 @@ restart:
 		kstat_incr_softirqs_this_cpu(vec_nr);
 
 		trace_softirq_entry(vec_nr);
+		/**/
 		h->action(h);
 		trace_softirq_exit(vec_nr);
 		if (unlikely(prev_count != preempt_count())) {
@@ -311,6 +331,7 @@ restart:
 		    --max_restart)
 			goto restart;
 
+		/*唤醒ksoftirqd*/
 		wakeup_softirqd();
 	}
 
@@ -358,6 +379,7 @@ void irq_enter(void)
 	__irq_enter();
 }
 
+/*软中断处理*/
 static inline void invoke_softirq(void)
 {
 	if (ksoftirqd_running(local_softirq_pending()))
@@ -400,6 +422,15 @@ static inline void tick_irq_exit(void)
 /*
  * Exit an interrupt context. Process softirqs if needed and possible:
  */
+/*
+	基于上面所说，软中断的执行既可以守护进程中执行，也可以在中断的退出阶段执行。
+	实际上，软中断更多的是在中断的退出阶段执行（irq_exit），以便达到更快的响应，
+	加入守护进程机制，只是担心一旦有大量的软中断等待执行，会使得内核过长地留在中断上下文中。
+
+	如果中断发生嵌套，in_interrupt()保证了只有在最外层的中断的irq_exit阶段，
+	invoke_interrupt才会被调用，当然，local_softirq_pending也会实现判断当前cpu有无待决的软中断。
+	代码最终会进入__do_softirq中，内核会保证调用__do_softirq时，本地cpu的中断处于关闭状态，进入__do_softirq：
+*/
 void irq_exit(void)
 {
 #ifndef __ARCH_IRQ_EXIT_IRQS_DISABLED
@@ -410,7 +441,7 @@ void irq_exit(void)
 	account_irq_exit_time(current);
 	preempt_count_sub(HARDIRQ_OFFSET);
 	if (!in_interrupt() && local_softirq_pending())
-		invoke_softirq();
+		invoke_softirq(); //软中断处理阶段
 
 	tick_irq_exit();
 	rcu_irq_exit();
@@ -420,6 +451,12 @@ void irq_exit(void)
 /*
  * This function must run with irqs disabled!
  */
+/*
+	先是通过__raise_softirq_irqoff设置cpu的软中断pending标志位（irq_stat[NR_CPUS] ），
+	然后通过in_interrupt判断现在是否在中断上下文中，或者软中断是否被禁止，如果都不成立，
+	则唤醒软中断的守护进程，在守护进程中执行软中断的回调函数。否则什么也不做，
+	软中断将会在中断的退出阶段被执行。
+*/
 inline void raise_softirq_irqoff(unsigned int nr)
 {
 	__raise_softirq_irqoff(nr);
@@ -437,6 +474,7 @@ inline void raise_softirq_irqoff(unsigned int nr)
 		wakeup_softirqd();
 }
 
+/*触发一个软中断*/
 void raise_softirq(unsigned int nr)
 {
 	unsigned long flags;
@@ -465,6 +503,7 @@ struct tasklet_head {
 	struct tasklet_struct **tail;
 };
 
+/*内核为每个cpu用定义了一个tasklet_head结构，用于管理每个cpu上的tasklet的调度和执行*/
 static DEFINE_PER_CPU(struct tasklet_head, tasklet_vec);
 static DEFINE_PER_CPU(struct tasklet_head, tasklet_hi_vec);
 
@@ -484,6 +523,11 @@ static void __tasklet_schedule_common(struct tasklet_struct *t,
 	local_irq_restore(flags);
 }
 
+/*调度tasklet 1：
+	如果TASKLET_STATE_SCHED标志为0，则置位TASKLET_STATE_SCHED，
+	然后把tasklet挂到该cpu等待执行的tasklet链表上，
+	接着发出TASKLET_SOFTIRQ软件中断请求。
+*/
 void __tasklet_schedule(struct tasklet_struct *t)
 {
 	__tasklet_schedule_common(t, &tasklet_vec,
@@ -491,6 +535,9 @@ void __tasklet_schedule(struct tasklet_struct *t)
 }
 EXPORT_SYMBOL(__tasklet_schedule);
 
+/*调度tasklet：
+	效果同上，区别是它发出的是HI_SOFTIRQ软件中断请求。
+*/
 void __tasklet_hi_schedule(struct tasklet_struct *t)
 {
 	__tasklet_schedule_common(t, &tasklet_hi_vec,
@@ -498,6 +545,23 @@ void __tasklet_hi_schedule(struct tasklet_struct *t)
 }
 EXPORT_SYMBOL(__tasklet_hi_schedule);
 
+/*
+	关闭本地中断的前提下，移出当前cpu的待处理tasklet链表到一个临时链表后，
+	清除当前cpu的tasklet链表，之所以这样处理，是为了处理当前tasklet链表的时候，
+	允许新的tasklet被调度进待处理链表中。
+	
+	遍历临时链表，用tasklet_trylock判断当前tasklet是否已经在其他cpu上运行，而且tasklet没有被禁止：
+    	1. 如果没有运行，也没有禁止，则清除TASKLET_STATE_SCHED状态位，执行tasklet的回调函数。
+    	2. 如果已经在运行，或者被禁止，则把该tasklet重新添加会当前cpu的待处理tasklet链表上，
+    	   然后触发TASKLET_SOFTIRQ软中断，等待下一次软中断时再次执行。
+
+注意：
+	1. 同一个tasklet只能同时在一个cpu上执行，但不同的tasklet可以同时在不同的cpu上执行；
+	2. 一旦tasklet_schedule被调用，内核会保证tasklet一定会在某个cpu上执行一次；
+	3. 如果tasklet_schedule被调用时，tasklet不是出于正在执行状态，则它只会执行一次；
+	4. 如果tasklet_schedule被调用时，tasklet已经正在执行，则它会在稍后被调度再次被执行；
+	5. 两个tasklet之间如果有资源冲突，应该要用自旋锁进行同步保护；
+*/
 static void tasklet_action_common(struct softirq_action *a,
 				  struct tasklet_head *tl_head,
 				  unsigned int softirq_nr)
@@ -520,6 +584,7 @@ static void tasklet_action_common(struct softirq_action *a,
 				if (!test_and_clear_bit(TASKLET_STATE_SCHED,
 							&t->state))
 					BUG();
+				/*tasklet的回调函数*/
 				t->func(t->data);
 				tasklet_unlock(t);
 				continue;
@@ -536,16 +601,21 @@ static void tasklet_action_common(struct softirq_action *a,
 	}
 }
 
+/*TASKLET_SOFTIRQ的中断回调函数是tasklet_action*/
 static __latent_entropy void tasklet_action(struct softirq_action *a)
 {
 	tasklet_action_common(a, this_cpu_ptr(&tasklet_vec), TASKLET_SOFTIRQ);
 }
 
+/*HI_SOFTIRQ的中断回调函数是tasklet_action*/
 static __latent_entropy void tasklet_hi_action(struct softirq_action *a)
 {
 	tasklet_action_common(a, this_cpu_ptr(&tasklet_hi_vec), HI_SOFTIRQ);
 }
 
+/*用于动态初始化tasklet时， 对tasklet进行初始化。
+	默认tasklet处于enable状态
+*/
 void tasklet_init(struct tasklet_struct *t,
 		  void (*func)(unsigned long), unsigned long data)
 {
@@ -557,6 +627,10 @@ void tasklet_init(struct tasklet_struct *t,
 }
 EXPORT_SYMBOL(tasklet_init);
 
+/*销毁tasklet：
+	如果tasklet处于TASKLET_STATE_SCHED状态，或者tasklet正在执行，
+	则会等待tasklet执行完毕，然后清除TASKLET_STATE_SCHED状态。
+*/
 void tasklet_kill(struct tasklet_struct *t)
 {
 	if (in_interrupt())
@@ -623,6 +697,9 @@ void tasklet_hrtimer_init(struct tasklet_hrtimer *ttimer,
 }
 EXPORT_SYMBOL_GPL(tasklet_hrtimer_init);
 
+/*
+	软中断初始化
+*/
 void __init softirq_init(void)
 {
 	int cpu;
@@ -634,6 +711,7 @@ void __init softirq_init(void)
 			&per_cpu(tasklet_hi_vec, cpu).head;
 	}
 
+	/*内核注册了TASKLET_SOFTIRQ和HI_SOFTIRQ这两个软中断，用于tasklet*/
 	open_softirq(TASKLET_SOFTIRQ, tasklet_action);
 	open_softirq(HI_SOFTIRQ, tasklet_hi_action);
 }
@@ -643,6 +721,15 @@ static int ksoftirqd_should_run(unsigned int cpu)
 	return local_softirq_pending();
 }
 
+/*ksoftirqd守护进程，可用于执行软中断。
+    1. 在irq_exit中执行软中断，但是在经过MAX_SOFTIRQ_RESTART次循环后，软中断还未处理完，
+    这种情况虽然极少发生，但毕竟有可能；
+
+    2. 内核的其它代码主动调用raise_softirq，而这时正好不是在中断上下文中，守护进程将被唤醒；
+
+守护进程最终也会调用__do_softirq执行软中断的回调，具体的代码位于run_ksoftirqd函数中，
+内核会关闭抢占的情况下执行__do_softirq，具体的过程这里不做讨论。
+*/
 static void run_ksoftirqd(unsigned int cpu)
 {
 	local_irq_disable();

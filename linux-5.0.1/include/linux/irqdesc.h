@@ -52,10 +52,17 @@ struct pt_regs;
  * @debugfs_file:	dentry for the debugfs file
  * @name:		flow handler name for /proc/interrupts output
  */
+/*
+整个通用中断子系统几乎都是围绕着irq_desc结构进行，系统中每一个irq都对应着一个irq_desc结构。
+所有的irq_desc结构的组织方式有两种：基于数组方式，基于基数树方式[CONFIG_SPARSE_IRQ]。
+
+*/
 struct irq_desc {
 	struct irq_common_data	irq_common_data;
 	struct irq_data		irq_data;
 	unsigned int __percpu	*kstat_irqs;
+	/*中断子系统的流控处理函数，在注册irq时赋值。
+	例：handler_simple_irq(), handle_level_irq()....*/
 	irq_flow_handler_t	handle_irq;
 #ifdef CONFIG_IRQ_PREFLOW_FASTEOI
 	irq_preflow_handler_t	preflow_handler;
@@ -149,6 +156,9 @@ static inline void *irq_desc_get_handler_data(struct irq_desc *desc)
  * Architectures call this to let the generic IRQ layer
  * handle an interrupt.
  */
+/*
+
+*/
 static inline void generic_handle_irq_desc(struct irq_desc *desc)
 {
 	desc->handle_irq(desc);
@@ -166,6 +176,11 @@ int generic_handle_irq(unsigned int irq);
 int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 			bool lookup, struct pt_regs *regs);
 
+/*第二阶段代码不复杂，首先找到virq，根据virq找到irq_desc，
+然后调用irq_desc->handle_irq，这里handle_irq是在申请中断的时候被设置，
+不过不管被设置成哪个函数最后都会调用handle_irq_event，此时进入第三阶段。
+
+*/
 static inline int handle_domain_irq(struct irq_domain *domain,
 				    unsigned int hwirq, struct pt_regs *regs)
 {

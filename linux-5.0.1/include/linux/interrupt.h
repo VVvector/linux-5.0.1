@@ -476,6 +476,14 @@ extern bool force_irqthreads;
    al. should be converted to tasklets, not to softirqs.
  */
 
+/*
+	内核目前只实现了10种类型的软件中断。
+	内核的开发者们不建议我们擅自增加软件中断的数量，如果需要新的软件中断，
+	尽可能把它们实现为基于软件中断的tasklet形式。
+
+	与上面的枚举值相对应，内核定义了一个softirq_action的结构数组，每种软中断对应数组中的一项：
+	在softirq.c中定义，static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
+*/
 enum
 {
 	HI_SOFTIRQ=0,
@@ -504,6 +512,7 @@ extern const char * const softirq_to_name[NR_SOFTIRQS];
  * asm/hardirq.h to get better cache usage.  KAO
  */
 
+/*内核用softirq_action结构管理软件中断的注册和激活等操作*/
 struct softirq_action
 {
 	void	(*action)(struct softirq_action *);
@@ -526,8 +535,15 @@ extern void softirq_init(void);
 extern void __raise_softirq_irqoff(unsigned int nr);
 
 extern void raise_softirq_irqoff(unsigned int nr);
+/*触发一个软中断*/
 extern void raise_softirq(unsigned int nr);
 
+/*
+在cpu的热插拔阶段，内核为每个cpu创建了一个用于执行软件中断的守护进程ksoftirqd，
+同时定义了一个per_cpu变量用于保存每个守护进程的task_struct结构指针。
+
+大多数情况下，软中断都会在irq_exit阶段被执行，在irq_exit阶段没有处理完的软中断才有可能会在守护进程中执行。
+*/
 DECLARE_PER_CPU(struct task_struct *, ksoftirqd);
 
 static inline struct task_struct *this_cpu_ksoftirqd(void)
@@ -555,6 +571,24 @@ static inline struct task_struct *this_cpu_ksoftirqd(void)
      he makes it with spinlocks.
  */
 
+/*
+	因为内核已经定义好了10种软中断类型，并且不建议我们自行添加额外的软中断，
+	所以对软中断的实现方式，我们主要是做一个简单的了解，对于驱动程序的开发
+	者来说，无需实现自己的软中断。但是，对于某些情况下，我们不希望一些操作
+	直接在中断的handler中执行，但是又希望在稍后的时间里得到快速地处理，这就
+	需要使用tasklet机制。 tasklet是建立在软中断上的一种延迟执行机制，它的实
+	现基于TASKLET_SOFTIRQ和HI_SOFTIRQ这两个软中断类型。
+
+	next：用于把同一个cpu的tasklet链接成一个链表
+	state：用于表示该tasklet的当前状态，
+		   目前只是用了最低的两个bit，分别用于表示已经准备被调度执行和已经在另一个cpu上执行
+	count：用于tasklet对tasklet_disable和tasklet_enable的计数，
+		   count为0时表示允许tasklet执行，否则不允许执行，每次tasklet_disable时，
+		   该值加1，tasklet_enable时该值减1。
+	func：是tasklet被执行时的回调函数指针
+	data：用作回调函数func的参数。
+
+*/
 struct tasklet_struct
 {
 	struct tasklet_struct *next;
@@ -564,9 +598,14 @@ struct tasklet_struct
 	unsigned long data;
 };
 
+/*静态初始化tasklet 1:
+	定义名字为name的tasklet，默认为enable状态，也就是count字段等于0。
+*/
 #define DECLARE_TASKLET(name, func, data) \
 struct tasklet_struct name = { NULL, 0, ATOMIC_INIT(0), func, data }
 
+/*静态初始化tasklet 2:
+	定义名字为name的tasklet，默认为disable状态，也就是count字段等于1。*/
 #define DECLARE_TASKLET_DISABLED(name, func, data) \
 struct tasklet_struct name = { NULL, 0, ATOMIC_INIT(1), func, data }
 
@@ -615,12 +654,14 @@ static inline void tasklet_hi_schedule(struct tasklet_struct *t)
 		__tasklet_hi_schedule(t);
 }
 
+/*tasklet_disable的异步版本，它不会等待tasklet运行完毕。*/
 static inline void tasklet_disable_nosync(struct tasklet_struct *t)
 {
 	atomic_inc(&t->count);
 	smp_mb__after_atomic();
 }
 
+/*通过给count字段加1来禁止一个tasklet，如果tasklet正在运行中，则等待运行完毕才返回（通过TASKLET_STATE_RUN标志）*/
 static inline void tasklet_disable(struct tasklet_struct *t)
 {
 	tasklet_disable_nosync(t);
@@ -628,6 +669,7 @@ static inline void tasklet_disable(struct tasklet_struct *t)
 	smp_mb();
 }
 
+/*使能tasklet，只是简单地给count字段减1。*/
 static inline void tasklet_enable(struct tasklet_struct *t)
 {
 	smp_mb__before_atomic();
