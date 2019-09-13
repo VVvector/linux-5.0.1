@@ -783,6 +783,8 @@ void handle_fasteoi_irq(struct irq_desc *desc)
 
 	/*给开发人员做自己的逻辑的地方*/
 	preflow_handler(desc);
+
+	/*会调用driver owner注册到该irq所有的handler*/
 	handle_irq_event(desc);
 
 	cond_unmask_eoi_irq(desc, chip);
@@ -994,6 +996,7 @@ void handle_percpu_devid_irq(struct irq_desc *desc)
 		chip->irq_eoi(&desc->irq_data);
 }
 
+/*设置desc对应的流控函数. desc->handle_irq*/
 static void
 __irq_do_set_handler(struct irq_desc *desc, irq_flow_handler_t handle,
 		     int is_chained, const char *name)

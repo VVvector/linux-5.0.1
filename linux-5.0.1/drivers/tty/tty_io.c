@@ -844,6 +844,7 @@ static void tty_update_time(struct timespec64 *time)
  *	read calls may be outstanding in parallel.
  */
 
+/*read该tty device时被调用*/
 static ssize_t tty_read(struct file *file, char __user *buf, size_t count,
 			loff_t *ppos)
 {
@@ -862,6 +863,8 @@ static ssize_t tty_read(struct file *file, char __user *buf, size_t count,
 	ld = tty_ldisc_ref_wait(tty);
 	if (!ld)
 		return hung_up_tty_read(file, buf, count, ppos);
+
+	/*调用线路规程的read： n_tty_read()*/
 	if (ld->ops->read)
 		i = ld->ops->read(tty, file, buf, count);
 	else
@@ -1020,6 +1023,7 @@ void tty_write_message(struct tty_struct *tty, char *msg)
  *	write method will not be invoked in parallel for each device.
  */
 
+/*写tty device时，会被调用*/
 static ssize_t tty_write(struct file *file, const char __user *buf,
 						size_t count, loff_t *ppos)
 {
@@ -1040,7 +1044,7 @@ static ssize_t tty_write(struct file *file, const char __user *buf,
 	if (!ld->ops->write)
 		ret = -EIO;
 	else
-		ret = do_tty_write(ld->ops->write, tty, file, buf, count);
+		ret = do_tty_write(ld->ops->write, tty, file, buf, count); //线路规程的write:n_tty_write
 	tty_ldisc_deref(ld);
 	return ret;
 }
@@ -1356,6 +1360,7 @@ struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx)
 	 * If we fail here just call release_tty to clean up.  No need
 	 * to decrement the use counts, as release_tty doesn't care.
 	 */
+	/*调用tty_struct->ld->ops->open(), n_tty_open, 设置通讯参数：速率，校验位等*/
 	retval = tty_ldisc_setup(tty, tty->link);
 	if (retval)
 		goto err_release_tty;
@@ -1977,6 +1982,9 @@ static struct tty_struct *tty_open_by_driver(dev_t device, struct inode *inode,
 			tty = ERR_PTR(retval);
 		}
 	} else { /* Returns with the tty_lock held for now */
+		/*init tty_struct:
+		建立tty_struct和tty_driver之间的关联，将tty_struct->ldisc, tty_struct->port
+		进行赋值*/
 		tty = tty_init_dev(driver, index);
 		mutex_unlock(&tty_mutex);
 	}
@@ -2009,6 +2017,7 @@ out:
  *	tty_mutex
  */
 
+/*open tty设备时会调用*/
 static int tty_open(struct inode *inode, struct file *filp)
 {
 	struct tty_struct *tty;
@@ -2023,6 +2032,7 @@ retry_open:
 	if (retval)
 		return -ENOMEM;
 
+	/*通过dev_t, 在tty_driver链表中查找对应的驱动，并返回本设备在该driver中的index。并初始化tty_struct。*/
 	tty = tty_open_current_tty(device, filp);
 	if (!tty)
 		tty = tty_open_by_driver(device, inode, filp);
@@ -2036,11 +2046,13 @@ retry_open:
 		goto retry_open;
 	}
 
+	/*初始化tty_file_private，并将priv添加到tty_struct->tty_files。*/
 	tty_add_file(tty, filp);
 
 	check_tty_count(tty, __func__);
 	tty_debug_hangup(tty, "opening (count=%d)\n", tty->count);
 
+	/*调用我们tty driver自己的open函数*/
 	if (tty->ops->open)
 		retval = tty->ops->open(tty, filp);
 	else
@@ -3127,11 +3139,11 @@ struct device *tty_register_device_attr(struct tty_driver *driver,
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	dev->devt = devt;
-	dev->class = tty_class;
+	dev->devt = devt; 		//关联设备号
+	dev->class = tty_class; //设置设备类
 	dev->parent = device;
 	dev->release = tty_device_create_release;
-	dev_set_name(dev, "%s", name);
+	dev_set_name(dev, "%s", name); //设置设备节点名字
 	dev->groups = attr_grp;
 	dev_set_drvdata(dev, drvdata);
 
@@ -3152,6 +3164,8 @@ struct device *tty_register_device_attr(struct tty_driver *driver,
 			kfree(tp);
 		}
 
+		/*init cdev driver，例如：init driver ops为tty_fops， 当操作该dev node时，就是回调该ops。
+		eg: open --> tty_open()*/
 		retval = tty_cdev_add(driver, devt, index, 1);
 		if (retval)
 			goto err_del;
@@ -3316,6 +3330,7 @@ int tty_register_driver(struct tty_driver *driver)
 	dev_t dev;
 	struct device *d;
 
+	/*申请设备号*/
 	if (!driver->major) {
 		error = alloc_chrdev_region(&dev, driver->minor_start,
 						driver->num, driver->name);
@@ -3336,10 +3351,13 @@ int tty_register_driver(struct tty_driver *driver)
 			goto err_unreg_char;
 	}
 
+	/*注册tty_drivers到全局链表tty_drivers*/
 	mutex_lock(&tty_mutex);
 	list_add(&driver->tty_drivers, &tty_drivers);
 	mutex_unlock(&tty_mutex);
 
+	/*如果没有设置TTY_DRIVER_DYNAMIC_DEV，自动创建num个字符设备。
+	(在/dev下就会有对应的设备节点了)*/
 	if (!(driver->flags & TTY_DRIVER_DYNAMIC_DEV)) {
 		for (i = 0; i < driver->num; i++) {
 			d = tty_register_device(driver, i, NULL);
@@ -3349,6 +3367,8 @@ int tty_register_driver(struct tty_driver *driver)
 			}
 		}
 	}
+
+	/*创建proc文件*/
 	proc_tty_register_driver(driver);
 	driver->flags |= TTY_DRIVER_INSTALLED;
 	return 0;

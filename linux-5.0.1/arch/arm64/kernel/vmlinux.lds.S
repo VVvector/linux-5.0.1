@@ -19,9 +19,10 @@
 #define ARM_EXIT_KEEP(x)	x
 #define ARM_EXIT_DISCARD(x)
 
-OUTPUT_ARCH(aarch64)
-ENTRY(_text)
+OUTPUT_ARCH(aarch64)	/*定义体系结构: arrch64*/
+ENTRY(_text)	/*第一条被执行的程序被称为入口(entry point), 此处定义为 "_text"*/
 
+/*jiffies 变量是一个计数器存储系统从系统起的tick（点滴）时间流逝，在此定义位64位的计数器。/kernel/timer.c*/
 jiffies = jiffies_64;
 
 #define HYPERVISOR_TEXT					\
@@ -103,12 +104,26 @@ SECTIONS
 		*(.eh_frame)
 	}
 
+	/*符号"."的地址初始化， 即设置内核起始虚拟地址
+	1. KIMAGE_VADDR: 内核的起始虚拟地址。
+	2. TEXT_OFFSET: bootloader把kernel image从外设copy到RAM中的 TEXT_OFFSET开始的地方。
+					TEXT: 指的是kernel text segment
+					OFFSET: 相对于RAM的首地址而言。
+					TEXT_OFFSET必须要4k对齐，并且size不能大于2M。
+	3. PAGE_OFFSET: kernel image的起始虚拟地址，一般而言也就是系统中RAM的首地址，在该地址TEXT_OFFSET
+					之后保存了kernel image。
+					PAGE_OFFSET必须要2M对齐。
+	*/
 	. = KIMAGE_VADDR + TEXT_OFFSET;
 
+	/*定义一个 ".head.text"段*/
 	.head.text : {
 		_text = .;
+		/*添加所有.head。text段*/
 		HEAD_TEXT
 	}
+
+	 /*代码段 */
 	.text : {			/* Real text segment		*/
 		_stext = .;		/* Text and read-only data	*/
 			__exception_text_start = .;
@@ -179,6 +194,7 @@ SECTIONS
 	__inittext_end = .;
 	__initdata_begin = .;
 
+	/*init段*/
 	.init.data : {
 		INIT_DATA
 		INIT_SETUP(16)

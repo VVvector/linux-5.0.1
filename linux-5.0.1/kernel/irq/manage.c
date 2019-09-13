@@ -1200,7 +1200,7 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
  * interrupt related functions. desc->request_mutex solely serializes
  * request/free_irq().
  */
-/*当中断发生时，处理的路径将会沿着：irq_desc.handle_irq，irqaction.handler，
+/*irq的申请宣告完毕，当中断发生时，处理的路径将会沿着：irq_desc.handle_irq ->irqaction.handler ->
  irqaction.thread_fn（irqaction.handler的返回值是IRQ_WAKE_THREAD）这个过程进行处理。
  */
 static int
@@ -1231,6 +1231,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * Check whether the interrupt nests into another interrupt
 	 * thread.
 	 */
+	 /*检查是否为线程嵌套中断(流控层中 handle_nested_irq())*/
 	nested = irq_settings_is_nested_thread(desc);
 	if (nested) {
 		if (!new->thread_fn) {
@@ -1256,7 +1257,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * and the interrupt does not nest into another interrupt
 	 * thread.
 	 */
-	 /*如何设置了中断线程，则会创建中断对应的内核线程*/
+	 /*不是嵌套线程中断，且设置了中断线程，则会创建中断对应的内核线程*/
 	if (new->thread_fn && !nested) {
 		ret = setup_irq_thread(new, irq, false);
 		if (ret)
@@ -1312,10 +1313,12 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * management calls which are not serialized via
 	 * desc->request_mutex or the optional bus lock.
 	 */
+	 /*检查是否为共享中断*/
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	old_ptr = &desc->action;
 	old = *old_ptr;
 	if (old) {
+		/*检查是否符合共享中断的要求(level, edge, polarity要一致)*/
 		/*
 		 * Can't share interrupts unless both agree to and are
 		 * the same type (level, edge, polarity). So both flag
@@ -1419,6 +1422,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 		goto out_unlock;
 	}
 
+	/*非共享中断*/
 	if (!shared) {
 		init_waitqueue_head(&desc->wait_for_threads);
 
@@ -1488,6 +1492,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 				irq, omsk, nmsk);
 	}
 
+	/*把新的irqaction实例链接到action链表的最后*/
 	*old_ptr = new;
 
 	irq_pm_install_action(desc, new);

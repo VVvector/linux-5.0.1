@@ -34,7 +34,7 @@
 				TEXT: 指的是kernel text segment
 				OFFSET: 相对于RAM的首地址而言。
 				TEXT_OFFSET必须要4k对齐，并且size不能大于2M。
-3. PAGE_OFFSET: kernel image的其实虚拟地址，一般而言也就是系统中RAM的首地址，在该地址TEXT_OFFSET
+3. PAGE_OFFSET: kernel image的起始虚拟地址，一般而言也就是系统中RAM的首地址，在该地址TEXT_OFFSET
 				之后保存了kernel image。
 				PAGE_OFFSET必须要2M对齐。
 4. TASK_SIZE: 一般而言，用户地址空间从0开始，大小就是TASK_SIZE, 即task userspace size.

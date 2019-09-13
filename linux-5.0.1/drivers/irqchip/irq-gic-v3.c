@@ -350,12 +350,15 @@ static u64 gic_mpidr_to_affinity(unsigned long mpidr)
 	return aff;
 }
 
+/*中断发生时，会调用该handler。[asmlinkage 表示用堆栈来传递参数而不是用寄存器.]*/
 static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 {
 	u32 irqnr;
 
+	/*获取到中断的irq number(HW)*/
 	irqnr = gic_read_iar();
 
+	/*表示非cpu之间的中断*/
 	if (likely(irqnr > 15 && irqnr < 1020) || irqnr >= 8192) {
 		int err;
 
@@ -376,6 +379,8 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 		}
 		return;
 	}
+
+	/*为cpu间的中断，而不是hw发送过来的中断。*/
 	if (irqnr < 16) {
 		gic_write_eoir(irqnr);
 		if (static_branch_likely(&supports_deactivate_key))
@@ -888,6 +893,7 @@ static struct irq_chip gic_eoimode1_chip = {
 
 #define GIC_ID_NR	(1U << GICD_TYPER_ID_BITS(gic_data.rdists.gicd_typer))
 
+/*会调用 irq_domain_set_info()对 desc->handle_irq进行赋值。如：handle_fasteoi_irq()*/
 static int gic_irq_domain_map(struct irq_domain *d, unsigned int irq,
 			      irq_hw_number_t hw)
 {
@@ -982,6 +988,7 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 	return -EINVAL;
 }
 
+/*初始化desc相关内容， 如 desc->handle_irq*/
 static int gic_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
 				unsigned int nr_irqs, void *arg)
 {
@@ -1115,6 +1122,7 @@ static int __init gic_init_bases(void __iomem *dist_base,
 		gic_irqs = 1020;
 	gic_data.irq_nr = gic_irqs;
 
+	/*向系统注册irq domain*/
 	gic_data.domain = irq_domain_create_tree(handle, &gic_irq_domain_ops,
 						 &gic_data);
 	irq_domain_update_bus_token(gic_data.domain, DOMAIN_BUS_WIRED);
@@ -1137,8 +1145,9 @@ static int __init gic_init_bases(void __iomem *dist_base,
 			pr_err("Failed to initialize MBIs\n");
 	}
 
-	/*注册handle_arch_irq回调函数， 当CPU捕获到中断异常后，最终可以进入到gic_handler_irq函数中，
-	这个就是当前的中断处理的入口函数，通过它可以查表等获取到最终是哪一个中断号发生的中断。*/
+	/*注册handle_arch_irq回调函数:
+		当CPU捕获到中断异常后，最终可以进入到gic_handler_irq函数中，
+		即当前的中断处理的入口函数，通过它可以查表等获取到最终是哪一个中断号发生的中断。*/
 	set_handle_irq(gic_handle_irq);
 
 	gic_update_vlpi_properties();
@@ -1298,6 +1307,7 @@ static const struct gic_quirk gic_quirks[] = {
 	}
 };
 
+/*每个中断控制器都会调用该函数注册一次。*/
 static int __init gic_of_init(struct device_node *node, struct device_node *parent)
 {
 	void __iomem *dist_base;
@@ -1306,6 +1316,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 	u32 nr_redist_regions;
 	int err, i;
 
+	/*映射GIC Distributor的寄存器地址空间*/
 	dist_base = of_iomap(node, 0);
 	if (!dist_base) {
 		pr_err("%pOF: unable to map gic dist registers\n", node);
@@ -1347,6 +1358,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 
 	gic_enable_of_quirks(node, gic_quirks, &gic_data);
 
+	/*主要初始化流程， 注册一个GIC*/
 	err = gic_init_bases(dist_base, rdist_regs, nr_redist_regions,
 			     redist_stride, &node->fwnode);
 	if (err)

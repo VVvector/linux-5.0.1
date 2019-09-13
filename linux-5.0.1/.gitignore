@@ -35,7 +35,7 @@
 *.o.*
 *.order
 *.patch
-*.s
+#*.s*
 *.so
 *.so.dbg
 *.su
@@ -58,6 +58,7 @@ modules.builtin
 /vmlinuz
 /System.map
 /Module.markers
+/output_dir
 
 #
 # RPM spec file (make rpm-pkg)

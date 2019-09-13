@@ -20,6 +20,11 @@
 #include <linux/smp.h>
 #include <linux/fs.h>
 
+/*linux内核中，所有的irq domain被挂入到下面的这个全局链表中。
+
+struct irq_domain中的link成员就是挂入这个队列的节点。
+通过irq_domain_list这个指针，可以获取整个系统中HW interrupt ID和IRQ number的mapping DB。
+*/
 static LIST_HEAD(irq_domain_list);
 static DEFINE_MUTEX(irq_domain_mutex);
 
@@ -126,6 +131,10 @@ EXPORT_SYMBOL_GPL(irq_domain_free_fwnode);
  * Allocates and initialize and irq_domain structure.
  * Returns pointer to IRQ domain, or NULL on failure.
  */
+ /*
+	这类接口的逻辑很简单，根据自己的映射类型，初始化struct irq_domain中的各个成员，
+	调用__irq_domain_add将该irq domain挂入irq_domain_list的全局列表。
+*/
 struct irq_domain *__irq_domain_add(struct fwnode_handle *fwnode, int size,
 				    irq_hw_number_t hwirq_max, int direct_max,
 				    const struct irq_domain_ops *ops,
@@ -137,6 +146,7 @@ struct irq_domain *__irq_domain_add(struct fwnode_handle *fwnode, int size,
 
 	static atomic_t unknown_domains;
 
+	/*申请一个irq_domain， size个中断个数(irq_domain最后一个变量是可变长数组)*/
 	domain = kzalloc_node(sizeof(*domain) + (sizeof(unsigned int) * size),
 			      GFP_KERNEL, of_node_to_nid(of_node));
 	if (WARN_ON(!domain))
@@ -211,6 +221,7 @@ struct irq_domain *__irq_domain_add(struct fwnode_handle *fwnode, int size,
 	of_node_get(of_node);
 
 	/* Fill structure */
+	/*初始化domain成员*/
 	INIT_RADIX_TREE(&domain->revmap_tree, GFP_KERNEL);
 	mutex_init(&domain->revmap_tree_mutex);
 	domain->ops = ops;
@@ -222,6 +233,7 @@ struct irq_domain *__irq_domain_add(struct fwnode_handle *fwnode, int size,
 
 	mutex_lock(&irq_domain_mutex);
 	debugfs_add_domain_dir(domain);
+	/*将该domain加入到全局的irq_domain_list链表上*/
 	list_add(&domain->link, &irq_domain_list);
 	mutex_unlock(&irq_domain_mutex);
 
@@ -590,6 +602,7 @@ EXPORT_SYMBOL_GPL(irq_domain_associate_many);
  * or radix tree to store the mapping, but the irq controller can optimize
  * the revmap path by using the hwirq directly.
  */
+ /*给no map那种类型的interrupt controller使用的*/
 unsigned int irq_create_direct_mapping(struct irq_domain *domain)
 {
 	struct device_node *of_node;
@@ -631,6 +644,10 @@ EXPORT_SYMBOL_GPL(irq_create_direct_mapping);
  * If the sense/trigger is to be specified, set_irq_type() should be called
  * on the number returned from that call.
  */
+ /*
+	建立HW interrupt ID和IRQ number的映射关系。
+	该接口函数以irq domain和HW interrupt ID为参数，返回IRQ number（这个IRQ number是动态分配的）。
+*/
 unsigned int irq_create_mapping(struct irq_domain *domain,
 				irq_hw_number_t hwirq)
 {
@@ -693,6 +710,9 @@ EXPORT_SYMBOL_GPL(irq_create_mapping);
  *
  * 0 is returned upon success, while any failure to establish a static
  * mapping is treated as an error.
+ */
+ /*
+ 用来为一组HW interrupt ID建立映射
  */
 int irq_create_strict_mappings(struct irq_domain *domain, unsigned int irq_base,
 			       irq_hw_number_t hwirq_base, int count)
@@ -832,6 +852,13 @@ unsigned int irq_create_fwspec_mapping(struct irq_fwspec *fwspec)
 }
 EXPORT_SYMBOL_GPL(irq_create_fwspec_mapping);
 
+/*
+利用device tree进行映射关系的建立。
+	通常，一个普通设备的device tree node已经描述了足够的中断信息，在这种情况下，
+	该设备的驱动在初始化的时候可以调用irq_of_parse_and_map这个接口函数进行该
+	device node中和中断相关的内容（interrupts和interrupt-parent属性）进行分析，并建立映射关系。
+
+*/
 unsigned int irq_create_of_mapping(struct of_phandle_args *irq_data)
 {
 	struct irq_fwspec fwspec;
@@ -1679,6 +1706,7 @@ EXPORT_SYMBOL_GPL(irq_domain_get_irq_data);
  * @handler_data:	The interrupt flow handler data
  * @handler_name:	The interrupt handler name
  */
+ /*对 virq进行初始化*/
 void irq_domain_set_info(struct irq_domain *domain, unsigned int virq,
 			 irq_hw_number_t hwirq, struct irq_chip *chip,
 			 void *chip_data, irq_flow_handler_t handler,

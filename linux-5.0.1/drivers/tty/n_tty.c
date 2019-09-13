@@ -2126,6 +2126,11 @@ static int job_control(struct tty_struct *tty, struct file *file)
  *		claims non-exclusive termios_rwsem
  *		publishes read_tail
  */
+ /*这是典型的等待队列使用套路：先查询数据是否可用，不可用就让出CPU,
+等待其他线程(可以是中断 isr中间接调用的 flush_to_ldisc())来唤醒。当硬件
+接收到数据后，在中断处理->工作队列等的处理情况下，会将数据投递到ldata.read_buf[]
+中，然后唤醒该线程；之后本线程就调用canon_copy_from_read_buf()完成
+数据从ldisc层(ldata.read_buf[])到应用程序缓冲区的复制。*/
 
 static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 			 unsigned char __user *buf, size_t nr)
@@ -2192,6 +2197,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 			break;
 		}
 
+		/*处理是否有数据可读取*/
 		if (!input_available_p(tty, 0)) {
 			up_read(&tty->termios_rwsem);
 			tty_buffer_flush_work(tty->port);
@@ -2215,12 +2221,15 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 					retval = -EAGAIN;
 					break;
 				}
+
+				/*被信号打断*/
 				if (signal_pending(current)) {
 					retval = -ERESTARTSYS;
 					break;
 				}
 				up_read(&tty->termios_rwsem);
 
+				/*进入睡眠， 可被 tty_flip_buffer_push()，即flush_to_ldisc()唤醒*/
 				timeout = wait_woken(&wait, TASK_INTERRUPTIBLE,
 						timeout);
 
@@ -2230,6 +2239,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 		}
 
 		if (ldata->icanon && !L_EXTPROC(tty)) {
+			/*标准模式，投递数据到用户空间*/
 			retval = canon_copy_from_read_buf(tty, &b, &nr);
 			if (retval)
 				break;
@@ -2351,6 +2361,7 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 
 			while (nr > 0) {
 				mutex_lock(&ldata->output_lock);
+				/*调用tty driver的 write函数*/
 				c = tty->ops->write(tty, b, nr);
 				mutex_unlock(&ldata->output_lock);
 				if (c < 0) {

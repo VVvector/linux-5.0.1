@@ -33,6 +33,16 @@
  * This function is a wrapper that chains of_irq_parse_one() and
  * irq_create_of_mapping() to make things easier to callers
  */
+ /*
+	通常，一个普通设备的device tree node已经描述了足够的中断信息，在这种情况下，
+	该设备的驱动在初始化的时候可以调用irq_of_parse_and_map这个接口函数进行
+	该device node中和中断相关的内容（interrupts和interrupt-parent属性）进行分析，
+	并建立映射关系。
+
+	对于一个使用Device tree的普通驱动程序（我们推荐这样做），
+	基本上初始化需要调用irq_of_parse_and_map获取IRQ number，
+	然后调用request_threaded_irq申请中断handler。
+*/
 unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
 {
 	struct of_phandle_args oirq;

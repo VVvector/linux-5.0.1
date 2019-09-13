@@ -18,7 +18,9 @@
 
 struct kobj_map {
 	struct probe {
+		/*将系统中所有的probe结构通过链表方式连接在一起*/
 		struct probe *next;
+		/*设备号*/
 		dev_t dev;
 		unsigned long range;
 		struct module *owner;
@@ -45,6 +47,7 @@ int kobj_map(struct kobj_map *domain, dev_t dev, unsigned long range,
 	if (p == NULL)
 		return -ENOMEM;
 
+	/*根据传入的设备号的个数，将设备号和cdev依次封装到kmalloc_array()分配的n个probe结构中*/
 	for (i = 0; i < n; i++, p++) {
 		p->owner = module;
 		p->get = probe;
@@ -53,6 +56,9 @@ int kobj_map(struct kobj_map *domain, dev_t dev, unsigned long range,
 		p->range = range;
 		p->data = data;
 	}
+
+	/*遍历probs数组，直到找到一个值为NULL的元素，再将probe的地址存入probes, 
+	将设备号对255取余后与probes的下标对应。至此，我们就将我们的cdev放入的内核的数据结构*/
 	mutex_lock(domain->lock);
 	for (i = 0, p -= n; i < n; i++, p++, index++) {
 		struct probe **s = &domain->probes[index % 255];

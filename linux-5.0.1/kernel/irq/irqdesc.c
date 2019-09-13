@@ -502,6 +502,7 @@ static int irq_expand_nr_irqs(unsigned int nr)
 	return 0;
 }
 
+/*初始化irq*/
 int __init early_irq_init(void)
 {
 	int i, initcnt, node = first_online_node;
@@ -622,7 +623,7 @@ void irq_init_desc(unsigned int irq)
  *
  */
 /*
-根据virq找到irq_desc，然后调用irq_desc->handle_irq，这里handle_irq是在申请中断的时候被设置，
+根据virq找到irq_desc，然后调用irq_desc->handle_irq。[该handler在初始化的时候，进行赋值的。 gic_irq_domain_map()]
 不过不管被设置成哪个函数最后都会调用handle_irq_event,此时进入第三阶段。
 注：
 chip.c:

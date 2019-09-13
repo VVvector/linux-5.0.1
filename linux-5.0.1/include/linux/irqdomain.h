@@ -99,13 +99,43 @@ enum irq_domain_bus_token {
  * whatever internal data structures management is required. It also needs
  * to setup the irq_desc when returning from map().
  */
+ /*
+ 	抽象了一个irq domain的callback函数
+*/
 struct irq_domain_ops {
+	/*
+	判断一个指定的interrupt controller（node参数）是否和一个irq domain匹配（d参数），
+	如果匹配的话，返回1。实际上，内核中很少定义这个callback函数，
+	实际上struct irq_domain中有一个of_node指向了对应的interrupt controller的device node，
+	因此，如果不提供该函数，那么default的匹配函数其实就是判断irq domain的of_node成员是否等于传入的node参数。
+	*/
 	int (*match)(struct irq_domain *d, struct device_node *node,
 		     enum irq_domain_bus_token bus_token);
 	int (*select)(struct irq_domain *d, struct irq_fwspec *fwspec,
 		      enum irq_domain_bus_token bus_token);
+
+	/*
+	map和unmap是操作相反的函数，我们描述其中之一就OK了。调用map函数的时机是在创建
+	（或者更新）HW interrupt ID（hw参数）和IRQ number（virq参数）关系的时候。
+	其实，从发生一个中断到调用该中断的handler仅仅调用一个request_threaded_irq是不够的，
+	还需要针对该irq number设定：
+		（1）设定该IRQ number对应的中断描述符（struct irq_desc）的irq chip
+		（2）设定该IRQ number对应的中断描述符的highlevel irq-events handler
+		（3）设定该IRQ number对应的中断描述符的 irq chip data
+	这些设定不适合由具体的硬件驱动来设定，因此在Interrupt controller，也就是irq domain的callback函数中设定。
+	*/
 	int (*map)(struct irq_domain *d, unsigned int virq, irq_hw_number_t hw);
 	void (*unmap)(struct irq_domain *d, unsigned int virq);
+	
+	/*
+	xlate函数，语义是翻译（translate）的意思, 在DTS文件中，各个使用中断的
+	device node会通过一些属性（例如interrupts和interrupt-parent属性）
+	来提供中断信息给kernel以便kernel可以正确的进行driver的初始化动作。
+	这里，interrupts属性所表示的interrupt specifier只能由具体的
+	interrupt controller（也就是irq domain）来解析。而xlate函数就
+	是将指定的设备（node参数）上若干个（intsize参数）中断属性
+	（intspec参数）翻译成HW interrupt ID（out_hwirq参数）和trigger类型（out_type）。
+	*/
 	int (*xlate)(struct irq_domain *d, struct device_node *node,
 		     const u32 *intspec, unsigned int intsize,
 		     unsigned long *out_hwirq, unsigned int *out_type);
@@ -156,9 +186,25 @@ struct irq_domain_chip_generic;
  * @revmap_tree: Radix map tree for hwirqs that don't fit in the linear map
  * @linear_revmap: Linear table of hwirq->virq reverse mappings
  */
+ /*
+ irq domain的概念由struct irq_domain表示：
+ 对于线性映射：
+	（1）linear_revmap保存了一个线性的lookup table，index是HW interrupt ID，table中保存了IRQ number值
+	（2）revmap_size等于线性的lookup table的size。
+	（3）hwirq_max保存了最大的HW interrupt ID
+	（4）revmap_direct_max_irq没有用，设定为0。revmap_tree没有用。
+
+对于Radix Tree map：
+	（1）linear_revmap没有用，revmap_size等于0。
+	（2）hwirq_max没有用，设定为一个最大值。
+	（3）revmap_direct_max_irq没有用，设定为0。
+	（4）revmap_tree指向Radix tree的root node。
+
+*/
 struct irq_domain {
 	struct list_head link;
 	const char *name;
+	/*callbackh函数*/
 	const struct irq_domain_ops *ops;
 	void *host_data;
 	unsigned int flags;
@@ -176,9 +222,13 @@ struct irq_domain {
 #endif
 
 	/* reverse map data. The linear map gets appended to the irq_domain */
+	/*该domain中最大的那个HW interrupt ID*/
 	irq_hw_number_t hwirq_max;
+	/*直接映射的最大值*/
 	unsigned int revmap_direct_max_irq;
+	/*线性映射的size。 (for Radix tree map和no map，该值等于0)*/
 	unsigned int revmap_size;
+	/*Radix tree map使用到的radix tree root node*/
 	struct radix_tree_root revmap_tree;
 	struct mutex revmap_tree_mutex;
 	unsigned int linear_revmap[];
@@ -319,6 +369,11 @@ static inline struct irq_domain *irq_find_host(struct device_node *node)
  * @ops: map/unmap domain callbacks
  * @host_data: Controller private data pointer
  */
+ /*线性映射:
+	其实就是一个lookup table，HW interrupt ID作为index，通过查表可以获取对应的IRQ number。
+	对于Linear map而言，interrupt controller对其HW interrupt ID进行编码的时候要满足一定的条件：
+	hw ID不能过大，而且ID排列最好是紧密的
+*/
 static inline struct irq_domain *irq_domain_add_linear(struct device_node *of_node,
 					 unsigned int size,
 					 const struct irq_domain_ops *ops,
@@ -326,6 +381,14 @@ static inline struct irq_domain *irq_domain_add_linear(struct device_node *of_no
 {
 	return __irq_domain_add(of_node_to_fwnode(of_node), size, size, 0, ops, host_data);
 }
+
+/*
+no map:
+	有些中断控制器很强，可以通过寄存器配置HW interrupt ID而不是由物理连接决定的。
+	例如PowerPC 系统使用的MPIC (Multi-Processor Interrupt Controller)。在这种情况下，
+	不需要进行映射，我们直接把IRQ number写入HW interrupt ID配置寄存器就OK了，
+	这时候，生成的HW interrupt ID就是IRQ number，也就不需要进行mapping了。
+*/
 static inline struct irq_domain *irq_domain_add_nomap(struct device_node *of_node,
 					 unsigned int max_irq,
 					 const struct irq_domain_ops *ops,
@@ -341,6 +404,14 @@ static inline struct irq_domain *irq_domain_add_legacy_isa(
 	return irq_domain_add_legacy(of_node, NUM_ISA_INTERRUPTS, 0, 0, ops,
 				     host_data);
 }
+
+/*
+Radix Tree map:
+	建立一个Radix Tree来维护HW interrupt ID到IRQ number映射关系。
+	HW interrupt ID作为lookup key，在Radix Tree检索到IRQ number。
+	如果的确不能满足线性映射的条件，可以考虑Radix Tree map。实际上，
+	内核中使用Radix Tree map的只有powerPC和MIPS的硬件平台。
+*/
 static inline struct irq_domain *irq_domain_add_tree(struct device_node *of_node,
 					 const struct irq_domain_ops *ops,
 					 void *host_data)

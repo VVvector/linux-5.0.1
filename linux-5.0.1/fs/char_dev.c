@@ -25,6 +25,7 @@
 
 #include "internal.h"
 
+/*用于描述系统中所有字符设备的信息*/
 static struct kobj_map *cdev_map;
 
 static DEFINE_MUTEX(chrdevs_lock);
@@ -373,6 +374,12 @@ void cdev_put(struct cdev *p)
 /*
  * Called every time a character special file is opened
  */
+ /*全程没有一个初始化cdev.kobj的函数！到此为止，我们都是通过cdev_map来管理系统里的字符设备的，
+ 所以，我们并不能在sysfs找到我们此时注册的字符设备，更深层的原因是内核中并不直接使用cdev作为一个设备，
+ 而是将其作为一个设备接口，使用这个接口我们可以派生出misc设备，输入设备，LCD等等，
+ 当初始化这些具体的字符设备的时候，相应的list_head对象才可能被打开挂接到相应的链表，
+ 并初始化kobj。即如果希望sysfs中找到我们的字符设备，我们就必须对cdev.kobj进行初始化，
+ 挂接到合适的kset，这也就是导出设备信息到sysfs以便自动创建设备文件的原理。*/
 static int chrdev_open(struct inode *inode, struct file *filp)
 {
 	const struct file_operations *fops;
@@ -380,22 +387,27 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 	struct cdev *new = NULL;
 	int ret = 0;
 
+	/*最开始inode与自己的cdev没有关系*/
 	spin_lock(&cdev_lock);
 	p = inode->i_cdev;
 	if (!p) {
 		struct kobject *kobj;
 		int idx;
 		spin_unlock(&cdev_lock);
+		/*根据设备号在cdev_map中找到inode对应的cdev*/
 		kobj = kobj_lookup(cdev_map, inode->i_rdev, &idx);
 		if (!kobj)
 			return -ENXIO;
 		new = container_of(kobj, struct cdev, kobj);
+		
 		spin_lock(&cdev_lock);
 		/* Check i_cdev again in case somebody beat us to it while
 		   we dropped the lock. */
+		/*将上面找到的cdev赋值给inode->i_cdev,即建立inode与cdev的关系*/
 		p = inode->i_cdev;
 		if (!p) {
 			inode->i_cdev = p = new;
+			/*将inode->devices挂接到inode->i_cdev的管理链表中，这样下次就不用重新搜索*/
 			list_add(&inode->i_devices, &p->list);
 			new = NULL;
 		} else if (!cdev_get(p))
@@ -413,6 +425,7 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 		goto out_cdev_put;
 
 	replace_fops(filp, fops);
+	/*调用cdev自己的open函数*/
 	if (filp->f_op->open) {
 		ret = filp->f_op->open(inode, filp);
 		if (ret)
@@ -479,18 +492,28 @@ static int exact_lock(dev_t dev, void *data)
  * cdev_add() adds the device represented by @p to the system, making it
  * live immediately.  A negative error code is returned on failure.
  */
+ /*Linux中几乎所有的"设备"都是"device"的子类，无论是平台设备还是i2c设备还是网络设备。
+ 但唯独字符设备不是，从"Linux字符设备驱动框架"一文中我们可以看出cdev并不是继承自device，
+ 从"Linux设备管理（二）_从cdev_add说起"一文中我们可以看出注册一个cdev对象到内核其实只
+ 是将它放到cdev_map中，直到"Linux设备管理（四）_从sysfs回到ktype"一文中对device_create
+ 的分析才知道此时才创建device结构并将kobj挂接到相应的链表，，所以，基于历史原因，
+ 当下cdev更合适的一种理解是一种接口(使用mknod时可以当作设备)，而不是而一个具体的设备，
+ 和platform_device,i2c_device有着本质的区别*/
 int cdev_add(struct cdev *p, dev_t dev, unsigned count)
 {
 	int error;
 
+	/*将获得设备号和设备号长度填充到cdev结构中*/
 	p->dev = dev;
 	p->count = count;
 
+	/*封装好一个probe结构并将它的地址放入probes数组进而封装进cdev_map*/
 	error = kobj_map(cdev_map, dev, count, NULL,
 			 exact_match, exact_lock, p);
 	if (error)
 		return error;
 
+	/*将kobject的计数减一*/
 	kobject_get(p->kobj.parent);
 
 	return 0;
