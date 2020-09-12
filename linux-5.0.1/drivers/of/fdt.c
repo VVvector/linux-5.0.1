@@ -1225,6 +1225,7 @@ bool __init early_init_dt_scan(void *params)
 	if (!status)
 		return false;
 
+	/* 获取DTB中关于内存的大小，最终添加到系统中 */
 	early_init_dt_scan_nodes();
 	return true;
 }

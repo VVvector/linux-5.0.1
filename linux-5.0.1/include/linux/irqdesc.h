@@ -176,7 +176,7 @@ int generic_handle_irq(unsigned int irq);
 int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 			bool lookup, struct pt_regs *regs);
 
-/*第二阶段代码不复杂，首先找到virq，根据virq找到irq_desc，
+/*第二阶段代码不复杂，首先找到virq，根据virq找到 irq_desc，
 然后调用irq_desc->handle_irq，这里的 handle_irq 是在申请中断的时候被设置，
 不过不管被设置成哪个函数最后都会调用handle_irq_event，此时进入第三阶段。
 */

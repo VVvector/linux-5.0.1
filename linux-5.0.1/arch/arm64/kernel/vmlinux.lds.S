@@ -154,8 +154,14 @@ SECTIONS
 	EXCEPTION_TABLE(8)		/* __init_begin will be marked RO NX */
 	NOTES
 
+
+	/*存放idmap的页表基地址(物理地址), 物理地址和虚拟地址是相等的。
+		在MMU打开之前，CPU访问的都是物理地址，那么当MMU打开后，访问的就是
+		虚拟地址了，这段页表的映射就是 从CPU到打开MMU之前的这段代码物理地址的映射，
+		防止打开MMU后，无法获取页表。可以从systme.map文件中查看这些代码。
+	*/
 	. = ALIGN(PAGE_SIZE);
-	idmap_pg_dir = .;	/*存放idmap的页表基地址(物理地址)*/
+	idmap_pg_dir = .;	
 	. += IDMAP_DIR_SIZE;
 
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
@@ -167,7 +173,11 @@ SECTIONS
 	reserved_ttbr0 = .;
 	. += RESERVED_TTBR0_SIZE;
 #endif
-	swapper_pg_dir = .;	/*kernel space的页表基地址(物理地址)*/
+
+	/*kernel space的页表基地址(物理地址)；
+		linux内核编译后，kernel image是需要进行映射的，包括text, data 等各种段。
+	*/
+	swapper_pg_dir = .;
 	. += PAGE_SIZE;
 	swapper_pg_end = .;
 

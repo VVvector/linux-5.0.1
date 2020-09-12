@@ -624,11 +624,27 @@ void irq_init_desc(unsigned int irq)
  */
 /*
 根据virq找到irq_desc，然后调用irq_desc->handle_irq。[该handler在初始化的时候，进行赋值的。 gic_irq_domain_map()]
-不过不管被设置成哪个函数最后都会调用handle_irq_event,此时进入第三阶段。
+不过不管被设置成哪个函数最后都会调用 handle_irq_event()-- /kernel/irq/handle.c  此时进入第三阶段。
 注：
 chip.c:
 	可能是 handle_level_irq() -->handle_irq_event() -->action->handler
 	可能是 handle_edge_irq() -->ack_irq() -->handle_irq_event() -->action->handler
+
+
+
+各种中断源的初始化函数 根据自己的类型来设置中断对应的desc->handle_irq()函数。
+
+这里的 desc->handle_irq()是第一层次的中断处理函数，是在 系统初始化的时候根据中断源的特征同一分配的，
+不同类型的中断源的gic操作是不一样的，把这些通用gic操作提取出来就是第一层次的操作函数了。如下：
+
+即 desc->handle_irq() 会被根据中断类型赋值多种不同函数，函数的差异体现在不同类型中断需要对gic进行不同操作上面。
+handle_fasteoi_irq()
+handle_simple_irq()
+handle_edge_irq()
+handle_level_irq()
+handle_percpu_irq()
+handle_percpu_devid_irq()
+
 */
 int generic_handle_irq(unsigned int irq)
 {
@@ -640,6 +656,9 @@ int generic_handle_irq(unsigned int irq)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(generic_handle_irq);
+
+
+
 
 #ifdef CONFIG_HANDLE_DOMAIN_IRQ
 /**
@@ -677,6 +696,14 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 		generic_handle_irq(irq);
 	}
 
+	/* 这里 会执行软中断         ， 另外一个软中断执行时机在 softirqd中
+		软中断优先在 irq_exit() 中执行，如果超过时间等条件转为 softirqd 线程中执行。
+		满足以下任一条件软中断在 softirqd 线程中执行：
+			在 irq_exit()->__do_softirq() 中运行，时间超过 2ms。
+			在 irq_exit()->__do_softirq() 中运行，轮询软中断超过 10 次。
+			在 irq_exit()->__do_softirq() 中运行，本线程需要被调度。
+			调用 raise_softirq() 唤醒软中断时，不在中断环境中。
+	*/
 	irq_exit();
 	set_irq_regs(old_regs);
 	return ret;

@@ -566,6 +566,7 @@ int kthreadd(void *unused)
 	set_cpus_allowed_ptr(tsk, cpu_all_mask);
 	set_mems_allowed(node_states[N_MEMORY]);
 
+	/* 这里表示该线程时可被冻结的。 */
 	current->flags |= PF_NOFREEZE;
 	cgroup_init_kthreadd();
 
@@ -576,6 +577,8 @@ int kthreadd(void *unused)
 		__set_current_state(TASK_RUNNING);
 
 		spin_lock(&kthread_create_lock);
+
+		/*查看是否有kernel thread需要被创建*/
 		while (!list_empty(&kthread_create_list)) {
 			struct kthread_create_info *create;
 
@@ -584,6 +587,7 @@ int kthreadd(void *unused)
 			list_del_init(&create->list);
 			spin_unlock(&kthread_create_lock);
 
+			/*创建一个内核线程*/
 			create_kthread(create);
 
 			spin_lock(&kthread_create_lock);

@@ -249,6 +249,17 @@ EXPORT_SYMBOL(tcp_timewait_state_process);
 /*
  * Move a socket to time-wait or dead fin-wait-2 state.
  */
+/*
+	1. tcp_tw_recycle: TIME-WAIT sockets回收，做NAT的时候，建议打开它。
+	2. tcp_tw_reuser: 是否允许处于TIME-WAIT状态的socket用于新的TCP连接，
+		这个对快速重启动某些服务，而启动后提示端口已经被使用的情形非常有用。
+	3. tcp_max_tw_buckets: 系统在同时所处理的最大timewait sockets数目。
+		如果超过此数的话，time-wait socket会被立即砍除并且显示警告信息。
+		之所以要设置这个限制，纯粹是为了抵御那些简单的DoS攻击，千万不要人为
+		地降低这个限制，不过，如果网络条件需要比默认值更多，则可以提高它（或许还要增加内存）；
+		事实上，做NAT时，最好可以适当地增加该值。
+*/
+
 void tcp_time_wait(struct sock *sk, int state, int timeo)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
@@ -316,6 +327,8 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		 * we complete the initialization.
 		 */
 		local_bh_disable();
+
+		/* 很重要： TCP_TIMEWAIT_LEN: 60s */
 		inet_twsk_schedule(tw, timeo);
 		/* Linkage updates.
 		 * Note that access to tw after this point is illegal.

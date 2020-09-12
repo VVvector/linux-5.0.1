@@ -70,6 +70,7 @@ int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 {
 	int ret = 0;
 
+	/* 必须实现 快启动，拥塞避免等 */
 	/* all algorithms must implement these */
 	if (!ca->ssthresh || !ca->undo_cwnd ||
 	    !(ca->cong_avoid || ca->cong_control)) {
@@ -85,6 +86,7 @@ int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 			  ca->name);
 		ret = -EEXIST;
 	} else {
+		/* 注册到系统中 */
 		list_add_tail_rcu(&ca->list, &tcp_cong_list);
 		pr_debug("%s registered\n", ca->name);
 	}

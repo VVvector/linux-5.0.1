@@ -267,8 +267,12 @@ static inline void lockdep_softirq_end(bool in_hardirq) { }
 */
 asmlinkage __visible void __softirq_entry __do_softirq(void)
 {
+	/*软中断最多执行2ms*/
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+	
 	unsigned long old_flags = current->flags;
+
+	/*最大重复执行10次*/
 	int max_restart = MAX_SOFTIRQ_RESTART;
 	struct softirq_action *h;
 	bool in_hardirq;
@@ -282,9 +286,11 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 	 */
 	current->flags &= ~PF_MEMALLOC;
 
+	/*得到当前所有pending的软中断*/
 	pending = local_softirq_pending();
 	account_irq_enter_time(current);
 
+	/*禁止其他软中断，即每个cpu上同时只能运行一个softirq。*/
 	__local_bh_disable_ip(_RET_IP_, SOFTIRQ_OFFSET);
 	in_hardirq = lockdep_softirq_start();
 
@@ -292,10 +298,13 @@ restart:
 	/* Reset the pending bitmask before enabling irqs */
 	set_softirq_pending(0);
 
+	/*打开中断， 即下面的代码可以被硬中断抢占。*/
 	local_irq_enable();
 
+	/*软中断向量表*/
 	h = softirq_vec;
 
+	/*一bit一bit的检查是否有softirq要执行， 一共32bit*/
 	while ((softirq_bit = ffs(pending))) {
 		unsigned int vec_nr;
 		int prev_count;
@@ -308,7 +317,7 @@ restart:
 		kstat_incr_softirqs_this_cpu(vec_nr);
 
 		trace_softirq_entry(vec_nr);
-		/**/
+		/*执行对应softirq的handle*/
 		h->action(h);
 		trace_softirq_exit(vec_nr);
 		if (unlikely(prev_count != preempt_count())) {
@@ -323,25 +332,33 @@ restart:
 
 	if (__this_cpu_read(ksoftirqd) == current)
 		rcu_softirq_qs();
+
+	/*关闭中断，即下面的代码又不能被硬中断抢占*/
 	local_irq_disable();
 
+	/*，因为上面执行过程中，可能由硬中断抢占，所以这里，再次检查是否还有有softirq没有被执行*/
 	pending = local_softirq_pending();
 	if (pending) {
+
+		/*如果时间没到，且未达到最大重复次数，则再次进行检查并运行softirq handler。*/
 		if (time_before(jiffies, end) && !need_resched() &&
 		    --max_restart)
 			goto restart;
 
-		/*唤醒ksoftirqd*/
+		/*否则，唤醒ksoftirqd线程，来执行softirq。*/
 		wakeup_softirqd();
 	}
 
 	lockdep_softirq_end(in_hardirq);
 	account_irq_exit_time(current);
+
+	/*开启软中断，允许软中断执行。*/
 	__local_bh_enable(SOFTIRQ_OFFSET);
 	WARN_ON_ONCE(in_interrupt());
 	current_restore_flags(old_flags, PF_MEMALLOC);
 }
 
+/*软中断执行函数*/
 asmlinkage __visible void do_softirq(void)
 {
 	__u32 pending;
@@ -452,13 +469,24 @@ void irq_exit(void)
  * This function must run with irqs disabled!
  */
 /*
-	先是通过__raise_softirq_irqoff设置cpu的软中断pending标志位（irq_stat[NR_CPUS] ），
-	然后通过in_interrupt判断现在是否在中断上下文中，或者软中断是否被禁止，如果都不成立，
-	则唤醒软中断的守护进程，在守护进程中执行软中断的回调函数。否则什么也不做，
-	软中断将会在中断的退出阶段被执行。
+	1. 先是通过__raise_softirq_irqoff设置cpu的软中断pending标志位（irq_stat[NR_CPUS] ）,
+	2. 然后通过in_interrupt判断现在是否在中断上下文中，或者软中断是否被禁止，如果都不成立，
+	则唤醒软中断的守护进程，在守护进程中执行软中断的回调函数。
+	否则什么也不做。
+	
+	3. 软中断将会在中断的退出阶段被执行。
+*/
+/*
+	软中断在linux内核中三个执行点：
+	1. 从一个硬中断返回时，即在irq_exit中，有机会执行软中断。
+	2. 在ksoftirqd内核线程中被执行。
+	3. 在那些显示检查或执行待处理软中断的代码中。例如：netif_rx_ni(); local_bh_enable(), local_bh_enable_ip()等。
+
+	最终，软中断都是通过do_softirq()或_do_softirq()被执行的。
 */
 inline void raise_softirq_irqoff(unsigned int nr)
 {
+	/*将指定的nr号软中断设置为挂起状态。*/
 	__raise_softirq_irqoff(nr);
 
 	/*
@@ -474,7 +502,7 @@ inline void raise_softirq_irqoff(unsigned int nr)
 		wakeup_softirqd();
 }
 
-/*触发一个软中断*/
+/*触发一个软中断，即将一个软中断设置为挂起状态(pending)*/
 void raise_softirq(unsigned int nr)
 {
 	unsigned long flags;
@@ -811,7 +839,7 @@ static int takeover_tasklets(unsigned int cpu)
 static struct smp_hotplug_thread softirq_threads = {
 	.store			= &ksoftirqd,
 	.thread_should_run	= ksoftirqd_should_run,
-	.thread_fn		= run_ksoftirqd,
+	.thread_fn		= run_ksoftirqd, //软中断softirq offload内核线程
 	.thread_comm		= "ksoftirqd/%u",
 };
 

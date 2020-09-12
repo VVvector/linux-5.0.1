@@ -844,7 +844,7 @@ static void tty_update_time(struct timespec64 *time)
  *	read calls may be outstanding in parallel.
  */
 
-/*read该tty device时被调用*/
+/*read该tty device时被调用, 从线路规程的buffer中拷贝数据。*/
 static ssize_t tty_read(struct file *file, char __user *buf, size_t count,
 			loff_t *ppos)
 {
@@ -934,6 +934,7 @@ static inline ssize_t do_tty_write(
 	if (count < chunk)
 		chunk = count;
 
+	/* 申请 tty_struct 对应点 tx buffer*/
 	/* write_buf/write_cnt is protected by the atomic_write_lock mutex */
 	if (tty->write_cnt < chunk) {
 		unsigned char *buf_chunk;
@@ -951,6 +952,7 @@ static inline ssize_t do_tty_write(
 		tty->write_buf = buf_chunk;
 	}
 
+	/* 把userspace的数据拷贝到 tx buffer；并调用线路规程的write函数 发送数据。*/
 	/* Do the write .. */
 	for (;;) {
 		size_t size = count;
@@ -959,6 +961,8 @@ static inline ssize_t do_tty_write(
 		ret = -EFAULT;
 		if (copy_from_user(tty->write_buf, buf, size))
 			break;
+
+		/* 调用线路规划层的write函数 n_tty_write()   ---n_tty.c */
 		ret = write(tty, file, tty->write_buf, size);
 		if (ret <= 0)
 			break;
@@ -1038,9 +1042,13 @@ static ssize_t tty_write(struct file *file, const char __user *buf,
 	/* Short term debug to catch buggy drivers */
 	if (tty->ops->write_room == NULL)
 		tty_err(tty, "missing write_room method\n");
+
+	/* 获取该port的 line discipline */
 	ld = tty_ldisc_ref_wait(tty);
 	if (!ld)
 		return hung_up_tty_write(file, buf, count, ppos);
+
+	/* Split writes up in sane blocksizes  */
 	if (!ld->ops->write)
 		ret = -EIO;
 	else
@@ -1332,17 +1340,20 @@ struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx)
 	if (!try_module_get(driver->owner))
 		return ERR_PTR(-ENODEV);
 
+	/* 申请tty struct，并初始化，比如 初始化ldisc为 N_TTY: n_tty.c*/
 	tty = alloc_tty_struct(driver, idx);
 	if (!tty) {
 		retval = -ENOMEM;
 		goto err_module_put;
 	}
 
+	/*设置tty_struct的tty termios参数 为tty driver的 init_termios，一般有设置为 tty_std_termios*/
 	tty_lock(tty);
 	retval = tty_driver_install_tty(driver, tty);
 	if (retval < 0)
 		goto err_free_tty;
 
+	/* 给tty_struct->port与driver->port[idx] 建立映射，方便找port*/
 	if (!tty->port)
 		tty->port = driver->ports[idx];
 
@@ -1353,6 +1364,8 @@ struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx)
 	retval = tty_ldisc_lock(tty, 5 * HZ);
 	if (retval)
 		goto err_release_lock;
+
+	/* 特别注意这里，如果 port没有打开，在  tty_port_default_receive_buf 就会把 buffer上传到 ldisc中。*/
 	tty->port->itty = tty;
 
 	/*
@@ -1360,7 +1373,9 @@ struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx)
 	 * If we fail here just call release_tty to clean up.  No need
 	 * to decrement the use counts, as release_tty doesn't care.
 	 */
-	/*调用tty_struct->ld->ops->open(), n_tty_open, 设置通讯参数：速率，校验位等*/
+	/*调用线路规程的open函数，tty_struct->ld->ops->open(),n_tty_open, 
+
+	根据tty termios，设置线路规程的相关参数：通讯参数：速率，校验位等*/
 	retval = tty_ldisc_setup(tty, tty->link);
 	if (retval)
 		goto err_release_tty;
@@ -1947,6 +1962,8 @@ static struct tty_struct *tty_open_by_driver(dev_t device, struct inode *inode,
 	int retval;
 
 	mutex_lock(&tty_mutex);
+
+	/* 获取tty driver*/
 	driver = tty_lookup_driver(device, filp, &index);
 	if (IS_ERR(driver)) {
 		mutex_unlock(&tty_mutex);
@@ -1954,12 +1971,14 @@ static struct tty_struct *tty_open_by_driver(dev_t device, struct inode *inode,
 	}
 
 	/* check whether we're reopening an existing tty */
+	/*获取 该port对应的tty struct*/
 	tty = tty_driver_lookup_tty(driver, filp, index);
 	if (IS_ERR(tty)) {
 		mutex_unlock(&tty_mutex);
 		goto out;
 	}
 
+	/* 如果第一次打开，则需要动态申请tty struct。*/
 	if (tty) {
 		if (tty_port_kopened(tty->port)) {
 			tty_kref_put(tty);
@@ -2032,9 +2051,10 @@ retry_open:
 	if (retval)
 		return -ENOMEM;
 
-	/*通过dev_t, 在tty_driver链表中查找对应的驱动，并返回本设备在该driver中的index。并初始化tty_struct。*/
+
 	tty = tty_open_current_tty(device, filp);
 	if (!tty)
+		/*通过dev_t, 在tty_driver链表中查找对应的驱动，并返回本设备在该driver中的index。并初始化tty_struct。*/
 		tty = tty_open_by_driver(device, inode, filp);
 
 	if (IS_ERR(tty)) {
@@ -2046,11 +2066,12 @@ retry_open:
 		goto retry_open;
 	}
 
-	/*初始化tty_file_private，并将priv添加到tty_struct->tty_files。*/
+	/*初始化tty_file_private，并将tty_struct 添加到 tty_file_private->tty*/
 	tty_add_file(tty, filp);
 
 	check_tty_count(tty, __func__);
 	tty_debug_hangup(tty, "opening (count=%d)\n", tty->count);
+
 
 	/*调用我们tty driver自己的open函数*/
 	if (tty->ops->open)
@@ -2992,6 +3013,8 @@ struct tty_struct *alloc_tty_struct(struct tty_driver *driver, int idx)
 
 	kref_init(&tty->kref);
 	tty->magic = TTY_MAGIC;
+
+	/* 初始化化 ldisc， 这里的ldisc为 N_TTY, 这个线路规程是在 start_kernel()->console_init(); main.c中注册的。*/
 	if (tty_ldisc_init(tty)) {
 		kfree(tty);
 		return NULL;
@@ -3345,6 +3368,7 @@ int tty_register_driver(struct tty_driver *driver)
 	if (error < 0)
 		goto err;
 
+	/* 注册tty   device */
 	if (driver->flags & TTY_DRIVER_DYNAMIC_ALLOC) {
 		error = tty_cdev_add(driver, dev, 0, driver->num);
 		if (error)

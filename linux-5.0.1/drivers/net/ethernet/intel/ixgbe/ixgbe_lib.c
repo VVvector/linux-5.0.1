@@ -682,6 +682,8 @@ static bool ixgbe_set_rss_queues(struct ixgbe_adapter *adapter)
 #endif /* IXGBE_FCOE */
 	adapter->num_rx_queues = rss_i;
 	adapter->num_tx_queues = rss_i;
+
+	/* XDP, eXpress Data Path, 它其实是位于网卡驱动程序里的一个快速处理包的HOOK点。  */
 	adapter->num_xdp_queues = ixgbe_xdp_queues(adapter);
 
 	return true;
@@ -772,6 +774,7 @@ static int ixgbe_acquire_msix_vectors(struct ixgbe_adapter *adapter)
 	for (i = 0; i < vectors; i++)
 		adapter->msix_entries[i].entry = i;
 
+	/* 向PCI子系统请求vectors个msix中断，将中断号写入adapter->msix_entries[i].vector */
 	vectors = pci_enable_msix_range(adapter->pdev, adapter->msix_entries,
 					vector_threshold, vectors);
 
@@ -871,6 +874,8 @@ static int ixgbe_alloc_q_vector(struct ixgbe_adapter *adapter,
 	q_vector->cpu = -1;
 
 #endif
+
+	/*初始化NAPI*/
 	/* initialize NAPI */
 	netif_napi_add(adapter->netdev, &q_vector->napi,
 		       ixgbe_poll, 64);
@@ -1058,6 +1063,7 @@ static int ixgbe_alloc_q_vectors(struct ixgbe_adapter *adapter)
 	int err, i;
 
 	/* only one q_vector if MSI-X is disabled. */
+	/*使用MSIX（Message Signaled Interrupt-X）*/
 	if (!(adapter->flags & IXGBE_FLAG_MSIX_ENABLED))
 		q_vectors = 1;
 
@@ -1075,6 +1081,7 @@ static int ixgbe_alloc_q_vectors(struct ixgbe_adapter *adapter)
 		}
 	}
 
+	/* 这里会 enable napi。 */
 	for (; v_idx < q_vectors; v_idx++) {
 		int rqpv = DIV_ROUND_UP(rxr_remaining, q_vectors - v_idx);
 		int tqpv = DIV_ROUND_UP(txr_remaining, q_vectors - v_idx);
@@ -1229,22 +1236,28 @@ static void ixgbe_set_interrupt_capability(struct ixgbe_adapter *adapter)
  * - Hardware queue count (num_*_queues)
  *   - defined by miscellaneous hardware support/features (RSS, etc.)
  **/
+
+/* 中断的注册是在 open函数中。 */
 int ixgbe_init_interrupt_scheme(struct ixgbe_adapter *adapter)
 {
 	int err;
 
 	/* Number of supported queues */
+	/*根据DIR/RSS设置adapter->num_tx/rq_queues*/
 	ixgbe_set_num_queues(adapter);
 
 	/* Set interrupt mode */
+	/* 向系统申请irq vector， 设置pcie中断类型，MSI-X 或者 MSI */
 	ixgbe_set_interrupt_capability(adapter);
 
+	/*设置poll函数，分配ixgbe_q_vector，初始化NAPI并加入napi_list*/
 	err = ixgbe_alloc_q_vectors(adapter);
 	if (err) {
 		e_dev_err("Unable to allocate memory for queue vectors\n");
 		goto err_alloc_q_vectors;
 	}
 
+	/* 将队列ixgbe_ring 与硬件RSS关联队列。 */
 	ixgbe_cache_ring_register(adapter);
 
 	e_dev_info("Multiqueue %s: Rx Queue count = %u, Tx Queue count = %u XDP Queue count = %u\n",

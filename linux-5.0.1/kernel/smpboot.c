@@ -181,6 +181,7 @@ __smpboot_create_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
 	td->cpu = cpu;
 	td->ht = ht;
 
+	/*用kthreadd创建一个task。 其中 smpboot_thread_fn是一个大的while循环。*/
 	tsk = kthread_create_on_cpu(smpboot_thread_fn, td, cpu,
 				    ht->thread_comm);
 	if (IS_ERR(tsk)) {
@@ -292,6 +293,8 @@ int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread)
 
 	get_online_cpus();
 	mutex_lock(&smpboot_threads_lock);
+	
+	/*为每个在线cpu创建 thread*/
 	for_each_online_cpu(cpu) {
 		ret = __smpboot_create_thread(plug_thread, cpu);
 		if (ret) {

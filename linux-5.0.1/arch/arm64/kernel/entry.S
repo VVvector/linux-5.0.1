@@ -405,7 +405,7 @@ handle_arch_irq 是一个全局函数变量，通过函数 set_handle_irq (handl
 其实最终调用的irq-gic-v3.c中的gic_handle_irq()。
 */
 	.macro	irq_handler
-	ldr_l	x1, handle_arch_irq
+	ldr_l	x1, handle_arch_irq  // gic_handle_irq()
 	mov	x0, sp
 	irq_stack_entry
 	blr	x1

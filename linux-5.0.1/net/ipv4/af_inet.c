@@ -244,6 +244,11 @@ EXPORT_SYMBOL(inet_listen);
  *	Create an inet socket.
  */
 
+/* user调用socket时， 会被执行。
+
+eg. sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+
+*/
 static int inet_create(struct net *net, struct socket *sock, int protocol,
 		       int kern)
 {
@@ -310,6 +315,10 @@ lookup_protocol:
 	    !ns_capable(net->user_ns, CAP_NET_RAW))
 		goto out_rcu_unlock;
 
+	/*查找到了对应的protocl stack.
+		You can find the structure definitions for all of the protocol stacks in af_inet.
+		static struct inet_protosw inetsw_array[]
+	*/
 	sock->ops = answer->ops;
 	answer_prot = answer->prot;
 	answer_flags = answer->flags;
@@ -788,6 +797,14 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
 
+	/*RPS（Receive Packet Steering）主要是把软中断的负载均衡到各个cpu，简单来说，
+	是网卡驱动对每个流生成一个hash标识，这个HASH值得计算可以通过四元组来计算
+	（SIP，SPORT，DIP，DPORT），然后由中断处理的地方根据这个hash标识分配到相应的CPU上去，
+	这样就可以比较充分的发挥多核的能力了。通俗点来说就是在软件层面模拟实现硬件的多队列
+	网卡功能，如果网卡本身支持多队列功能的话RPS就不会有任何的作用。该功能主要针对单队
+	列网卡多CPU环境，如网卡支持多队列则可使用SMP irq affinity直接绑定硬中断。
+	*/
+	/* record the last CPU that the flow was processed on*/
 	sock_rps_record_flow(sk);
 
 	/* We may need to bind the socket. */
@@ -795,6 +812,7 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	    inet_autobind(sk))
 		return -EAGAIN;
 
+	/*udp_sendmsg*/
 	return sk->sk_prot->sendmsg(sk, msg, size);
 }
 EXPORT_SYMBOL(inet_sendmsg);
@@ -977,6 +995,7 @@ static int inet_compat_ioctl(struct socket *sock, unsigned int cmd, unsigned lon
 }
 #endif
 
+/* 基于数据流的协议，例如 TCP */
 const struct proto_ops inet_stream_ops = {
 	.family		   = PF_INET,
 	.owner		   = THIS_MODULE,
@@ -1012,6 +1031,8 @@ const struct proto_ops inet_stream_ops = {
 };
 EXPORT_SYMBOL(inet_stream_ops);
 
+
+/*基于数据报的协议，例如  UDP */
 const struct proto_ops inet_dgram_ops = {
 	.family		   = PF_INET,
 	.owner		   = THIS_MODULE,
@@ -1070,6 +1091,11 @@ static const struct proto_ops inet_sockraw_ops = {
 #endif
 };
 
+/*这里的creat函数，在一个socket被创建时，调用。
+TCP, UDP, ICMP, and RAW
+eg. 
+	sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+*/
 static const struct net_proto_family inet_family_ops = {
 	.family = PF_INET,
 	.create = inet_create,
@@ -1079,6 +1105,7 @@ static const struct net_proto_family inet_family_ops = {
 /* Upon startup we insert all the elements in inetsw_array[] into
  * the linked list inetsw.
  */
+ /*对应的各种网络4层协议（TCP, UDP,RAW）， 主要关注 ops 和 prot */
 static struct inet_protosw inetsw_array[] =
 {
 	{
@@ -1389,6 +1416,8 @@ INDIRECT_CALLABLE_DECLARE(struct sk_buff *tcp4_gro_receive(struct list_head *,
 							   struct sk_buff *));
 INDIRECT_CALLABLE_DECLARE(struct sk_buff *udp4_gro_receive(struct list_head *,
 							   struct sk_buff *));
+
+/* ipv4的gro回调函数 */
 struct sk_buff *inet_gro_receive(struct list_head *head, struct sk_buff *skb)
 {
 	const struct net_offload *ops;
@@ -1410,30 +1439,38 @@ struct sk_buff *inet_gro_receive(struct list_head *head, struct sk_buff *skb)
 			goto out;
 	}
 
+	/* 拿到下一层的协议，例如 tcp */
 	proto = iph->protocol;
 
 	rcu_read_lock();
 	ops = rcu_dereference(inet_offloads[proto]);
+	/* 检查ip层的下一层，例如tcp，udp等，是否有实现offload callback */
 	if (!ops || !ops->callbacks.gro_receive)
 		goto out_unlock;
 
+	/* 检查ip头是否合法, iph->version = 4, iph->ipl = 5 。即不支持带ip options*/
 	if (*(u8 *)iph != 0x45)
 		goto out_unlock;
 
+	/* 检查是否为ip fragment的packet，如果是，则不进行gro */
 	if (ip_is_fragment(iph))
 		goto out_unlock;
 
+	/* 检查ipv4头部校验是否通过 */
 	if (unlikely(ip_fast_csum((u8 *)iph, 5)))
 		goto out_unlock;
 
 	id = ntohl(*(__be32 *)&iph->id);
+	/* 如果是 ip切片的packet，则需要flush到stack。 */
 	flush = (u16)((ntohl(*(__be32 *)iph) ^ skb_gro_len(skb)) | (id & ~IP_DF));
 	id >>= 16;
 
+	/* 开始遍历gro list */
 	list_for_each_entry(p, head, list) {
 		struct iphdr *iph2;
 		u16 flush_id;
 
+		/* 在该hash桶中，找在mac层 属于same flow的gro skb。 */
 		if (!NAPI_GRO_CB(p)->same_flow)
 			continue;
 
@@ -1443,6 +1480,12 @@ struct sk_buff *inet_gro_receive(struct list_head *head, struct sk_buff *skb)
 		 * hdr length so all the hdrs we'll need to verify will start
 		 * at the same offset.
 		 */
+		 
+		 /* 
+		 same flow判断：
+		 1. 4层协议要一样
+		 2. 源和目的地址必须一样
+		 */
 		if ((iph->protocol ^ iph2->protocol) |
 		    ((__force u32)iph->saddr ^ (__force u32)iph2->saddr) |
 		    ((__force u32)iph->daddr ^ (__force u32)iph2->daddr)) {
@@ -1451,6 +1494,13 @@ struct sk_buff *inet_gro_receive(struct list_head *head, struct sk_buff *skb)
 		}
 
 		/* All fields must match except length and checksum. */
+			
+		/* 
+		在same flow的条件下，判断是否需要flush skb到协议栈：
+			1. ttl 不一样
+			2. tos不一样
+			3. 如果是切片包 
+		*/
 		NAPI_GRO_CB(p)->flush |=
 			(iph->ttl ^ iph2->ttl) |
 			(iph->tos ^ iph2->tos) |
@@ -1498,6 +1548,7 @@ struct sk_buff *inet_gro_receive(struct list_head *head, struct sk_buff *skb)
 	skb_gro_pull(skb, sizeof(*iph));
 	skb_set_transport_header(skb, skb_gro_offset(skb));
 
+	/*调用传输层 tcp的receive方法。 tcp4_gro_receive*/
 	pp = indirect_call_gro_receive(tcp4_gro_receive, udp4_gro_receive,
 				       ops->callbacks.gro_receive, head, skb);
 
@@ -1790,6 +1841,7 @@ static int __init init_ipv4_mibs(void)
 	return register_pernet_subsys(&ipv4_mib_ops);
 }
 
+
 static __net_init int inet_init_net(struct net *net)
 {
 	/*
@@ -1896,6 +1948,14 @@ static struct packet_type ip_packet_type __read_mostly = {
 	.list_func = ip_list_rcv,
 };
 
+
+/*
+The Linux kernel executes the inet_init function early during kernel initialization. 
+This function registers the AF_INET protocol family, the individual protocol stacks
+within that family (TCP, UDP, ICMP, and RAW), and calls initialization routines to get
+protocol stacks ready to process network data. 
+*/
+/*在linux初始化时，被调用。会注册AF_INET协议族。TCP, UDP, ICMP, and RAW*/
 static int __init inet_init(void)
 {
 	struct inet_protosw *q;
@@ -1904,6 +1964,7 @@ static int __init inet_init(void)
 
 	sock_skb_cb_check_size(sizeof(struct inet_skb_parm));
 
+	/* 协议操作的注册 */
 	rc = proto_register(&tcp_prot, 1);
 	if (rc)
 		goto out;
@@ -1923,9 +1984,12 @@ static int __init inet_init(void)
 	/*
 	 *	Tell SOCKET that we are alive...
 	 */
-
+	/*The AF_INET protocol family exports a structure that has a create function. 
+	This function is called by the kernel when a socket is created from a user program.
+	*/
 	(void)sock_register(&inet_family_ops);
 
+	/* 创建route proc文件 */
 #ifdef CONFIG_SYSCTL
 	ip_static_sysctl_init();
 #endif
@@ -1945,6 +2009,7 @@ static int __init inet_init(void)
 		pr_crit("%s: Cannot add IGMP protocol\n", __func__);
 #endif
 
+	/* 将socket api和具体协议api建立联系*/
 	/* Register the socket-side information for inet_create. */
 	for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
 		INIT_LIST_HEAD(r);
@@ -1955,13 +2020,13 @@ static int __init inet_init(void)
 	/*
 	 *	Set the ARP module up
 	 */
-
+	/* 包括 ARP表，arp协议，port文件创建 */
 	arp_init();
+
 
 	/*
 	 *	Set the IP module up
 	 */
-
 	ip_init();
 
 	/* Setup TCP slab cache for open requests. */
@@ -2001,10 +2066,13 @@ static int __init inet_init(void)
 	if (init_ipv4_mibs())
 		pr_crit("%s: Cannot init ipv4 mibs\n", __func__);
 
+	/* ipv4 proc相关文件初始化 /proc/net/raw 等*/
 	ipv4_proc_init();
 
+	/* ip frag相关操作的初始化 */
 	ipfrag_init();
 
+	/* ip数据包的处理： 添加ip协议到 ptype_base中，用于处理ip协议数据。 */
 	dev_add_pack(&ip_packet_type);
 
 	ip_tunnel_core_init();

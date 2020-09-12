@@ -225,6 +225,7 @@ static int mqprio_init(struct Qdisc *sch, struct nlattr *opt,
 	if (!priv->qdiscs)
 		return -ENOMEM;
 
+	/*每一个tx queue的qdisc为 defautl_qdisc_ops或者 pfifo_fast_ops*/
 	for (i = 0; i < dev->num_tx_queues; i++) {
 		dev_queue = netdev_get_tx_queue(dev, i);
 		qdisc = qdisc_create_dflt(dev_queue,
@@ -242,6 +243,7 @@ static int mqprio_init(struct Qdisc *sch, struct nlattr *opt,
 	 * the queue mapping then run ndo_setup_tc otherwise use the
 	 * supplied and verified mapping
 	 */
+	/*tc 命令可以传入hw选项， 如果设置了hw=1, 则表示用硬件driver提供的mapping*/
 	if (qopt->hw) {
 		struct tc_mqprio_qopt_offload mqprio = {.qopt = *qopt};
 
@@ -266,6 +268,8 @@ static int mqprio_init(struct Qdisc *sch, struct nlattr *opt,
 		default:
 			return -EINVAL;
 		}
+
+		/*调用net driver提供的tc setup函数，进行tc的设置*/
 		err = dev->netdev_ops->ndo_setup_tc(dev,
 						    TC_SETUP_QDISC_MQPRIO,
 						    &mqprio);
@@ -274,6 +278,7 @@ static int mqprio_init(struct Qdisc *sch, struct nlattr *opt,
 
 		priv->hw_offload = mqprio.qopt.hw;
 	} else {
+		/*设置tc的个数，即qdisc class的个数*/
 		netdev_set_num_tc(dev, qopt->num_tc);
 		for (i = 0; i < qopt->num_tc; i++)
 			netdev_set_tc_queue(dev, i,

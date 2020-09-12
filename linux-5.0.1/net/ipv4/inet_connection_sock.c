@@ -687,6 +687,7 @@ void inet_csk_reqsk_queue_drop_and_put(struct sock *sk, struct request_sock *req
 }
 EXPORT_SYMBOL(inet_csk_reqsk_queue_drop_and_put);
 
+/* SYNACK定时器处理函数 */
 static void reqsk_timer_handler(struct timer_list *t)
 {
 	struct request_sock *req = from_timer(req, t, rsk_timer);
@@ -720,6 +721,10 @@ static void reqsk_timer_handler(struct timer_list *t)
 	 * embrions; and abort old ones without pity, if old
 	 * ones are about to clog our table.
 	 */
+
+	/* 首先判断qlen是否已经超过了最大半连接数的一半， 这里max()是一个最大值。
+	如果超过了，则开始计算连接队列中老的连接的最大重传次数(sync-ack重传 sk_max_ack_backlog)，
+	后面我们就会通过这个值来判断这个连接是否应该丢弃。*/
 	qlen = reqsk_queue_len(queue);
 	if ((qlen << 1) > max(8U, sk_listener->sk_max_ack_backlog)) {
 		int young = reqsk_queue_len_young(queue) << 1;
@@ -731,12 +736,20 @@ static void reqsk_timer_handler(struct timer_list *t)
 			young <<= 1;
 		}
 	}
+
+	/* 如果用户设置了tcp_defer_accept选项，则设置最大重传次数为 rskq_defer_accept. */
 	defer_accept = READ_ONCE(queue->rskq_defer_accept);
 	if (defer_accept)
 		max_retries = defer_accept;
+
+	/* 计算我们需要检测的半连接队列的个数。*/
 	syn_ack_recalc(req, thresh, max_retries, defer_accept,
 		       &expire, &resend);
+
+	/* 判断SYNACK是否超时 */
 	req->rsk_ops->syn_ack_timeout(req);
+	/*1. acked域是否被设置，即表示accept队列已满，且重传次数小于最大重传次数。
+	2. 重发syn ack是否成功。*/
 	if (!expire &&
 	    (!resend ||
 	     !inet_rtx_syn_ack(sk_listener, req) ||
@@ -749,7 +762,9 @@ static void reqsk_timer_handler(struct timer_list *t)
 		mod_timer(&req->rsk_timer, jiffies + timeo);
 		return;
 	}
+
 drop:
+	/* 从半连接队列中，丢弃掉这个连接。 */
 	inet_csk_reqsk_queue_drop_and_put(sk_listener, req);
 }
 

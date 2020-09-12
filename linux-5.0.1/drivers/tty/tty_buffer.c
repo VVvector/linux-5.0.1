@@ -454,6 +454,7 @@ EXPORT_SYMBOL_GPL(tty_prepare_flip_string);
  *
  *	Returns the number of bytes processed
  */
+ /* 调用线路规程的接收函数 -- ntty, n_tty_receive_buf2*/
 int tty_ldisc_receive_buf(struct tty_ldisc *ld, const unsigned char *p,
 			  char *f, int count)
 {
@@ -478,6 +479,7 @@ receive_buf(struct tty_port *port, struct tty_buffer *head, int count)
 	if (~head->flags & TTYB_NORMAL)
 		f = flag_buf_ptr(head, head->read);
 
+	/* 调用该port注册的receive函数。 tty_port_init()--default_client_ops->tty_port_default_receive_buf 进行初始。tty_port.c*/
 	n = port->client_ops->receive_buf(port, p, f, count);
 	if (n > 0)
 		memset(p, 0, n);
@@ -496,7 +498,7 @@ receive_buf(struct tty_port *port, struct tty_buffer *head, int count)
  *	Locking: takes buffer lock to ensure single-threaded flip buffer
  *		 'consumer'
  */
-
+/* 将tty port的buffer数据 投递到 ldata.read_buf[]缓冲区中。*/
 static void flush_to_ldisc(struct work_struct *work)
 {
 	struct tty_port *port = container_of(work, struct tty_port, buf.work);
@@ -530,6 +532,7 @@ static void flush_to_ldisc(struct work_struct *work)
 			continue;
 		}
 
+		/* 再次上传数据，会进入到线路规划层 */
 		count = receive_buf(port, head, count);
 		if (!count)
 			break;
@@ -551,6 +554,9 @@ static void flush_to_ldisc(struct work_struct *work)
  *	held off and retried later.
  */
 
+/* 唤醒工作队列，即 flush_to_disc()函数，
+在 flush_to_ldisc()中，要将数据从 port的 buffer(struct tty_buffer)
+投递到ldisc层的 ldata.read_buf[]缓冲区。*/
 void tty_flip_buffer_push(struct tty_port *port)
 {
 	tty_schedule_flip(port);
@@ -565,6 +571,7 @@ EXPORT_SYMBOL(tty_flip_buffer_push);
  *	Must be called before the other tty buffer functions are used.
  */
 
+/* tty port init时初始化调用*/
 void tty_buffer_init(struct tty_port *port)
 {
 	struct tty_bufhead *buf = &port->buf;
@@ -577,6 +584,7 @@ void tty_buffer_init(struct tty_port *port)
 	atomic_set(&buf->mem_used, 0);
 	atomic_set(&buf->priority, 0);
 	INIT_WORK(&buf->work, flush_to_ldisc);
+	/* 这里就表示 port层的buffer最大 64k。 */
 	buf->mem_limit = TTYB_DEFAULT_MEM_LIMIT;
 }
 

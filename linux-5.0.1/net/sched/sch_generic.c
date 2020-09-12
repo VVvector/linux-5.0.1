@@ -35,7 +35,7 @@
 #include <net/xfrm.h>
 
 /* Qdisc to use by default */
-const struct Qdisc_ops *default_qdisc_ops = &pfifo_fast_ops;
+const struct Qdisc_ops *fq_codel = &pfifo_fast_ops;
 EXPORT_SYMBOL(default_qdisc_ops);
 
 /* Main transmission queue. */
@@ -307,6 +307,9 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 	if (root_lock)
 		spin_unlock(root_lock);
 
+	/*  这里需要验证     该skb是否是开启了gso或者checksum offload 
+		注意：这里要进行gso和hw checksum 的检查或处理。
+	*   /
 	/* Note that we validate skb (GSO, checksum, ...) outside of locks */
 	if (validate)
 		skb = validate_xmit_skb_list(skb, dev, &again);
@@ -322,6 +325,7 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 #endif
 
 	if (likely(skb)) {
+		/* 这里看出 ndo_start_xmit是不能阻塞的。 */ 
 		HARD_TX_LOCK(dev, txq, smp_processor_id());
 		if (!netif_xmit_frozen_or_stopped(txq))
 			skb = dev_hard_start_xmit(skb, dev, txq, &ret);
@@ -377,6 +381,7 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 	bool validate;
 
 	/* Dequeue packet */
+	/*dequeue一个skb*/
 	skb = dequeue_skb(q, &validate, packets);
 	if (unlikely(!skb))
 		return false;
@@ -392,6 +397,7 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 
 void __qdisc_run(struct Qdisc *q)
 {
+	/* 这里为64 */
 	int quota = dev_tx_weight;
 	int packets;
 
@@ -447,6 +453,8 @@ static void dev_watchdog(struct timer_list *t)
 
 				txq = netdev_get_tx_queue(dev, i);
 				trans_start = txq->trans_start;
+
+				/* 这里会检查 tx queue是否还在stop状态，如果超时后，则会调用dev的 ndo_tx_timeout()接口。 */
 				if (netif_xmit_stopped(txq) &&
 				    time_after(jiffies, (trans_start +
 							 dev->watchdog_timeo))) {
@@ -665,7 +673,7 @@ static struct sk_buff *pfifo_fast_dequeue(struct Qdisc *qdisc)
 		if (__skb_array_empty(q))
 			continue;
 
-		skb = __skb_array_consume(q);
+		skb = __skb_array   _consume(q);
 	}
 	if (likely(skb)) {
 		qdisc_qstats_cpu_backlog_dec(qdisc, skb);
@@ -811,6 +819,7 @@ EXPORT_SYMBOL(pfifo_fast_ops);
 static struct lock_class_key qdisc_tx_busylock;
 static struct lock_class_key qdisc_running_key;
 
+/* 申请一个qdisc */
 struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 			  const struct Qdisc_ops *ops,
 			  struct netlink_ext_ack *extack)
@@ -828,6 +837,8 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	}
 
 	dev = dev_queue->dev;
+
+	/* 申请一个qdisc */
 	p = kzalloc_node(size, GFP_KERNEL,
 			 netdev_queue_numa_node_read(dev_queue));
 
@@ -909,6 +920,7 @@ struct Qdisc *qdisc_create_dflt(struct netdev_queue *dev_queue,
 	}
 	sch->parent = parentid;
 
+	/*进行qdisc的初始化，这里会调用qdisc的init函数*/
 	if (!ops->init || ops->init(sch, NULL, extack) == 0)
 		return sch;
 
@@ -1044,11 +1056,18 @@ static void attach_one_default_qdisc(struct net_device *dev,
 				     void *_unused)
 {
 	struct Qdisc *qdisc;
+
+	/* 默认 default_qdisc_ops = pfifo_fast_ops;
+	还可通过/proc/sys/net/core/default_qdisc 这个来修改。
+	现在ubuntu用的是fq_codel作为默认的qdisc。
+	*/
 	const struct Qdisc_ops *ops = default_qdisc_ops;
 
+	/*如果是no queue情况，默认安装 noqueue_disc_ops*/
 	if (dev->priv_flags & IFF_NO_QUEUE)
 		ops = &noqueue_qdisc_ops;
 
+	/*是单queue情况，默认安装 pfifo_fast_ops*/
 	qdisc = qdisc_create_dflt(dev_queue, ops, TC_H_ROOT, NULL);
 	if (!qdisc) {
 		netdev_info(dev, "activation failed\n");
@@ -1064,20 +1083,30 @@ static void attach_default_qdiscs(struct net_device *dev)
 	struct netdev_queue *txq;
 	struct Qdisc *qdisc;
 
+	/* 获取net device的txq 0 */
 	txq = netdev_get_tx_queue(dev, 0);
 
+	/*如果不是 multi queue：默认安装 pfifo_fast_ops 或者 noqueue_qdisc_ops*/
 	if (!netif_is_multiqueue(dev) ||
 	    dev->priv_flags & IFF_NO_QUEUE) {
 		netdev_for_each_tx_queue(dev, attach_one_default_qdisc, NULL);
 		dev->qdisc = txq->qdisc_sleeping;
 		qdisc_refcount_inc(dev->qdisc);
+
+	/*如果是multi queue：默认安装 mq_qdisc_ops； 会调用mq的init方法
+		会为每个tx queue都申请一个qdisc(为default_qdisc_ops或者   pfifo_fast_op)
+		linux-5.0.1/net/sched/sch_mq.c */
 	} else {
 		qdisc = qdisc_create_dflt(txq, &mq_qdisc_ops, TC_H_ROOT, NULL);
 		if (qdisc) {
+			/* 初始化该net device的qdisc为mq_qdisc_ops */
 			dev->qdisc = qdisc;
+			/*会调用 mq的 attach方法，实际是把mq的子qdisc都挂载到对应tx queue上。*/
 			qdisc->ops->attach(qdisc);
 		}
 	}
+
+	
 #ifdef CONFIG_NET_SCHED
 	if (dev->qdisc != &noop_qdisc)
 		qdisc_hash_add(dev->qdisc, false);
@@ -1110,6 +1139,7 @@ void dev_activate(struct net_device *dev)
 	 * and noqueue_qdisc for virtual interfaces
 	 */
 
+	/*安装默认的qdisc： pfifo_fast, noqueue, mq*/
 	if (dev->qdisc == &noop_qdisc)
 		attach_default_qdiscs(dev);
 
@@ -1118,7 +1148,13 @@ void dev_activate(struct net_device *dev)
 		return;
 
 	need_watchdog = 0;
+	
+	/*
+		把qdisc_sleeping中的qdisc算法，通过transtion_one_qdisc()赋值到netdev_queue->qdisc中
+	*/
 	netdev_for_each_tx_queue(dev, transition_one_qdisc, &need_watchdog);
+
+	
 	if (dev_ingress_queue(dev))
 		transition_one_qdisc(dev, dev_ingress_queue(dev), NULL);
 
@@ -1286,13 +1322,26 @@ static void dev_init_scheduler_queue(struct net_device *dev,
 	dev_queue->qdisc_sleeping = qdisc;
 }
 
+/*安装设备的qdisc为 noop_qdisc (该qdisc不会对数据包进行任何的分类或者排队，而是直接释放掉skb
+	所以，此时网卡设备还不能发送任何数据包。必须 ifconfig up起来后，才能发送数据包
+	ifconfig up会重新安装 默认的 qdisc。 
+	例如：pfifo_fast[一个tx queue]和mq[多个tx queue])
+*/
 void dev_init_scheduler(struct net_device *dev)
 {
+	/*linux-5.0.1/net/sched/sch_generic.c */
+	/* 该device 的qdisc被初始化为noop_qdisc */
 	dev->qdisc = &noop_qdisc;
+
+	/* 初始化每个tx queue的qdisc为noop_qdisc, 这里的tx queue个数在申请net device时就确定了 */
 	netdev_for_each_tx_queue(dev, dev_init_scheduler_queue, &noop_qdisc);
+
+	/* 这里检查是否有ingree的queue，如果有，则 也初始化为 noop_qdisc */
 	if (dev_ingress_queue(dev))
 		dev_init_scheduler_queue(dev, dev_ingress_queue(dev), &noop_qdisc);
 
+	/* 这里会初始化watchdog timer，这个timer用于检查 tx queue是否stop超时了。
+	否则，会调用 ndo_tx_timeout() 接口。*/
 	timer_setup(&dev->watchdog_timer, dev_watchdog, 0);
 }
 

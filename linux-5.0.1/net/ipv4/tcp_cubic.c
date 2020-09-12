@@ -466,6 +466,12 @@ static struct tcp_congestion_ops cubictcp __read_mostly = {
 	.name		= "cubic",
 };
 
+/* 系统默认的拥塞控制算法
+
+	拥塞算法是 针对发送方而言，但 收到接收方的窗口限制。
+	
+	解决在大带宽延迟积网络中TCP拥塞窗口增长缓慢的问题，其具有TCP友好性与RTT公平性，实时保持窗口的增长率不受RTT的影响
+*/
 static int __init cubictcp_register(void)
 {
 	BUILD_BUG_ON(sizeof(struct bictcp) > ICSK_CA_PRIV_SIZE);

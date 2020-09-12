@@ -15,6 +15,7 @@ extern void tty_flip_buffer_push(struct tty_port *port);
 void tty_schedule_flip(struct tty_port *port);
 int __tty_insert_flip_char(struct tty_port *port, unsigned char ch, char flag);
 
+/* 拷贝一个字节的数据到 port的buffer中  */
 static inline int tty_insert_flip_char(struct tty_port *port,
 					unsigned char ch, char flag)
 {
@@ -31,6 +32,7 @@ static inline int tty_insert_flip_char(struct tty_port *port,
 	return __tty_insert_flip_char(port, ch, flag);
 }
 
+/* 拷贝指定长度的数据到port的buffer中 */
 static inline int tty_insert_flip_string(struct tty_port *port,
 		const unsigned char *chars, size_t size)
 {

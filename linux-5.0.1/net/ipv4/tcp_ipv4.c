@@ -227,9 +227,12 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		nexthop = inet_opt->opt.faddr;
 	}
 
+	/* 源端口，目的端口 */
 	orig_sport = inet->inet_sport;
 	orig_dport = usin->sin_port;
 	fl4 = &inet->cork.fl.u.ip4;
+
+	/* 查找路由表  */
 	rt = ip_route_connect(fl4, nexthop, inet->inet_saddr,
 			      RT_CONN_FLAGS(sk), sk->sk_bound_dev_if,
 			      IPPROTO_TCP,
@@ -268,6 +271,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (inet_opt)
 		inet_csk(sk)->icsk_ext_hdr_len = inet_opt->opt.optlen;
 
+	/* 设置MSS */
 	tp->rx_opt.mss_clamp = TCP_MSS_DEFAULT;
 
 	/* Socket identity is still unknown (sport may be zero).
@@ -275,7 +279,10 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	 * lock select source port, enter ourselves into the hash tables and
 	 * complete initialization after this.
 	 */
+	 /* 建立连接的数据包 SYN packet */
 	tcp_set_state(sk, TCP_SYN_SENT);
+
+	/* 为这个连接绑定一个port */
 	err = inet_hash_connect(tcp_death_row, sk);
 	if (err)
 		goto failure;
@@ -312,6 +319,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (err)
 		goto failure;
 
+	/*  发送 SYN 数据包 */
 	err = tcp_connect(sk);
 
 	if (err)
@@ -623,12 +631,16 @@ void __tcp_v4_send_check(struct sk_buff *skb, __be32 saddr, __be32 daddr)
 {
 	struct tcphdr *th = tcp_hdr(skb);
 
+	/* 只计算了伪首部。 
+		tcp报头和tcp数据的由硬件完成。
+	*/
 	th->check = ~tcp_v4_check(skb->len, saddr, daddr, 0);
 	skb->csum_start = skb_transport_header(skb) - skb->head;
 	skb->csum_offset = offsetof(struct tcphdr, check);
 }
 
 /* This routine computes an IPv4 TCP checksum. */
+/* checksum计算 */
 void tcp_v4_send_check(struct sock *sk, struct sk_buff *skb)
 {
 	const struct inet_sock *inet = inet_sk(sk);
@@ -1538,6 +1550,8 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 				sk->sk_rx_dst = NULL;
 			}
 		}
+
+		/*将skb放入receive队列中*/
 		tcp_rcv_established(sk, skb);
 		return 0;
 	}
@@ -1778,6 +1792,7 @@ static void tcp_v4_fill_cb(struct sk_buff *skb, const struct iphdr *iph,
  *	From tcp_input.c
  */
 
+/*传输层的接收函数*/
 int tcp_v4_rcv(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb->dev);
@@ -1912,6 +1927,7 @@ process:
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
 	if (!sock_owned_by_user(sk)) {
+		/*继续往上传skb*/
 		ret = tcp_v4_do_rcv(sk, skb);
 	} else if (tcp_add_backlog(sk, skb)) {
 		goto discard_and_relse;
@@ -2012,7 +2028,7 @@ EXPORT_SYMBOL(inet_sk_rx_dst_set);
 
 const struct inet_connection_sock_af_ops ipv4_specific = {
 	.queue_xmit	   = ip_queue_xmit,
-	.send_check	   = tcp_v4_send_check,
+	.send_check	   = tcp_v4_send_check, /* checkusum 计算, 只进行了伪头部的计算，剩余的推迟到 最后sxmit_one() ->validate_xmit_skb*/
 	.rebuild_header	   = inet_sk_rebuild_header,
 	.sk_rx_dst_set	   = inet_sk_rx_dst_set,
 	.conn_request	   = tcp_v4_conn_request,
@@ -2559,9 +2575,24 @@ struct proto tcp_prot = {
 	.enter_memory_pressure	= tcp_enter_memory_pressure,
 	.leave_memory_pressure	= tcp_leave_memory_pressure,
 	.stream_memory_free	= tcp_stream_memory_free,
+
+	/*
+		表示到目前为止，整个tcp协议中创建的socket的个数。
+		可以在/proc/net/sockstat文件中查看。
+	*/
 	.sockets_allocated	= &tcp_sockets_allocated,
 	.orphan_count		= &tcp_orphan_count,
+
+	/*
+		表示当前整个tcp协议为缓冲区所分配的内存（包括读缓存队列）。
+		且大小是页边界对齐的。
+	*/
 	.memory_allocated	= &tcp_memory_allocated,
+
+	/*
+		一个标志，在tcp缓存大小进入到警告状态时，置1。
+		需要查看：__sk_mem_schedule()和__sk_mem_reclaim()这两个函数
+	*/
 	.memory_pressure	= &tcp_memory_pressure,
 	.sysctl_mem		= sysctl_tcp_mem,
 	.sysctl_wmem_offset	= offsetof(struct net, ipv4.sysctl_tcp_wmem),

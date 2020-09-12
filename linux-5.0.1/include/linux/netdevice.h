@@ -333,6 +333,10 @@ struct napi_struct {
 	int			poll_owner;
 #endif
 	struct net_device	*dev;
+
+	/*保存需要merge的skb包，对应不同的connect。
+	每次进来的skb都会在这个链表里面进行查找，看是否需要merge
+	*/
 	struct gro_list		gro_hash[GRO_HASH_BUCKETS];
 	struct sk_buff		*skb;
 	struct hrtimer		timer;
@@ -761,10 +765,15 @@ struct rx_queue_attribute {
  * This structure holds an XPS map which can be of variable length.  The
  * map is an array of queues.
  */
+ /*
+保存了对应的cpu掩码对应的发送队列。这里一个xps_map有可能会映射到多个队列。
+*/
 struct xps_map {
+	/*队列长度*/
 	unsigned int len;
 	unsigned int alloc_len;
 	struct rcu_head rcu;
+	/*对应的队列序列号数组*/
 	u16 queues[0];
 };
 #define XPS_MAP_SIZE(_num) (sizeof(struct xps_map) + ((_num) * sizeof(u16)))
@@ -774,8 +783,12 @@ struct xps_map {
 /*
  * This structure holds all XPS maps for device.  Maps are indexed by CPU.
  */
+ /*保存了设备的所有的cpu map， 比如一个设备有16个队列，然后这里这个设备的xps_dev_maps
+就会保存着16个队列的xps_map（sysctl中设置的xps_map）, 而每个就是xps_map结构。*/
 struct xps_dev_maps {
+	/*rcu锁*/
 	struct rcu_head rcu;
+	/*所有队列的cpu map数组*/
 	struct xps_map __rcu *attr_map[0]; /* Either CPUs map or RXQs map */
 };
 
@@ -1961,6 +1974,7 @@ struct net_device {
 	spinlock_t		tx_global_lock;
 	int			watchdog_timeo;
 
+	/*当前设备的所有xps_map*/
 #ifdef CONFIG_XPS
 	struct xps_dev_maps __rcu *xps_cpus_map;
 	struct xps_dev_maps __rcu *xps_rxqs_map;
@@ -2246,6 +2260,8 @@ static inline void netif_tx_napi_add(struct net_device *dev,
  */
 void netif_napi_del(struct napi_struct *napi);
 
+/*gro最核心的一个数据结构napi_gro_cb,它是保存在skb的cb域中，它保存了gro要使用到的一些上下文，
+这里每个域kernel的注释都比较清楚。*/
 struct napi_gro_cb {
 	/* Virtual address of skb_shinfo(skb)->frags[0].page + offset. */
 	void	*frag0;
@@ -2975,7 +2991,14 @@ extern int netdev_flow_limit_table_len;
 /*
  * Incoming packets are placed on per-CPU queues
  */
+ /*是一个percpu变量, 即每个cpu都有一个这个变量*/
 struct softnet_data {
+	/*
+		napi会被挂入到该poll_list上，包括NAPI接口的driver以及非NAPI接口的driver都可以同一加入到这个poll_list上。
+		1. 对于NAPI接口，每个driver的napi结构都可以通过napi_schedule加入到这个poll_list上。
+		2. 对于非NAPI接口，把softnet_data->backlog通过napi_schedule加入到这个poll_list上。
+		这样做的目的是，无论NAPI还是none NAPI都可以统一到net_rx_action()函数的一致处理流程上来。
+	*/
 	struct list_head	poll_list;
 	struct sk_buff_head	process_queue;
 
@@ -3008,7 +3031,15 @@ struct softnet_data {
 	unsigned int		input_queue_tail;
 #endif
 	unsigned int		dropped;
+
+	/*老接口*/
+	/*非NAPI接口的netif_rx()会把skb挂到 input_pkt_queue 上面，
+	使用backlog作为一个NAPI，挂入softnet_data->poll_list上。
+	poll函数是： process_backlog()；
+	backlog的初始化在 net_dev_init()中进行。*/
 	struct sk_buff_head	input_pkt_queue;
+
+	/*用于兼容非NAPI的驱动*/
 	struct napi_struct	backlog;
 
 };
@@ -4489,12 +4520,24 @@ static inline bool net_gso_ok(netdev_features_t features, int gso_type)
 	return (features & feature) == feature;
 }
 
+/*
+1. dev feature和skb gso_type一致
+2. skb没有frag_list，或者 dev feature支持fraglist
+*/
 static inline bool skb_gso_ok(struct sk_buff *skb, netdev_features_t features)
 {
 	return net_gso_ok(features, skb_shinfo(skb)->gso_type) &&
 	       (!skb_has_frag_list(skb) || (features & NETIF_F_FRAGLIST));
 }
 
+
+/* 是否需要协议栈进行gso：
+1. 该skb是gso packet。gso_size表示生产gso大包时的数据包长度，一般为mss的整数倍。
+2. 
+	2.1 网卡不支持gso
+	2.2 frag_list为null，且网卡不支持 NETIF_F_FRAGLIST.
+	2.3 网卡不支持ALL_CSUM
+*/
 static inline bool netif_needs_gso(struct sk_buff *skb,
 				   netdev_features_t features)
 {

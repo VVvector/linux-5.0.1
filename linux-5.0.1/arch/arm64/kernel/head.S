@@ -175,6 +175,13 @@ ENDPROC(preserve_boot_args)
  * Corrupts:	ptrs, tmp1, tmp2
  * Returns:	tbl -> next level table page address
  */
+ 	/* 创建一个页表项，并且 返回下一个level的页表地址。
+		如果用linux的术语，就是创建PGD, GUD或PMD	的描述符。
+		如果用arm64术语，就是穿件L0, L1或L2的描述符。
+
+		具体创建哪一个level的Translation table descriptor就是由tbl参数指定的。
+		
+ 	*/
 	.macro	create_table_entry, tbl, virt, shift, ptrs, tmp1, tmp2
 	add	\tmp1, \tbl, #PAGE_SIZE
 	phys_to_pte \tmp2, \tmp1
@@ -202,6 +209,10 @@ ENDPROC(preserve_boot_args)
  * Corrupts:	index, tmp1
  * Returns:	rtbl
  */
+	/*  
+		往block中填充 pte_entry， 真正创建虚拟地址到物理地址的映射。
+		映射区域：start--end。
+	*/
 	.macro populate_entries, tbl, rtbl, index, eindex, flags, inc, tmp1
 .Lpe\@:	phys_to_pte \tmp1, \rtbl
 	orr	\tmp1, \tmp1, \flags	// tmp1 = table entry
@@ -306,8 +317,10 @@ ENDPROC(preserve_boot_args)
 	
 	由于打开MMU操作的时候，内核代码欢快的执行，这时候有一个地址映射ON/OFF的切换过程，
 	这种一致性映射可以保证在在打开MMU那一点附近的程序代码可以平滑切换。具体的操作分成两个阶段，
-	第一个阶段是通过create_pgd_entry建立中间level（也就是PGD和PUD）的描述符，
-	第二个阶段是创建PMD的描述符，由于PMD的描述符是block descriptor，
+
+	  第一个阶段是通过 create_pgd_entry 建立中间level（也就是PGD和PUD）的描述符，
+
+	  第二个阶段是创建PMD的描述符，由于PMD的描述符是block descriptor，
 	因此，完成PMD的设定后就完成了整个identity mapping页表的设定。
 */
 __create_page_tables:
@@ -342,7 +355,14 @@ __create_page_tables:
 	/*
 	 * Create the identity mapping.
 	 */
-	 /*创建indentity mapping(物理地址等于虚拟地址)*/
+	 /*
+	 
+	     内核启动过程中，在真正的物理内存尚未添加进系统，以及页表还未初始化之前，
+	 为了保证系统能正常运行，需要建立两个临时全局页表：idmap_pg_dir和swapper_pg_dir
+
+	 创建indentity mapping(物理地址等于虚拟地址)
+		用于 还开启mmu附近的code的address mapping。
+	 */
 	adrp	x0, idmap_pg_dir
 	adrp	x3, __idmap_text_start		// __pa(__idmap_text_start)
 

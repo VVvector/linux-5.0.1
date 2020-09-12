@@ -498,6 +498,15 @@ static inline int neigh_hh_output(const struct hh_cache *hh, struct sk_buff *skb
 	return dev_queue_xmit(skb);
 }
 
+/*the neighbour’s state is checked and the appropriate output function is called.
+
+the “hardware header” (hh) is cached (because we’ve sent data before and have previously generated it), 
+call neigh_hh_output. Otherwise, call the output function. Both code paths end with dev_queue_xmit which 
+pass the skb down to the Linux net device subsystem where it will be processed a bit more before 
+hitting the device driver layer. 
+*/
+
+/*最终都会走到 dev_queue_xmit()*/
 static inline int neigh_output(struct neighbour *n, struct sk_buff *skb)
 {
 	const struct hh_cache *hh = &n->hh;
@@ -505,7 +514,7 @@ static inline int neigh_output(struct neighbour *n, struct sk_buff *skb)
 	if ((n->nud_state & NUD_CONNECTED) && hh->hh_len)
 		return neigh_hh_output(hh, skb);
 	else
-		return n->output(n, skb);
+		return n->output(n, skb);  //这里指 neigh_resolve_output()函数
 }
 
 static inline struct neighbour *

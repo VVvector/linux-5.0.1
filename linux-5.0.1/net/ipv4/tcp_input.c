@@ -5608,6 +5608,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 
 			/* Bulk data transfer: receiver */
 			__skb_pull(skb, tcp_header_len);
+			/*将skb挂入receive队列中*/
 			eaten = tcp_queue_rcv(sk, skb, &fragstolen);
 
 			tcp_event_data_recv(sk, skb);
@@ -6478,6 +6479,11 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 		goto drop_and_free;
 
 	if (!want_cookie && !isn) {
+
+		/* 这里有检查 SYN队列的最大半连接数 sysctl_max_syn_backlog，512个。
+			用SYN cookie技术来处理SYN连接。避免守候半连接，用一个cookie来响应TCP SYN请求。
+		*/
+		
 		/* Kill the following clause, if you dislike this way. */
 		if (!net->ipv4.sysctl_tcp_syncookies &&
 		    (net->ipv4.sysctl_max_syn_backlog - inet_csk_reqsk_queue_len(sk) <

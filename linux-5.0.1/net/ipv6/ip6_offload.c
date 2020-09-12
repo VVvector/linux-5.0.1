@@ -281,6 +281,7 @@ not_same_flow:
 
 	skb_gro_postpull_rcsum(skb, iph, nlen);
 
+	/*调用传输层的receive方法。*/
 	pp = indirect_call_gro_receive_l4(tcp6_gro_receive, udp6_gro_receive,
 					 ops->callbacks.gro_receive, head, skb);
 

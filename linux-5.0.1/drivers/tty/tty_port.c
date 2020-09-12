@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/serdev.h>
 
+/* tty port 的接收函数*/
 static int tty_port_default_receive_buf(struct tty_port *port,
 					const unsigned char *p,
 					const unsigned char *f, size_t count)
@@ -57,10 +58,11 @@ static const struct tty_port_client_operations default_client_ops = {
 	.write_wakeup = tty_port_default_wakeup,
 };
 
+/* 注册port的 client_ops；初始化port buffer等。*/
 void tty_port_init(struct tty_port *port)
 {
 	memset(port, 0, sizeof(*port));
-	tty_buffer_init(port);
+	tty_buffer_init(port); //port层的buffer初始化，链表形式。
 	init_waitqueue_head(&port->open_wait);
 	init_waitqueue_head(&port->delta_msr_wait);
 	mutex_init(&port->mutex);
@@ -68,7 +70,7 @@ void tty_port_init(struct tty_port *port)
 	spin_lock_init(&port->lock);
 	port->close_delay = (50 * HZ) / 100;
 	port->closing_wait = (3000 * HZ) / 100;
-	port->client_ops = &default_client_ops;
+	port->client_ops = &default_client_ops; //这里对应receive函数
 	kref_init(&port->kref);
 }
 EXPORT_SYMBOL(tty_port_init);

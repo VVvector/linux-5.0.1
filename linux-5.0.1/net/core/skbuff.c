@@ -2462,7 +2462,7 @@ fault:
 }
 EXPORT_SYMBOL(skb_store_bits);
 
-/* Checksum skb data. */
+/* 软件计算 Checksum skb data. */
 __wsum __skb_checksum(const struct sk_buff *skb, int offset, int len,
 		      __wsum csum, const struct skb_checksum_ops *ops)
 {
@@ -2525,6 +2525,7 @@ __wsum __skb_checksum(const struct sk_buff *skb, int offset, int len,
 			__wsum csum2;
 			if (copy > len)
 				copy = len;
+			/* 计算checksum */
 			csum2 = __skb_checksum(frag_iter, offset - start,
 					       copy, 0, ops);
 			csum = ops->combine(csum, csum2, pos, copy);
@@ -2541,6 +2542,7 @@ __wsum __skb_checksum(const struct sk_buff *skb, int offset, int len,
 }
 EXPORT_SYMBOL(__skb_checksum);
 
+/* 计算checksum */
 __wsum skb_checksum(const struct sk_buff *skb, int offset,
 		    int len, __wsum csum)
 {
@@ -3572,6 +3574,9 @@ normal:
 		if (hsize > len || !sg)
 			hsize = len;
 
+		/* 表示 需要从frags数组 或者frag_list链表中拷贝数据。
+		i >= nfrags表示frags数组中的数据也被拷贝完了。
+		即需要从frag_list链表中拷贝数据。*/
 		if (!hsize && i >= nfrags && skb_headlen(list_skb) &&
 		    (skb_headlen(list_skb) == len || sg)) {
 			BUG_ON(skb_headlen(list_skb) > len);
@@ -3594,6 +3599,7 @@ normal:
 				frag++;
 			}
 
+			/* frag_list的数据不用真的拷贝，只需要拷贝其skb描述符，就可以复用数据区了。 */
 			nskb = skb_clone(list_skb, GFP_ATOMIC);
 			list_skb = list_skb->next;
 
@@ -3614,6 +3620,8 @@ normal:
 			nskb->truesize += skb_end_offset(nskb) - hsize;
 			skb_release_head_state(nskb);
 			__skb_push(nskb, doffset);
+
+		/* 数据从线性区或者frags数组中获取 */
 		} else {
 			nskb = __alloc_skb(hsize + doffset + headroom,
 					   GFP_ATOMIC, skb_alloc_rx_flag(head_skb),
@@ -3644,6 +3652,7 @@ normal:
 		if (nskb->len == len + doffset)
 			goto perform_csum_check;
 
+		/* 如果不支持NETIF_F_SG, 说明frags数组中没有数据，只考虑从线性区中拷贝数据。 */
 		if (!sg) {
 			if (!nskb->remcsum_offload)
 				nskb->ip_summed = CHECKSUM_NONE;
@@ -3709,6 +3718,7 @@ normal:
 				skb_frag_size_sub(nskb_frag, offset - pos);
 			}
 
+			/* frags数组中的数据并不是真的拷贝，而是nskb的frags数组直接指向相应的page */
 			skb_shinfo(nskb)->nr_frags++;
 
 			if (pos + size <= offset + len) {
@@ -3792,21 +3802,26 @@ err:
 }
 EXPORT_SYMBOL_GPL(skb_segment);
 
+/*把收到的skb 合并到gro的数据包上*/
 int skb_gro_receive(struct sk_buff *p, struct sk_buff *skb)
 {
 	struct skb_shared_info *pinfo, *skbinfo = skb_shinfo(skb);
+	/* 数据的偏移 */
 	unsigned int offset = skb_gro_offset(skb);
+	/* 数据包的header长度 */
 	unsigned int headlen = skb_headlen(skb);
 	unsigned int len = skb_gro_len(skb);
 	unsigned int delta_truesize;
 	struct sk_buff *lp;
 
+	/* gro数据包 最大不能超过 64k */
 	if (unlikely(p->len + len >= 65536))
 		return -E2BIG;
 
 	lp = NAPI_GRO_CB(p)->last;
 	pinfo = skb_shinfo(lp);
 
+	/*支持Scatter-Gather I/O的处理。frags page的packet gro合并处理。*/
 	if (headlen <= offset) {
 		skb_frag_t *frag;
 		skb_frag_t *frag2;
@@ -3826,6 +3841,7 @@ int skb_gro_receive(struct sk_buff *p, struct sk_buff *skb)
 			*--frag = *--frag2;
 		} while (--i);
 
+		/* frag0 中有header部分，需要去除掉。*/
 		frag->page_offset += offset;
 		skb_frag_size_sub(frag, offset);
 
@@ -3839,7 +3855,9 @@ int skb_gro_receive(struct sk_buff *p, struct sk_buff *skb)
 
 		NAPI_GRO_CB(skb)->free = NAPI_GRO_FREE;
 		goto done;
-	} else if (skb->head_frag) {
+
+	//网络设备驱动创建的skb，该标记为true， frags是指向skb 线性区中。
+	} else if (skb->head_frag) { 
 		int nr_frags = pinfo->nr_frags;
 		skb_frag_t *frag = pinfo->frags + nr_frags;
 		struct page *page = virt_to_head_page(skb->head);
@@ -3867,6 +3885,7 @@ int skb_gro_receive(struct sk_buff *p, struct sk_buff *skb)
 		goto done;
 	}
 
+	/* 没有 frags[]的skb，进行 gro数据合并操作 gro_list */
 merge:
 	delta_truesize = skb->truesize;
 	if (offset > headlen) {
@@ -3881,6 +3900,7 @@ merge:
 
 	__skb_pull(skb, offset);
 
+	/* frag list进行赋值，即合并操作 */
 	if (NAPI_GRO_CB(p)->last == p)
 		skb_shinfo(p)->frag_list = skb;
 	else

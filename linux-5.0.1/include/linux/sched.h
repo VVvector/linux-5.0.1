@@ -481,19 +481,32 @@ struct sched_entity {
 #endif
 };
 
+
+/*实时调度体，包含了完整的实时调度信息，是struct task_struct 的一个成员。*/
 struct sched_rt_entity {
 	struct list_head		run_list;
+
+	/*watchdog计数，用于判断当前进程时间是否超过RLIMIT_RITIME*/
 	unsigned long			timeout;
 	unsigned long			watchdog_stamp;
+
+	/*针对RR调度策略的调度时隙*/
 	unsigned int			time_slice;
 	unsigned short			on_rq;
 	unsigned short			on_list;
 
+	/*dequeue_rt_stack()中作为临时表量使用*/
 	struct sched_rt_entity		*back;
+	
 #ifdef CONFIG_RT_GROUP_SCHED
+	/*指向上一层调度实体*/
 	struct sched_rt_entity		*parent;
+
+	/*当前实时调度实体所在的就绪队列*/
 	/* rq on which this entity is (to be) queued: */
 	struct rt_rq			*rt_rq;
+
+	/*当前实时调度实体的子调度实体所在的就绪队列*/
 	/* rq "owned" by this entity/group: */
 	struct rt_rq			*my_q;
 #endif
@@ -589,6 +602,7 @@ struct wake_q_node {
 	struct wake_q_node *next;
 };
 
+/*进程描述符，用于管理和控制进行信息的 PCB */
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -635,14 +649,16 @@ struct task_struct {
 #endif
 	int				on_rq;
 
+	/* 调度优先级相关，策略相关的 */
 	int				prio;
 	int				static_prio;
 	int				normal_prio;
 	unsigned int			rt_priority;
 
+	/* 调度类， 调度实体相关，任务组相关等 */
 	const struct sched_class	*sched_class;
 	struct sched_entity		se;
-	struct sched_rt_entity		rt;
+	struct sched_rt_entity		rt; /*实时调度器*/
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group		*sched_task_group;
 #endif
@@ -661,6 +677,8 @@ struct task_struct {
 	int				nr_cpus_allowed;
 	cpumask_t			cpus_allowed;
 
+
+	/* 进程间的关系相关 */
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;

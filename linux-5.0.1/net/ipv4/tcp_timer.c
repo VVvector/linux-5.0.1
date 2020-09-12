@@ -211,6 +211,8 @@ static bool retransmits_timed_out(struct sock *sk,
 				(boundary - linear_backoff_thresh) * TCP_RTO_MAX;
 		timeout = jiffies_to_msecs(timeout);
 	}
+
+	/* tp->tcp_mstamp： tcp_output.c -- tcp_connect()中设置重传最开始时间。*/
 	return (s32)(tcp_time_stamp(tcp_sk(sk)) - start_ts - timeout) >= 0;
 }
 
@@ -221,6 +223,8 @@ static int tcp_write_timeout(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct net *net = sock_net(sk);
 	bool expired, do_reset;
+
+	/* 表示我们需要重传的最大次数 */
 	int retry_until;
 
 	if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
@@ -229,9 +233,13 @@ static int tcp_write_timeout(struct sock *sk)
 		} else {
 			sk_rethink_txhash(sk);
 		}
+
+		/* icsk_syn_retries表示syn失败时，能够重传的最大次数  tcp_syn_retries 5次。 */
 		retry_until = icsk->icsk_syn_retries ? : net->ipv4.sysctl_tcp_syn_retries;
 		expired = icsk->icsk_retransmits >= retry_until;
 	} else {
+
+		/* sysctl_tcp_retries1 表示最大的重传次数，当超过了这个值，就需要检查路由表了。 */
 		if (retransmits_timed_out(sk, net->ipv4.sysctl_tcp_retries1, 0)) {
 			/* Black hole detection */
 			tcp_mtu_probing(icsk, sk);
@@ -241,11 +249,20 @@ static int tcp_write_timeout(struct sock *sk)
 			sk_rethink_txhash(sk);
 		}
 
+		/* 设置重传最大次数为sysctl_tcp_retries2，一般这个值比 sysctl_tcp_retries1 大
+			和上面 sysctl_tcp_retries1 不同，当重传次数超过了这个值，就必须放弃重试了。
+		*/
 		retry_until = net->ipv4.sysctl_tcp_retries2;
 		if (sock_flag(sk, SOCK_DEAD)) {
 			const bool alive = icsk->icsk_rto < TCP_RTO_MAX;
 
+			/* sysctl_tcp_orphan_retries 主要针对孤立的socket(即已经从进程上下文中删除了，
+			可是，还有一些清理工作没有完成)； 对于这种socket，我们重试的最大次数就是它。 */
 			retry_until = tcp_orphan_retries(sk, alive);
+
+			/* 最终判断 重传次数是否达到 retry_until， 则断开连接，且该函数返回.
+				==> 通过retry_until重传次数转换成对于的最大超时时间。
+			*/
 			do_reset = alive ||
 				!retransmits_timed_out(sk, retry_until, 0);
 
@@ -437,12 +454,16 @@ void tcp_retransmit_timer(struct sock *sk)
 	if (tp->fastopen_rsk) {
 		WARN_ON_ONCE(sk->sk_state != TCP_SYN_RECV &&
 			     sk->sk_state != TCP_FIN_WAIT1);
+
+		/* syn ack timer， 检查syn后的ack timeout处理。 */
 		tcp_fastopen_synack_timer(sk);
 		/* Before we receive ACK to our SYN-ACK don't retransmit
 		 * anything else (e.g., data or FIN segments).
 		 */
 		return;
 	}
+
+	/* 如果没有需要确认的ack包，则什么都不做。 */
 	if (!tp->packets_out)
 		goto out;
 
@@ -450,6 +471,11 @@ void tcp_retransmit_timer(struct sock *sk)
 
 	tp->tlp_high_seq = 0;
 
+
+	/*
+		snd_wnd为窗口大小。sock_flag用来判断sock的状态，最后一个判断是
+		当前的连接状态不能处于sync_sent和syn_recv状态，即连接还未建立状态。
+	*/
 	if (!tp->snd_wnd && !sock_flag(sk, SOCK_DEAD) &&
 	    !((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) {
 		/* Receiver dastardly shrinks window. Our retransmits
@@ -474,20 +500,37 @@ void tcp_retransmit_timer(struct sock *sk)
 					    tp->snd_una, tp->snd_nxt);
 		}
 #endif
+
+		/*
+			tcp_jiffies32也就是jiffes，而rcv_tstamp表示最后一个ack接收的时间，也就是
+			最后一次对端确认的时间。因此，这两个时间之差不能大于tcp_rto_max，因为
+			tcp_rto_max为我们重传定时器的间隔时间的最大值。
+
+			tp->rcv_tstamp会在 tcp_input.c的 tcp_ack()函数中被更新
+		*/
 		if (tcp_jiffies32 - tp->rcv_tstamp > TCP_RTO_MAX) {
 			tcp_write_err(sk);
 			goto out;
 		}
+
+		/* 这个函数用来进入loss状态，也就是进行一些拥塞以及流量的控制。 */
 		tcp_enter_loss(sk);
+
+		/* 现在开始重传skb */
 		tcp_retransmit_skb(sk, tcp_rtx_queue_head(sk), 1);
 		__sk_dst_reset(sk);
+
+		/* 然后，重启定时器，继续等待akc的到来。 */
 		goto out_reset_timer;
 	}
 
+
+	/* 判断重传次数是否已经到了，如果超过了系统设定的重传次数，直接退出到out */
 	__NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPTIMEOUTS);
-	if (tcp_write_timeout(sk))
+	if (tcp_write_timeout(sk)) //重要api
 		goto out;
 
+	/* 到达这里，说明我们重传的次数还没到，icsk->icsk_retransmits表示重传的次数，下面进行了统计信息的收集。 */
 	if (icsk->icsk_retransmits == 0) {
 		int mib_idx = 0;
 
@@ -511,6 +554,7 @@ void tcp_retransmit_timer(struct sock *sk)
 
 	tcp_enter_loss(sk);
 
+	/* 再一次尝试重传失败了。。。 */
 	if (tcp_retransmit_skb(sk, tcp_rtx_queue_head(sk), 1) > 0) {
 		/* Retransmission failed because of local congestion,
 		 * do not backoff.
@@ -538,8 +582,8 @@ void tcp_retransmit_timer(struct sock *sk)
 	 * implemented ftp to mars will work nicely. We will have to fix
 	 * the 120 second clamps though!
 	 */
-	icsk->icsk_backoff++;
-	icsk->icsk_retransmits++;
+	icsk->icsk_backoff++;  //主要用于零窗口定时器
+	icsk->icsk_retransmits++; //重传次数自加
 
 out_reset_timer:
 	/* If stream is thin, use linear timeouts. Since 'icsk_backoff' is
@@ -551,18 +595,22 @@ out_reset_timer:
 	 * exponential backoff behaviour to avoid continue hammering
 	 * linear-timeout retransmissions into a black hole
 	 */
+	 /* 如果是小数据(thin stream)包，则设置rto的值。 */
 	if (sk->sk_state == TCP_ESTABLISHED &&
 	    (tp->thin_lto || net->ipv4.sysctl_tcp_thin_linear_timeouts) &&
 	    tcp_stream_is_thin(tp) &&
 	    icsk->icsk_retransmits <= TCP_THIN_LINEAR_RETRIES) {
 		icsk->icsk_backoff = 0;
 		icsk->icsk_rto = min(__tcp_set_rto(tp), TCP_RTO_MAX);
-	} else {
+
+	/* block thream，计算rto，并重启定时器，这里使用kam算法，也就是下次超时时间增加一倍。*/
+	} else {  
 		/* Use normal (exponential) backoff */
 		icsk->icsk_rto = min(icsk->icsk_rto << 1, TCP_RTO_MAX);
 	}
 	inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
 				  tcp_clamp_rto_to_user_timeout(sk), TCP_RTO_MAX);
+
 	if (retransmits_timed_out(sk, net->ipv4.sysctl_tcp_retries1 + 1, 0))
 		__sk_dst_reset(sk);
 
@@ -647,8 +695,12 @@ void tcp_set_keepalive(struct sock *sk, int val)
 }
 EXPORT_SYMBOL_GPL(tcp_set_keepalive);
 
-
-static void tcp_keepalive_timer (struct timer_list *t)
+/* 用来检测一个连接是否还存在。。。
+	超时时间：7200秒，即2小时， 即超时后，会执行该timer函数。
+	最大次数：9次
+	每次发送packet间隔：75秒
+*/
+static void tcp_keepalive_timer(struct timer_list *t)
 {
 	struct sock *sk = from_timer(sk, t, sk_timer);
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -673,11 +725,14 @@ static void tcp_keepalive_timer (struct timer_list *t)
 		if (tp->linger2 >= 0) {
 			const int tmo = tcp_fin_time(sk) - TCP_TIMEWAIT_LEN;
 
+			/* Fin_Wain_2 Timer 函数 */
 			if (tmo > 0) {
 				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
 				goto out;
 			}
 		}
+
+		/* 发送 TCPHDR_RST package */
 		tcp_send_active_reset(sk, GFP_ATOMIC);
 		goto death;
 	}
@@ -692,8 +747,10 @@ static void tcp_keepalive_timer (struct timer_list *t)
 	if (tp->packets_out || !tcp_write_queue_empty(sk))
 		goto resched;
 
+	/* elapsed time of last received data packet */
 	elapsed = keepalive_time_elapsed(tp);
 
+	/* 比较 tcp_keepalive_time时间，是否超时。（最大是 7200s, 两个小时。） */
 	if (elapsed >= keepalive_time_when(tp)) {
 		/* If the TCP_USER_TIMEOUT option is enabled, use that
 		 * to determine when to timeout instead.
@@ -702,14 +759,16 @@ static void tcp_keepalive_timer (struct timer_list *t)
 		    elapsed >= msecs_to_jiffies(icsk->icsk_user_timeout) &&
 		    icsk->icsk_probes_out > 0) ||
 		    (icsk->icsk_user_timeout == 0 &&
-		    icsk->icsk_probes_out >= keepalive_probes(tp))) {
+		    icsk->icsk_probes_out >= keepalive_probes(tp))) {  	/* tcp_keepalive_probes为9次。 */
 			tcp_send_active_reset(sk, GFP_ATOMIC);
 			tcp_write_err(sk);
 			goto out;
 		}
+
+		/* 初始化 keepalive 或者 window probe */
 		if (tcp_write_wakeup(sk, LINUX_MIB_TCPKEEPALIVE) <= 0) {
 			icsk->icsk_probes_out++;
-			elapsed = keepalive_intvl_when(tp);
+			elapsed = keepalive_intvl_when(tp); //获取tcp_keepalive_intvl。keepalive探测包的发送间隔，tcp_keepalive_intvl为75s。
 		} else {
 			/* If keepalive was lost due to local congestion,
 			 * try harder.
@@ -721,6 +780,7 @@ static void tcp_keepalive_timer (struct timer_list *t)
 		elapsed = keepalive_time_when(tp) - elapsed;
 	}
 
+	/* 资源回收 */
 	sk_mem_reclaim(sk);
 
 resched:
@@ -758,8 +818,11 @@ static enum hrtimer_restart tcp_compressed_ack_kick(struct hrtimer *timer)
 
 void tcp_init_xmit_timers(struct sock *sk)
 {
+	/* 初始化三个定时器： 重传定时器，延时ack定时器，保活定时器 */
 	inet_csk_init_xmit_timers(sk, &tcp_write_timer, &tcp_delack_timer,
 				  &tcp_keepalive_timer);
+
+
 	hrtimer_init(&tcp_sk(sk)->pacing_timer, CLOCK_MONOTONIC,
 		     HRTIMER_MODE_ABS_PINNED_SOFT);
 	tcp_sk(sk)->pacing_timer.function = tcp_pace_kick;

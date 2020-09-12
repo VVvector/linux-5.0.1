@@ -691,6 +691,10 @@ int ip_defrag(struct net *net, struct sk_buff *skb, u32 user)
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMREQDS);
 	skb_orphan(skb);
 
+	/*
+		查找ip分片，实际上就是从ip4_frag表中取出对应项，
+		这里的哈希值就是由ip包头的（标识，源ip，目的ip，协议号）得到的。
+	*/
 	/* Lookup (or create) queue header */
 	qp = ip_find(net, ip_hdr(skb), user, vif);
 	if (qp) {
@@ -698,6 +702,7 @@ int ip_defrag(struct net *net, struct sk_buff *skb, u32 user)
 
 		spin_lock(&qp->q.lock);
 
+		/* 实现将ip分片加到队列中 */
 		ret = ip_frag_queue(qp, skb);
 
 		spin_unlock(&qp->q.lock);
@@ -974,12 +979,16 @@ void __init ipfrag_init(void)
 {
 	ip4_frags.constructor = ip4_frag_init;
 	ip4_frags.destructor = ip4_frag_free;
+	
 	ip4_frags.qsize = sizeof(struct ipq);
 	ip4_frags.frag_expire = ip_expire;
 	ip4_frags.frags_cache_name = ip_frag_cache_name;
 	ip4_frags.rhash_params = ip4_rhash_params;
+	
 	if (inet_frags_init(&ip4_frags))
 		panic("IP: failed to allocate ip4_frags cache\n");
+	
 	ip4_frags_ctl_register();
+	
 	register_pernet_subsys(&ip4_frags_ops);
 }

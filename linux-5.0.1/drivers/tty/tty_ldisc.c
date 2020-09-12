@@ -766,6 +766,7 @@ void tty_ldisc_hangup(struct tty_struct *tty, bool reinit)
 
 int tty_ldisc_setup(struct tty_struct *tty, struct tty_struct *o_tty)
 {
+	/* 实际调用 n_tty_open() */
 	int retval = tty_ldisc_open(tty, tty->ldisc);
 	if (retval)
 		return retval;

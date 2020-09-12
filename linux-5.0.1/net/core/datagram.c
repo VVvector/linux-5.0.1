@@ -417,6 +417,7 @@ int __skb_datagram_iter(const struct sk_buff *skb, int offset,
 	int i, copy = start - offset, start_off = offset, n;
 	struct sk_buff *frag_iter;
 
+	/*1. 拷贝线性区*/
 	/* Copy header. */
 	if (copy > 0) {
 		if (copy > len)
@@ -429,6 +430,7 @@ int __skb_datagram_iter(const struct sk_buff *skb, int offset,
 			return 0;
 	}
 
+	/*拷贝SG区，即paged data (frags)*/
 	/* Copy paged appendix. Hmm... why does this look so complicated? */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		int end;
@@ -455,6 +457,7 @@ int __skb_datagram_iter(const struct sk_buff *skb, int offset,
 		start = end;
 	}
 
+	/*3.递归处理 frag_list*/
 	skb_walk_frags(skb, frag_iter) {
 		int end;
 
@@ -528,7 +531,7 @@ int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
 {
 	trace_skb_copy_datagram_iovec(skb, len);
 	return __skb_datagram_iter(skb, offset, to, len, false,
-			simple_copy_to_iter, NULL);
+		simple_copy_to_iter, NULL);
 }
 EXPORT_SYMBOL(skb_copy_datagram_iter);
 

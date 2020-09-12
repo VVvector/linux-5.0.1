@@ -147,7 +147,8 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags
 		irqreturn_t res;
 
 		trace_irq_handler_entry(irq, action);
-		/*如果中断时共享的，此函数中一定要判断一下是不是自己设备的中断。
+
+		/*如果中断是共享的，此函数中一定要判断一下是不是自己设备的中断。-- 需要device driver自己添加判断逻辑。
 		这就是我们driver中注册的irq handler。*/
 		res = action->handler(irq, action->dev_id);
 		trace_irq_handler_exit(irq, action, res);
@@ -157,6 +158,7 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags
 			local_irq_disable();
 
 		switch (res) {
+		/* 中断被线程化了 */
 		case IRQ_WAKE_THREAD:
 			/*
 			 * Catch drivers which return WAKE_THREAD but
@@ -184,15 +186,20 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags
 	return retval;
 }
 
-/*此阶段才是真正执行driver注册的 irq handler，
+/*此阶段才是真正执行 device driver 注册的 irq handler，
 会循环执行每一个irqaction (action->handler, 或thread)
+
+这里的 desc->action->handler() 表示第二层次的中断处理函数，有用户注册实现具体设备的驱动服务
+程序，都是和GIC操作无关的逻辑。同时，一个中断源可以有多个设备共享，所以一个desc可以挂载多个
+action，由链表结构组织起来。
+
 */
 irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 {
 	irqreturn_t retval;
 	unsigned int flags = 0;
 
-	/*循环执行irq注册的所有irq handler*/
+	/*循环执行该irq注册的所有irq handler*/
 	retval = __handle_irq_event_percpu(desc, &flags);
 
 	add_interrupt_randomness(desc->irq_data.irq, flags);
@@ -202,8 +209,8 @@ irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 	return retval;
 }
 
-/*在执行generic_handle_irq_desc()函数时，会调用 irq_desc->handle_irq，
-handle_irq是在申请中断的时候被设置，不过不管被设置成哪个函数最后都会调用handle_irq_event
+/*在执行 generic_handle_irq_desc() 函数时，会调用 irq_desc->handle_irq，
+handle_irq是在申请中断的时候被设置，不过不管被设置成哪个函数最后都会调用 handle_irq_event()
 */
 irqreturn_t handle_irq_event(struct irq_desc *desc)
 {
@@ -220,7 +227,7 @@ irqreturn_t handle_irq_event(struct irq_desc *desc)
 	return ret;
 }
 
-/*该函数在irq_gic_v3.c中被调用，即handle_arch_irq被设定。*/
+/*该函数在 irq_gic_v3.c中被调用，即 handle_arch_irq 被设定。*/
 #ifdef CONFIG_GENERIC_IRQ_MULTI_HANDLER
 int __init set_handle_irq(void (*handle_irq)(struct pt_regs *))
 {

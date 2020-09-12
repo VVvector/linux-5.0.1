@@ -90,7 +90,7 @@ struct n_tty_data {
 	size_t read_head;
 	size_t commit_head;
 	size_t canon_head;
-	size_t echo_head;
+	size_t echo_head;  //记录echo buffer的数据size
 	size_t echo_commit;
 	size_t echo_mark;
 	DECLARE_BITMAP(char_map, 256);
@@ -631,8 +631,18 @@ static size_t __process_echoes(struct tty_struct *tty)
 	old_space = space = tty_write_room(tty);
 
 	tail = ldata->echo_tail;
+	
+
+	/*
+		#define N_TTY_BUF_SIZE 4096
+		#define MASK(x) ((x) & (N_TTY_BUF_SIZE - 1))
+	*/
 	while (MASK(ldata->echo_commit) != MASK(tail)) {
+
+		/* 获取tail处的字符。 */
 		c = echo_buf(ldata, tail);
+
+		/* 如果是特殊字符 0xFF*/
 		if (c == ECHO_OP_START) {
 			unsigned char op;
 			int no_space_left = 0;
@@ -789,6 +799,7 @@ static void commit_echoes(struct tty_struct *tty)
 	}
 
 	ldata->echo_commit = head;
+	/* 调用tty dirver的write函数将数据 写回发送方。 */
 	echoed = __process_echoes(tty);
 	mutex_unlock(&ldata->output_lock);
 
@@ -1438,14 +1449,20 @@ n_tty_receive_char_fast(struct tty_struct *tty, unsigned char c)
 		start_tty(tty);
 		process_echoes(tty);
 	}
+
+	/* 这里就会把收到的数据，再回传到 发送方。 */
 	if (L_ECHO(tty)) {
 		finish_erasing(ldata);
 		/* Record the column of first canon char. */
 		if (ldata->canon_head == ldata->read_head)
 			echo_set_canon_col(ldata);
+
+		/* 把接收的数据写到 ldata->echo_buf  ,后续会在发送回发送方。     */
 		echo_char(c, tty);
 		commit_echoes(tty);
 	}
+
+	/* 把该数据拷贝到 ldata.read_buff[]， 可供线路规程的read函数读取。*/
 	put_tty_queue(c, ldata);
 }
 
@@ -1597,6 +1614,7 @@ n_tty_receive_buf_fast(struct tty_struct *tty, const unsigned char *cp,
 	struct n_tty_data *ldata = tty->disc_data;
 	char flag = TTY_NORMAL;
 
+	/* 一个字符一个字符的拷贝的。 */
 	while (count--) {
 		if (fp)
 			flag = *fp++;
@@ -1604,17 +1622,40 @@ n_tty_receive_buf_fast(struct tty_struct *tty, const unsigned char *cp,
 			unsigned char c = *cp++;
 
 			if (!test_bit(c, ldata->char_map))
-				n_tty_receive_char_fast(tty, c);
-			else if (n_tty_receive_char_special(tty, c) && count) {
+				n_tty_receive_char_fast(tty, c); //非特殊字符情况下，大部分数据走本路径。
+			else if (n_tty_receive_char_special(tty, c) && count) { //特殊字符，比如回车符走这个路径。
 				if (fp)
 					flag = *fp++;
 				n_tty_receive_char_lnext(tty, *cp++, flag);
 				count--;
 			}
 		} else
-			n_tty_receive_char_flagged(tty, *cp++, flag);
+			n_tty_receive_char_flagged(tty, *cp++, flag); //带标志字符，比如出错,溢出等。
 	}
 }
+
+/* 
+struct ktermios tty_std_termios = {	//for the benefit of tty drivers 
+	.c_iflag = ICRNL | IXON,
+	.c_oflag = OPOST | ONLCR,
+	.c_cflag = B38400 | CS8 | CREAD | HUPCL,
+	.c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK |
+		   ECHOCTL | ECHOKE | IEXTEN,
+	.c_cc = INIT_C_CC,
+	.c_ispeed = 38400,
+	.c_ospeed = 38400,
+	//.c_line = N_TTY,
+};
+
+ldata = {
+	.real_raw = 0,
+	.raw = 0,
+	.closing = 0,
+	.lnext = 0,
+	
+}		   
+
+*/
 
 static void __receive_buf(struct tty_struct *tty, const unsigned char *cp,
 			  char *fp, int count)
@@ -1639,10 +1680,12 @@ static void __receive_buf(struct tty_struct *tty, const unsigned char *cp,
 		}
 
 		if (!preops && !I_PARMRK(tty))
+			/* 会走条路进行投递数据 */
 			n_tty_receive_buf_fast(tty, cp, fp, count);
 		else
 			n_tty_receive_buf_standard(tty, cp, fp, count);
 
+		/* 把接收的数  据      传回发送方。*/
 		flush_echoes(tty);
 		if (tty->ops->flush_chars)
 			tty->ops->flush_chars(tty);
@@ -1735,6 +1778,7 @@ n_tty_receive_buf_common(struct tty_struct *tty, const unsigned char *cp,
 		if (!n)
 			break;
 
+		/* 继续上传数据 */
 		/* ignore parity errors if handling overflow */
 		if (!overflow || !fp || *fp != TTY_PARITY)
 			__receive_buf(tty, cp, fp, n);
@@ -1769,6 +1813,7 @@ static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	n_tty_receive_buf_common(tty, cp, fp, count, 0);
 }
 
+/* 线路规程的接收函数 */
 static int n_tty_receive_buf2(struct tty_struct *tty, const unsigned char *cp,
 			      char *fp, int count)
 {
@@ -1903,7 +1948,7 @@ static void n_tty_close(struct tty_struct *tty)
  *	other events will occur in parallel. No further open will occur
  *	until a close.
  */
-
+/* 线路规程的 open函数 */
 static int n_tty_open(struct tty_struct *tty)
 {
 	struct n_tty_data *ldata;
@@ -1921,6 +1966,8 @@ static int n_tty_open(struct tty_struct *tty)
 	tty->closing = 0;
 	/* indicate buffer work may resume */
 	clear_bit(TTY_LDISC_HALTED, &tty->flags);
+
+	/*根据driver的 init_termios设置线路规程的相关参数。*/
 	n_tty_set_termios(tty, NULL);
 	tty_unthrottle(tty);
 	return 0;
@@ -2057,6 +2104,7 @@ static int canon_copy_from_read_buf(struct tty_struct *tty,
 	n_tty_trace("%s: eol:%zu found:%d n:%zu c:%zu tail:%zu more:%zu\n",
 		    __func__, eol, found, n, c, tail, more);
 
+	/* 拷贝数据到用户缓冲区 */
 	ret = tty_copy_to_user(tty, *b, tail, n);
 	if (ret)
 		return -EFAULT;
@@ -2177,6 +2225,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 	packet = tty->packet;
 	tail = ldata->read_tail;
 
+	/* 设置等待队列*/
 	add_wait_queue(&tty->read_wait, &wait);
 	while (nr) {
 		/* First test for status change. */
@@ -2197,11 +2246,12 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 			break;
 		}
 
-		/*处理是否有数据可读取*/
+		/*是否有数据可读取*/
 		if (!input_available_p(tty, 0)) {
 			up_read(&tty->termios_rwsem);
 			tty_buffer_flush_work(tty->port);
 			down_read(&tty->termios_rwsem);
+			/* 接收缓冲无数据可读*/
 			if (!input_available_p(tty, 0)) {
 				if (test_bit(TTY_OTHER_CLOSED, &tty->flags)) {
 					retval = -EIO;
@@ -2239,7 +2289,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 		}
 
 		if (ldata->icanon && !L_EXTPROC(tty)) {
-			/*标准模式，投递数据到用户空间*/
+			/*标准模式，把ldata.read_buf[]中的数据拷贝到用户缓冲区。*/
 			retval = canon_copy_from_read_buf(tty, &b, &nr);
 			if (retval)
 				break;
@@ -2306,6 +2356,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
  *		  lock themselves)
  */
 
+/* 线路规程的发送函数 */
 static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 			   const unsigned char *buf, size_t nr)
 {
@@ -2324,8 +2375,10 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 	down_read(&tty->termios_rwsem);
 
 	/* Write out any echoed characters that are still pending */
+	/* 回写接收到的数据， 即回显.*/
 	process_echoes(tty);
 
+	/* 调整数据，并调用tty driver注册的write函数，进行数据发送。  */
 	add_wait_queue(&tty->write_wait, &wait);
 	while (1) {
 		if (signal_pending(current)) {
@@ -2336,6 +2389,8 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 			retval = -EIO;
 			break;
 		}
+
+		/* 如果设置了 OPOST, 则要进行数据调整，然后在发送。*/
 		if (O_OPOST(tty)) {
 			while (nr > 0) {
 				ssize_t num = process_output_block(tty, b, nr);
@@ -2356,6 +2411,7 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 			}
 			if (tty->ops->flush_chars)
 				tty->ops->flush_chars(tty);
+		/* 直接发送数据，不进行数据调整。*/
 		} else {
 			struct n_tty_data *ldata = tty->disc_data;
 
@@ -2476,20 +2532,21 @@ static int n_tty_ioctl(struct tty_struct *tty, struct file *file,
 	}
 }
 
+/* 线路规程的处理函数 */
 static struct tty_ldisc_ops n_tty_ops = {
 	.magic           = TTY_LDISC_MAGIC,
 	.name            = "n_tty",
 	.open            = n_tty_open,
 	.close           = n_tty_close,
 	.flush_buffer    = n_tty_flush_buffer,
-	.read            = n_tty_read,
+	.read            = n_tty_read, 
 	.write           = n_tty_write,
 	.ioctl           = n_tty_ioctl,
 	.set_termios     = n_tty_set_termios,
 	.poll            = n_tty_poll,
 	.receive_buf     = n_tty_receive_buf,
 	.write_wakeup    = n_tty_write_wakeup,
-	.receive_buf2	 = n_tty_receive_buf2,
+	.receive_buf2	 = n_tty_receive_buf2,  //在port接收数据后，会调用该函数。
 };
 
 /**

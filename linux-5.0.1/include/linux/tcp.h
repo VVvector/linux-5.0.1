@@ -191,6 +191,8 @@ struct tcp_sock {
 	u32	dsack_dups;	/* RFC4898 tcpEStatsStackDSACKDups
 				 * total number of DSACK blocks received
 				 */
+
+	/* 滑动窗口左边界， snd_una + snd_wnd滑动窗口右边界 */
  	u32	snd_una;	/* First byte we want an ack for	*/
  	u32	snd_sml;	/* Last byte of the most recently transmitted small packet */
 	u32	rcv_tstamp;	/* timestamp of last received ACK (for keepalives) */
@@ -208,7 +210,10 @@ struct tcp_sock {
 	u32	max_window;	/* Maximal window ever seen from peer	*/
 	u32	mss_cache;	/* Cached effective mss, not including SACKS */
 
+	/* 接收端的通知窗口值最大值给发送端 */
 	u32	window_clamp;	/* Maximal window to advertise		*/
+
+	/* 当前窗口阈值 */
 	u32	rcv_ssthresh;	/* Current window clamp			*/
 
 	/* Information of the most recently (s)acked skb */
@@ -300,6 +305,7 @@ struct tcp_sock {
 	u32	rate_delivered;    /* saved rate sample: packets delivered */
 	u32	rate_interval_us;  /* saved rate sample: time elapsed */
 
+	/* 当前接收窗口大小 */
  	u32	rcv_wnd;	/* Current receiver window		*/
 	u32	write_seq;	/* Tail(+1) of data held in tcp send buffer */
 	u32	notsent_lowat;	/* TCP_NOTSENT_LOWAT */

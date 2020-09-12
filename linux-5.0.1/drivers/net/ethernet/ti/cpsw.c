@@ -2615,19 +2615,23 @@ static int cpsw_set_mqprio(struct net_device *ndev, void *type_data)
 	u32 tx_prio_map = 0;
 	int i, tc, ret;
 
+	/*验证tc 设置下来的tc个数是否和driver已知的个数一致*/
 	num_tc = mqprio->qopt.num_tc;
 	if (num_tc > CPSW_TC_NUM)
 		return -EINVAL;
 
+	/*only support the mqprio的 DCB默认模式*/
 	if (mqprio->mode != TC_MQPRIO_MODE_DCB)
 		return -EINVAL;
 
+	/*runtime PM*/
 	ret = pm_runtime_get_sync(cpsw->dev);
 	if (ret < 0) {
 		pm_runtime_put_noidle(cpsw->dev);
 		return ret;
 	}
 
+	/*确认tc和prio的mapping， 以及tc和queue的mapping*/
 	if (num_tc) {
 		for (i = 0; i < 8; i++) {
 			tc = mqprio->qopt.prio_tc_map[i];

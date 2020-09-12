@@ -1212,7 +1212,7 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 	if (!q_vector)
 		return -ENOMEM;
 
-	/* initialize NAPI */
+	/* initialize NAPI, 即设置NAPI的poll函数和budget数量。*/
 	netif_napi_add(adapter->netdev, &q_vector->napi,
 		       igb_poll, 64);
 
@@ -1412,6 +1412,7 @@ static int igb_request_irq(struct igb_adapter *adapter)
 	struct pci_dev *pdev = adapter->pdev;
 	int err = 0;
 
+	/*支持MSI-X 中断*/
 	if (adapter->flags & IGB_FLAG_HAS_MSIX) {
 		err = igb_request_msix(adapter);
 		if (!err)
@@ -1432,6 +1433,7 @@ static int igb_request_irq(struct igb_adapter *adapter)
 
 	igb_assign_vector(adapter->q_vector[0], 0);
 
+	/*支持MSI中断*/
 	if (adapter->flags & IGB_FLAG_HAS_MSI) {
 		err = request_irq(pdev->irq, igb_intr_msi, 0,
 				  netdev->name, adapter);
@@ -1443,6 +1445,7 @@ static int igb_request_irq(struct igb_adapter *adapter)
 		adapter->flags &= ~IGB_FLAG_HAS_MSI;
 	}
 
+	/*普通类型legacy 中断*/
 	err = request_irq(pdev->irq, igb_intr, IRQF_SHARED,
 			  netdev->name, adapter);
 
@@ -3067,6 +3070,7 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	pci_set_master(pdev);
 	pci_save_state(pdev);
 
+	/*网卡driver部分的初始化*/
 	err = -ENOMEM;
 	netdev = alloc_etherdev_mq(sizeof(struct igb_adapter),
 				   IGB_MAX_TX_QUEUES);
@@ -3090,6 +3094,7 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* hw->hw_addr can be altered, we'll use adapter->io_addr for unmap */
 	hw->hw_addr = adapter->io_addr;
 
+	/*注册网卡driver的ops*/
 	netdev->netdev_ops = &igb_netdev_ops;
 	igb_set_ethtool_ops(netdev);
 	netdev->watchdog_timeo = 5 * HZ;
@@ -3926,6 +3931,8 @@ static int __igb_open(struct net_device *netdev, bool resuming)
 
 	netif_carrier_off(netdev);
 
+	
+	/*allocate RX和TX queue 的memory*/
 	/* allocate transmit descriptors */
 	err = igb_setup_all_tx_resources(adapter);
 	if (err)
@@ -3945,6 +3952,7 @@ static int __igb_open(struct net_device *netdev, bool resuming)
 	 */
 	igb_configure(adapter);
 
+	/*注册irq*/
 	err = igb_request_irq(adapter);
 	if (err)
 		goto err_req_irq;
@@ -3963,6 +3971,7 @@ static int __igb_open(struct net_device *netdev, bool resuming)
 	/* From here on the code is the same as igb_up() */
 	clear_bit(__IGB_DOWN, &adapter->state);
 
+	/*enable NAPI*/
 	for (i = 0; i < adapter->num_q_vectors; i++)
 		napi_enable(&(adapter->q_vector[i]->napi));
 
@@ -3970,6 +3979,7 @@ static int __igb_open(struct net_device *netdev, bool resuming)
 	rd32(E1000_TSICR);
 	rd32(E1000_ICR);
 
+	/*enbale 硬件interruptes*/
 	igb_irq_enable(adapter);
 
 	/* notify VFs that reset has been completed */
@@ -4007,6 +4017,7 @@ err_setup_tx:
 	return err;
 }
 
+/*ifconfig eth0 up的时候会被调用。*/
 int igb_open(struct net_device *netdev)
 {
 	return __igb_open(netdev, false);
@@ -4206,6 +4217,11 @@ static void igb_configure_tx(struct igb_adapter *adapter)
  *
  *  Returns 0 on success, negative on failure
  **/
+/*
+memory:
+	once for each RX queue to arrange for DMA-able memory where the device will write incoming data.
+*/
+/*申请rx的ring buffer*/
 int igb_setup_rx_resources(struct igb_ring *rx_ring)
 {
 	struct device *dev = rx_ring->dev;
@@ -6603,6 +6619,7 @@ static void igb_write_itr(struct igb_q_vector *q_vector)
 	q_vector->set_itr = 0;
 }
 
+/*igb的中断处理函数irq*/
 static irqreturn_t igb_msix_ring(int irq, void *data)
 {
 	struct igb_q_vector *q_vector = data;
@@ -8392,6 +8409,7 @@ static int igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
 		/* populate checksum, timestamp, VLAN, and protocol */
 		igb_process_skb_fields(rx_ring, rx_desc, skb);
 
+		/*把skb往上传送*/
 		napi_gro_receive(&q_vector->napi, skb);
 
 		/* reset skb pointer */

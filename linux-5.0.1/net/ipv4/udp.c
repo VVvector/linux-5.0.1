@@ -462,6 +462,8 @@ struct sock *__udp4_lib_lookup(struct net *net, __be32 saddr,
 		int sdif, struct udp_table *udptable, struct sk_buff *skb)
 {
 	struct sock *result;
+
+	/*目的端口号为哈希表的key*/
 	unsigned short hnum = ntohs(dport);
 	unsigned int hash2, slot2;
 	struct udp_hslot *hslot2;
@@ -759,6 +761,23 @@ EXPORT_SYMBOL(udp_flush_pending_frames);
  *	@src:	source IP address
  *	@dst:	destination IP address
  */
+
+/*
+
+   如果skb没有分片数据，就可利用网卡硬件计算校验和。
+需要设置csum_start告知网卡硬件需要计算校验和的数据起始地址，
+以及计算完成之后校验和结果的放置偏移地址，
+csum_offset即是UDP头部中check字段的偏移地址。
+另外，利用函数csum_tcpudp_magic计算IP伪头部的校验和。
+
+   对于skb具有分片的数据包，软件遍历所有的分片计算整个数据包的校验和，
+注意此处并没有使用skb_checksum计算整个数据包的校验和，
+因为其中每个片段的校验和已经计算完成，所以提前累加了
+所有sk_buff片段数据的校验和，之后使用skb_checksum计
+算其余数据部分的校验和，减少了重复计算。最后累加上IP
+伪头部的数据。将变量ip_summed设置为CHECKSUM_NONE表明校验和已经计算完成。
+
+*/
 void udp4_hwcsum(struct sk_buff *skb, __be32 src, __be32 dst)
 {
 	struct udphdr *uh = udp_hdr(skb);
@@ -845,6 +864,7 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
 	uh->len = htons(len);
 	uh->check = 0;
 
+	/* gso处理 */
 	if (cork->gso_size) {
 		const int hlen = skb_network_header_len(skb) +
 				 sizeof(struct udphdr);
@@ -874,23 +894,30 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
 		goto csum_partial;
 	}
 
+	/* 计算upd checksum */
 	if (is_udplite)  				 /*     UDP-Lite      */
 		csum = udplite_csum(skb);
 
+	/* 不进行udp的checksum计算，可由用户层设定 */
 	else if (sk->sk_no_check_tx) {			 /* UDP csum off */
 
 		skb->ip_summed = CHECKSUM_NONE;
 		goto send;
 
+	/* 硬件进行tx checksum 计算, 因为 硬件可能不包含 伪头部的 checksum，所以叫做 partial */
 	} else if (skb->ip_summed == CHECKSUM_PARTIAL) { /* UDP hardware csum */
 csum_partial:
 
+		/* 该函数 并不一定能够利用硬件的校验和计算功能。
+		对于存在skb分片的数据包，就需要 软件进行计算。*/
 		udp4_hwcsum(skb, fl4->saddr, fl4->daddr);
 		goto send;
 
+	/* 软件 计算checksum */
 	} else
 		csum = udp_csum(skb);
 
+	/* 伪头部的checksum */
 	/* add protocol-dependent pseudo-header */
 	uh->check = csum_tcpudp_magic(fl4->saddr, fl4->daddr, len,
 				      sk->sk_protocol, csum);
@@ -898,7 +925,7 @@ csum_partial:
 		uh->check = CSUM_MANGLED_0;
 
 send:
-	err = ip_send_skb(sock_net(sk), skb);
+	err = ip_send_skb(sock_net(sk), skb); /*往IP层传数据。。。。*/
 	if (err) {
 		if (err == -ENOBUFS && !inet->recverr) {
 			UDP_INC_STATS(sock_net(sk),
@@ -972,6 +999,8 @@ int udp_cmsg_send(struct sock *sk, struct msghdr *msg, u16 *gso_size)
 }
 EXPORT_SYMBOL_GPL(udp_cmsg_send);
 
+/*udp的send函数*/
+/*UDP sock发送flow，从user space的sendto()调用到该函数。*/
 int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct inet_sock *inet = inet_sk(sk);
@@ -1003,8 +1032,21 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	if (msg->msg_flags & MSG_OOB) /* Mirror BSD error message compatibility */
 		return -EOPNOTSUPP;
 
+
+	/*After variable declarations and some basic error checking, one of the first things udp_sendmsg does is 
+	check if the socket is “corked”. UDP corking is a feature that allows a user program request that the 
+	kernel accumulate data from multiple calls to send into a single datagram before sending. 
+	There are two ways to enable this option in your user program:
+		1. Use the setsockopt system call and pass UDP_CORK as the socket option.
+		2. Pass MSG_MORE as one of the flags when calling send, sendto, or sendmsg from your program.
+		These options are documented in the UDP man page and the send / sendto / sendmsg man page, respectively.
+	*/
+	/*croked feature： kernel会把用户层多次传下来的数据进行一个打包，然后在call send()接口一次性往下传
+		需要用户设定
+	*/
 	getfrag = is_udplite ? udplite_getfrag : ip_generic_getfrag;
 
+	/*###1. UDP corking*/
 	fl4 = &inet->cork.fl.u.ip4;
 	if (up->pending) {
 		/*
@@ -1023,9 +1065,17 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	}
 	ulen += sizeof(struct udphdr);
 
+
+	/* 获取UDP destination address和port。
+	  两种方法：
+		1. The socket itself has the destination address stored because the socket was connected at some point.
+		2. The address is passed in via an auxiliary structure, as we saw in the kernel code for sendto.
+	*/
+	
 	/*
 	 *	Get and verify the address.
 	 */
+	 /*###2. get the UDP destination address and port*/
 	if (usin) {
 		if (msg->msg_namelen < sizeof(*usin))
 			return -EINVAL;
@@ -1049,9 +1099,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 1;
 	}
 
+	/*###3. Socket transmit bookkeeping and timestamping*/
 	ipcm_init_sk(&ipc, inet);
 	ipc.gso_size = up->gso_size;
 
+	/*处理一些辅助信息， 例如 IP_PKTINFO, IP_TTL, IP_TOS， 通过setsockopt()*/
+	/*###4. ancillary messages, via sendmsg*/
 	if (msg->msg_controllen) {
 		err = udp_cmsg_send(sk, msg, &ipc.gso_size);
 		if (err > 0)
@@ -1065,6 +1118,9 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			free = 1;
 		connected = 0;
 	}
+
+	/*检查是否有设置辅助信息，如果有，则进行 settting custom IP options。*/
+	/*###5. setting custom IP options*/
 	if (!ipc.opt) {
 		struct ip_options_rcu *inet_opt;
 
@@ -1097,6 +1153,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	saddr = ipc.addr;
 	ipc.addr = faddr = daddr;
 
+	/*查看是否有设定 SRR IP option*/
 	if (ipc.opt && ipc.opt->opt.srr) {
 		if (!daddr) {
 			err = -EINVAL;
@@ -1105,6 +1162,8 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		faddr = ipc.opt->opt.faddr;
 		connected = 0;
 	}
+
+	/*获取TOS IP flag*/
 	tos = get_rttos(&ipc, inet);
 	if (sock_flag(sk, SOCK_LOCALROUTE) ||
 	    (msg->msg_flags & MSG_DONTROUTE) ||
@@ -1113,6 +1172,8 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
+	/*组播处理*/
+	/*###6. Multicase or unicase?*/
 	if (ipv4_is_multicast(daddr)) {
 		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
 			ipc.oif = inet->mc_index;
@@ -1135,6 +1196,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		}
 	}
 
+	/*###7. Routing*/
 	if (connected)
 		rt = (struct rtable *)sk_dst_check(sk, 0);
 
@@ -1150,7 +1212,10 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 				   faddr, saddr, dport, inet->inet_sport,
 				   sk->sk_uid);
 
+		/*systems like SELinux or SMACK can set a security id value on the flow structure*/
 		security_sk_classify_flow(sk, flowi4_to_flowi(fl4));
+
+		/*the IP routing code to generate a routing structure*/
 		rt = ip_route_output_flow(net, fl4, sk);
 		if (IS_ERR(rt)) {
 			err = PTR_ERR(rt);
@@ -1168,6 +1233,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			sk_dst_set(sk, dst_clone(&rt->dst));
 	}
 
+	/*###8. Prevent the ARP cache from going stale with MSG_CONFIRM*/
 	if (msg->msg_flags&MSG_CONFIRM)
 		goto do_confirm;
 back_from_confirm:
@@ -1177,18 +1243,25 @@ back_from_confirm:
 		daddr = ipc.addr = fl4->daddr;
 
 	/* Lockless fast path for the non-corking case. */
+	/*###9. Fast path for uncorked UDP sockets: Prepare data for transmit*/
 	if (!corkreq) {
 		struct inet_cork cork;
 
+		/* 进行数据打包 */
+		/*the data can be packed into a struct sk_buff*/
 		skb = ip_make_skb(sk, fl4, getfrag, msg, ulen,
 				  sizeof(struct udphdr), &ipc, &rt,
 				  &cork, msg->msg_flags);
 		err = PTR_ERR(skb);
+
+		/*move down the stack and closer to the IP protocol layer*/
 		if (!IS_ERR_OR_NULL(skb))
+			/*这里会往 IP层 下传数据。。。。。。。*/
 			err = udp_send_skb(skb, fl4, &cork);
 		goto out;
 	}
 
+	/*###10. Slow path for corked UDP sockets with no preexisting corked data*/
 	lock_sock(sk);
 	if (unlikely(up->pending)) {
 		/* The socket is already corked while preparing it. */
@@ -1432,6 +1505,15 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	/* try to avoid the costly atomic add/sub pair when the receive
 	 * queue is full; always allow at least a packet
 	 */
+	 /* 这里检查 socket的buffer是否已经满了，如果是，则drop掉。
+		sk->sk_rcvbuf这个值可以被两个sysctl参数控制：
+			1. 最大值  sudo sysctl -w net.core.rmem_max=8388608
+			2. 默认值   sudo sysctl -w net.core.rmem_default=8388608
+
+	 你也可以在你的应用里调用 setsockopt 带上 SO_RCVBUF 来修改这个值(sk->sk_rcvbuf) ，能设置的最大值不能超过 net.core.rmem_max。
+	 但是，你也可以 setsockopt 带上 SO_RCVBUFFORCE 来覆盖 net.core.rmem_max，但是执 行应用的用户要有 CAP_NET_ADMIN 权限。
+			
+	 */
 	rmem = atomic_read(&sk->sk_rmem_alloc);
 	if (rmem > sk->sk_rcvbuf)
 		goto drop;
@@ -1457,6 +1539,8 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	if (rmem > (size + sk->sk_rcvbuf))
 		goto uncharge_drop;
 
+
+	/* 获取rx_receive_queue的lock，即保证没用用户在取数据。*/
 	spin_lock(&list->lock);
 	if (size >= sk->sk_forward_alloc) {
 		amt = sk_mem_pages(size);
@@ -1477,9 +1561,18 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	 */
 	sock_skb_set_dropcount(sk, skb);
 
+	/*把skb挂入sock的 sk_receive_queue 链表上*/
+	/*
+
+	################这里取消了之前的 backlog机制。减少了锁的等待。-- TCP是有backlog的。#############
+
+	*/
 	__skb_queue_tail(list, skb);
 	spin_unlock(&list->lock);
 
+	/*  唤醒等待数据的线程
+		所有在这个 socket 上等待数据的进程都收到一个通知通过 sk_data_ready 通知处理 函数。
+	*/
 	if (!sock_flag(sk, SOCK_DEAD))
 		sk->sk_data_ready(sk);
 
@@ -1705,7 +1798,11 @@ EXPORT_SYMBOL(__skb_recv_udp);
  * 	This should be easy, if there is something there we
  * 	return it, otherwise we block.
  */
-
+/* udp给用户层 到处的读数据接口
+read/recvfrom -> sys_recv -> sys_recvmsg -> sk->ops->recvmsg()
+	==> sock_common_recvmsg() -> sk->sk_prot->recvmsg()
+	==> udp_recvmsg()
+*/
 int udp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int noblock,
 		int flags, int *addr_len)
 {
@@ -1718,6 +1815,7 @@ int udp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int noblock,
 	int is_udplite = IS_UDPLITE(sk);
 	bool checksum_valid = false;
 
+	/*如果设置了 MSG_ERRQUEUE标记，则只读取错误信息。*/
 	if (flags & MSG_ERRQUEUE)
 		return ip_recv_error(sk, msg, len, addr_len);
 
@@ -1728,6 +1826,12 @@ try_again:
 	if (!skb)
 		return err;
 
+	/*
+	ulen为该SKB中包含的应用数据长度
+	len为应用程序指定的buffer大小，所以下面的逻辑含义为：
+	1. 如果应用提供的buffer超过了该数据包的数据长度，那么调整要拷贝的数据量为该SKB中实际数据量
+	2. 如果应用提供的buffer不够大，那么需要截断数据包，设置截断标记
+	*/
 	ulen = udp_skb_len(skb);
 	copied = len;
 	if (copied > ulen - off)
@@ -1741,6 +1845,7 @@ try_again:
 	 * coverage checksum (UDP-Lite), do it before the copy.
 	 */
 
+	/*对于截断的数据包和尚未完成校验的数据包，先进行校验，校验出错则尝试读取下一个数据包*/
 	if (copied < ulen || peeking ||
 	    (is_udplite && UDP_SKB_CB(skb)->partial_cov)) {
 		checksum_valid = udp_skb_csum_unnecessary(skb) ||
@@ -1749,12 +1854,15 @@ try_again:
 			goto csum_copy_err;
 	}
 
+	/*根据是否需要校验，调用不同的数据拷贝函数 (将数据拷贝到用户态buffer。)*/
 	if (checksum_valid || udp_skb_csum_unnecessary(skb)) {
+		/*只有线性区数据*/
 		if (udp_skb_is_linear(skb))
 			err = copy_linear_skb(skb, copied, off, &msg->msg_iter);
 		else
-			err = skb_copy_datagram_msg(skb, off, msg, copied);
+			err = skb_copy_datagram_msg(skb, off, msg, copied); 
 	} else {
+		/*在数据拷贝的过程中，还会进行校验。*/
 		err = skb_copy_and_csum_datagram_msg(skb, off, msg);
 
 		if (err == -EINVAL)
@@ -1775,9 +1883,11 @@ try_again:
 		UDP_INC_STATS(sock_net(sk),
 			      UDP_MIB_INDATAGRAMS, is_udplite);
 
+	/*更新时间戳和drop信息*/
 	sock_recv_ts_and_drops(msg, sk, skb);
 
 	/* Copy the address. */
+	/*拷贝数据包源地址信息，该地址会返回给应用程序。*/
 	if (sin) {
 		sin->sin_family = AF_INET;
 		sin->sin_port = udp_hdr(skb)->source;
@@ -1786,6 +1896,7 @@ try_again:
 		*addr_len = sizeof(*sin);
 	}
 
+	/* 有开启gro_enabled */
 	if (udp_sk(sk)->gro_enabled)
 		udp_cmsg_recv(msg, sk, skb);
 
@@ -1948,6 +2059,7 @@ static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		sk_mark_napi_id_once(sk, skb);
 	}
 
+	/* 实际挂包的处理 */
 	rc = __udp_enqueue_schedule_skb(sk, skb);
 	if (rc < 0) {
 		int is_udplite = IS_UDPLITE(sk);
@@ -1981,10 +2093,12 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 	/*
 	 *	Charge it to the socket, dropping if the queue is full.
 	 */
+	 /*IPSec相关*/
 	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
 		goto drop;
 	nf_reset(skb);
 
+	/*IPSec相关处理*/
 	if (static_branch_unlikely(&udp_encap_needed_key) && up->encap_type) {
 		int (*encap_rcv)(struct sock *sk, struct sk_buff *skb);
 
@@ -2005,6 +2119,7 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 			int ret;
 
 			/* Verify checksum before giving to encap */
+			/* 检查udp checksum */
 			if (udp_lib_checksum_complete(skb))
 				goto csum_error;
 
@@ -2023,6 +2138,7 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 	/*
 	 * 	UDP-Lite specific tests, ignored on UDP sockets
 	 */
+	 /* UDPlite相关处理*/
 	if ((is_udplite & UDPLITE_RECV_CC)  &&  UDP_SKB_CB(skb)->partial_cov) {
 
 		/*
@@ -2065,6 +2181,10 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 	udp_csum_pull_header(skb);
 
 	ipv4_pktinfo_prepare(sk, skb);
+
+	/*把skb挂到 sk->sk_receive_queue上
+		这个函数调用 sock_queue_rcv_skb 将数据报送到 socket 接收队列；如果失败，更新统计计数并释放 skb。
+	*/
 	return __udp_queue_rcv_skb(sk, skb);
 
 csum_error:
@@ -2081,9 +2201,11 @@ static int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	struct sk_buff *next, *segs;
 	int ret;
 
+	/* 不是gso packet的处理 */
 	if (likely(!udp_unexpected_gso(sk, skb)))
 		return udp_queue_rcv_one_skb(sk, skb);
 
+	/* gso packet的处理 */
 	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
 	__skb_push(skb, -skb_mac_offset(skb));
 	segs = udp_rcv_segment(sk, skb, true);
@@ -2233,6 +2355,10 @@ static inline int udp4_csum_init(struct sk_buff *skb, struct udphdr *uh,
 /* wrapper for udp_queue_rcv_skb tacking care of csum conversion and
  * return code conversion for ip layer consumption
  */
+ /* 
+	这里会将packet放入到socket的接收队列中。  sk->sk_receive_queue中。
+
+*/
 static int udp_unicast_rcv_skb(struct sock *sk, struct sk_buff *skb,
 			       struct udphdr *uh)
 {
@@ -2242,6 +2368,10 @@ static int udp_unicast_rcv_skb(struct sock *sk, struct sk_buff *skb,
 		skb_checksum_try_convert(skb, IPPROTO_UDP, uh->check,
 					 inet_compute_pseudo);
 
+	/*
+	往sk->sk_receive_queue上挂包，
+
+	 */
 	ret = udp_queue_rcv_skb(sk, skb);
 
 	/* a return value > 0 means to resubmit the input, but
@@ -2269,6 +2399,7 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 	/*
 	 *  Validate the packet.
 	 */
+	 /* 调整SKB内部数据布局，使得线性地址空间中至少包含UDP首部。*/
 	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 		goto drop;		/* No space for header. */
 
@@ -2277,6 +2408,7 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 	saddr = ip_hdr(skb)->saddr;
 	daddr = ip_hdr(skb)->daddr;
 
+	/* skb的数据长度不能小于UDP首部长度，即数据包是完整的。*/
 	if (ulen > skb->len)
 		goto short_packet;
 
@@ -2287,9 +2419,13 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		uh = udp_hdr(skb);
 	}
 
+	/* 计算校验和*/
 	if (udp4_csum_init(skb, uh, proto))
 		goto csum_error;
 
+	/* 1. 在网络层，可能已经为该数据包查询过传输控制块sock了，会被记录到skb->sk中。
+	如果已经查询过，则直接调用 udp_queue_rcv_skb()接收数据包，放入 sk->sk_receive_queue中。
+	*/
 	sk = skb_steal_sock(skb);
 	if (sk) {
 		struct dst_entry *dst = skb_dst(skb);
@@ -2298,19 +2434,28 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		if (unlikely(sk->sk_rx_dst != dst))
 			udp_sk_rx_dst_set(sk, dst);
 
+		/*把skb挂到  sk->sk_receive_queue上，等待用户层读取。*/
 		ret = udp_unicast_rcv_skb(sk, skb, uh);
 		sock_put(sk);
 		return ret;
 	}
 
+	/*对于多播或者广播报文的处理*/
 	if (rt->rt_flags & (RTCF_BROADCAST|RTCF_MULTICAST))
 		return __udp4_lib_mcast_deliver(net, skb, uh,
 						saddr, daddr, udptable, proto);
 
+	/*2. 在网络层没有关联sock信息。
+	根据报文的源端口号和目的端口号查询 udp talbe， 寻找应该接收该数据包的socket。*/
 	sk = __udp4_lib_lookup_skb(skb, uh->source, uh->dest, udptable);
 	if (sk)
-		return udp_unicast_rcv_skb(sk, skb, uh);
+		return udp_unicast_rcv_skb(sk, skb, uh); //找到了该数据包对于的socket，调用 udp_queue_rcv_skb()接收数据包。
 
+
+	/**********************************************************************************************************/
+	/*到这里，说明没有传输控制块sock 接收该数据包，需要做些统计，然后丢弃该数据包。*/
+
+	/*IPsec相关*/
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 		goto drop;
 	nf_reset(skb);
@@ -2319,6 +2464,8 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 	if (udp_lib_checksum_complete(skb))
 		goto csum_error;
 
+
+	/* 累计输入数据包错误统计值，并且回复端口不可达的 ICMP 报文。 */
 	__UDP_INC_STATS(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
 	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
 
@@ -2477,6 +2624,11 @@ int udp_v4_early_demux(struct sk_buff *skb)
 	return 0;
 }
 
+/*udp的接收函数接口*/
+/*
+	该函数是在AF_INET协议族初始化时，由UDP注册给网络层的回调函数，当网络层处理完一个接收数据包后，如果该数据包是
+	发往本机的，并且其上协议就是UDP时，就会调用该回调函数。
+*/
 int udp_rcv(struct sk_buff *skb)
 {
 	return __udp4_lib_rcv(skb, &udp_table, IPPROTO_UDP);
@@ -2751,6 +2903,7 @@ int udp_abort(struct sock *sk, int err)
 }
 EXPORT_SYMBOL_GPL(udp_abort);
 
+/*udp protocol， 包含了UDP协议栈所有的内部操作函数。*/
 struct proto udp_prot = {
 	.name			= "UDP",
 	.owner			= THIS_MODULE,
@@ -3037,7 +3190,9 @@ void __init udp_init(void)
 	unsigned long limit;
 	unsigned int i;
 
+	/* udp hash表初始化 */
 	udp_table_init(&udp_table, "UDP");
+	
 	limit = nr_free_buffer_pages() / 8;
 	limit = max(limit, 128UL);
 	sysctl_udp_mem[0] = limit / 4 * 3;

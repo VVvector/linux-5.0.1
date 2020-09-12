@@ -410,12 +410,20 @@ struct sk_buff *udp_gro_receive(struct list_head *head, struct sk_buff *skb,
 	if (!sk)
 		goto out_unlock;
 
+
+	/* 这里要查看gro_enabled是否有开启, 如果有开启才进行udp gro。 */
 	if (udp_sk(sk)->gro_enabled) {
 		pp = call_gro_receive(udp_gro_receive_segment, head, skb);
 		rcu_read_unlock();
 		return pp;
 	}
 
+	/*  
+	1. udp mask已经标记
+	2. checksum 不是 CHECKSUM_PARTIAL，且csum_cnt等于0， 且csum_valid不等于0
+	3. 该sock要有 gro_receive 实现
+
+	*/
 	if (NAPI_GRO_CB(skb)->encap_mark ||
 	    (skb->ip_summed != CHECKSUM_PARTIAL &&
 	     NAPI_GRO_CB(skb)->csum_cnt == 0 &&
@@ -428,6 +436,7 @@ struct sk_buff *udp_gro_receive(struct list_head *head, struct sk_buff *skb,
 
 	flush = 0;
 
+	/* 查找hash桶中，对应的same flow的gro skb。 */
 	list_for_each_entry(p, head, list) {
 		if (!NAPI_GRO_CB(p)->same_flow)
 			continue;
@@ -437,6 +446,7 @@ struct sk_buff *udp_gro_receive(struct list_head *head, struct sk_buff *skb,
 		/* Match ports and either checksums are either both zero
 		 * or nonzero.
 		 */
+		 /* source port和checksum要一样，才判定为same flow。*/
 		if ((*(u32 *)&uh->source != *(u32 *)&uh2->source) ||
 		    (!uh->check ^ !uh2->check)) {
 			NAPI_GRO_CB(p)->same_flow = 0;
@@ -446,6 +456,8 @@ struct sk_buff *udp_gro_receive(struct list_head *head, struct sk_buff *skb,
 
 	skb_gro_pull(skb, sizeof(struct udphdr)); /* pull encapsulating udp header */
 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
+
+	/* 再调用该sk对应的gro_receive回调。例如 vxlan */
 	pp = call_gro_receive_sk(udp_sk(sk)->gro_receive, sk, head, skb);
 
 out_unlock:
@@ -463,10 +475,12 @@ struct sk_buff *udp4_gro_receive(struct list_head *head, struct sk_buff *skb)
 	if (unlikely(!uh) || !static_branch_unlikely(&udp_encap_needed_key))
 		goto flush;
 
+	/* 直接flush到stack */
 	/* Don't bother verifying checksum if we're going to flush anyway. */
 	if (NAPI_GRO_CB(skb)->flush)
 		goto skip;
 
+	/* checksum错误，直接flush */
 	if (skb_gro_checksum_validate_zero_check(skb, IPPROTO_UDP, uh->check,
 						 inet_gro_compute_pseudo))
 		goto flush;

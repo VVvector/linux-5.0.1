@@ -99,6 +99,8 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 	struct iphdr *iph = ip_hdr(skb);
 
 	iph->tot_len = htons(skb->len);
+
+	/*Calls ip_send_check to compute the checksum to be written in the IP packet header.*/
 	ip_send_check(iph);
 
 	/* if egress device is enslaved to an L3 master device pass the
@@ -110,6 +112,10 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 	skb->protocol = htons(ETH_P_IP);
 
+	/*###########  netfilter ##################*/
+	/*the IP protocol layer will call down into netfilter by calling nf_hook. 
+	The return value of the nf_hook function will be passed back up to ip_local_out.
+	*/
 	return nf_hook(NFPROTO_IPV4, NF_INET_LOCAL_OUT,
 		       net, sk, skb, NULL, skb_dst(skb)->dev,
 		       dst_output);
@@ -120,6 +126,8 @@ int ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 	int err;
 
 	err = __ip_local_out(net, sk, skb);
+
+	/*Destination cache, ip_output()*/
 	if (likely(err == 1))
 		err = dst_output(net, sk, skb);
 
@@ -181,6 +189,7 @@ int ip_build_and_send_pkt(struct sk_buff *skb, const struct sock *sk,
 }
 EXPORT_SYMBOL_GPL(ip_build_and_send_pkt);
 
+/*This function handles bumping various statistics counters prior to handing the packet down to the neighbour cache.*/
 static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
@@ -219,6 +228,8 @@ static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *s
 
 	rcu_read_lock_bh();
 	nexthop = (__force u32) rt_nexthop(rt, ip_hdr(skb)->daddr);
+
+	/* 邻居子系统表查询 */
 	neigh = __ipv4_neigh_lookup_noref(dev, nexthop);
 	if (unlikely(!neigh))
 		neigh = __neigh_create(&arp_tbl, &nexthop, dev, false);
@@ -226,6 +237,9 @@ static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *s
 		int res;
 
 		sock_confirm_neigh(skb, neigh);
+	
+		/* ##the neighbour’s state is checked and the appropriate output function is called.*/
+		/* 邻居子系统的处理 ， 最终走到 dev_queue_xmit() */
 		res = neigh_output(neigh, skb);
 
 		rcu_read_unlock_bh();
@@ -248,6 +262,8 @@ static int ip_finish_output_gso(struct net *net, struct sock *sk,
 
 	/* common case: seglen is <= mtu
 	 */
+	 /* skb gso len小于 mtu值，直接发送。
+	 */
 	if (skb_gso_validate_network_len(skb, mtu))
 		return ip_finish_output2(net, sk, skb);
 
@@ -264,6 +280,9 @@ static int ip_finish_output_gso(struct net *net, struct sock *sk,
 	 *    bridged to a NETIF_F_TSO tunnel stacked over an interface with an
 	 *    insufficent MTU.
 	 */
+
+	/* skb gso len大于mtu值，做gso segment处理。
+	*/
 	features = netif_skb_features(skb);
 	BUILD_BUG_ON(sizeof(*IPCB(skb)) > SKB_SGO_CB_OFFSET);
 	segs = skb_gso_segment(skb, features & ~NETIF_F_GSO_MASK);
@@ -307,13 +326,22 @@ static int ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *sk
 		return dst_output(net, sk, skb);
 	}
 #endif
+
+	/*If packet’s length is larger than the MTU and the packet’s segmentation will not be offloaded to the device, 
+	ip_fragment is called to help fragment the packet prior to transmission.*/
 	mtu = ip_skb_dst_mtu(sk, skb);
+
+	/* 做gso packet处理 */
 	if (skb_is_gso(skb))
 		return ip_finish_output_gso(net, sk, skb, mtu);
 
+	/* 不是gso skb，且skb的大小超过了mtu，所以需要做ip fragment动作，即ip分片。 */
 	if (skb->len > mtu || (IPCB(skb)->flags & IPSKB_FRAG_PMTU))
 		return ip_fragment(net, sk, skb, mtu, ip_finish_output2);
 
+	/* 其他类型的packet数据包 */
+	/*the packet is passed straight through to ip_finish_output2.*/
+	/*This function handles bumping various statistics counters prior to handing the packet down to the neighbour cache.*/
 	return ip_finish_output2(net, sk, skb);
 }
 
@@ -393,6 +421,7 @@ int ip_mc_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
 }
 
+/*dst_output()实际会调用到该接口。*/
 int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct net_device *dev = skb_dst(skb)->dev;
@@ -423,6 +452,10 @@ static void ip_copy_addrs(struct iphdr *iph, const struct flowi4 *fl4)
 }
 
 /* Note: skb->sk can be different from sk, in case of tunnels */
+/*
+
+	ip层的发送函数，会被传输层作为callback function调用。
+*/
 int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		    __u8 tos)
 {
@@ -440,6 +473,8 @@ int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 	rcu_read_lock();
 	inet_opt = rcu_dereference(inet->inet_opt);
 	fl4 = &fl->u.ip4;
+
+	/* 路由判断，是否需要路由出去。。 */
 	rt = skb_rtable(skb);
 	if (rt)
 		goto packet_routed;
@@ -502,7 +537,10 @@ packet_routed:
 	skb->priority = sk->sk_priority;
 	skb->mark = sk->sk_mark;
 
+	/* 把skb往下传 */
 	res = ip_local_out(net, sk, skb);
+
+
 	rcu_read_unlock();
 	return res;
 
@@ -730,15 +768,20 @@ slow_path:
 
 	while (left > 0) {
 		len = left;
+
+		/* 如果len大于mtu，设置当前的将要分片的数据大小为MTU */
 		/* IF: it doesn't fit, use 'mtu' - the data space left */
 		if (len > mtu)
 			len = mtu;
+
+		/* 长度对齐 */
 		/* IF: we are not sending up to and including the packet end
 		   then align the next start on an eight byte boundary */
 		if (len < left)	{
 			len &= ~7;
 		}
 
+		/* malloc一个新的buffer，大小包括 ip payload, ip head 和l2 head */
 		/* Allocate buffer */
 		skb2 = alloc_skb(len + hlen + ll_rs, GFP_ATOMIC);
 		if (!skb2) {
@@ -749,30 +792,37 @@ slow_path:
 		/*
 		 *	Set up data on packet
 		 */
-
+		/* 复制一些相同的值的域 */
 		ip_copy_metadata(skb2, skb);
+
+		/* 保留l2 header空间 */
 		skb_reserve(skb2, ll_rs);
+
+		/* 设置ip header & ddos header & ip payload空间 */
 		skb_put(skb2, len + hlen);
 		skb_reset_network_header(skb2);
+
+		/* l4 header指针为ip header + ddos header数据偏移位置，用于复制原始payload */
 		skb2->transport_header = skb2->network_header + hlen;
 
 		/*
 		 *	Charge the memory for the fragment to any owner
 		 *	it might possess
 		 */
-
+		/* 将每一个分片的ip包都关联到源包的socket */
 		if (skb->sk)
 			skb_set_owner_w(skb2, skb->sk);
 
 		/*
 		 *	Copy the packet header into the new buffer.
 		 */
-
+		/* 拷贝 ip header */
 		skb_copy_from_linear_data(skb, skb_network_header(skb2), hlen);
 
 		/*
 		 *	Copy a block of the IP datagram.
 		 */
+		 /* 拷贝ip payload数据 */
 		if (skb_copy_bits(skb, ptr, skb_transport_header(skb2), len))
 			BUG();
 		left -= len;
@@ -780,6 +830,7 @@ slow_path:
 		/*
 		 *	Fill in the new header fields.
 		 */
+		 /* 填充相应的ip头 */
 		iph = ip_hdr(skb2);
 		iph->frag_off = htons((offset >> 3));
 
@@ -792,6 +843,7 @@ slow_path:
 		 * on the initial skb, so that all the following fragments
 		 * will inherit fixed options.
 		 */
+		 /* 第一个包，因此，进行ip_option处理 */
 		if (offset == 0)
 			ip_options_fragment(skb);
 
@@ -799,18 +851,24 @@ slow_path:
 		 *	Added AC : If we are fragmenting a fragment that's not the
 		 *		   last fragment then keep MF on each bit
 		 */
+		 /* 不是最后一个包，因此，设置mf位 */
 		if (left > 0 || not_last_frag)
 			iph->frag_off |= htons(IP_MF);
+
+		/* 移动数据指针以及更改数据偏移 */
 		ptr += len;
 		offset += len;
 
 		/*
 		 *	Put this fragment into the sending queue.
 		 */
+		 /* 更新包头的数据长度 */
 		iph->tot_len = htons(len + hlen);
 
+		/* 重新计算校验 */
 		ip_send_check(iph);
 
+		/* 调用   ip_finish_output2() 函数*/
 		err = output(net, sk, skb2);
 		if (err)
 			goto fail;
@@ -1458,6 +1516,8 @@ out:
 	return skb;
 }
 
+/*The UDP protocol layer hands skbs down to the IP protocol by simply calling ip_send_skb,
+so let’s start there and map out the IP protocol layer!*/
 int ip_send_skb(struct net *net, struct sk_buff *skb)
 {
 	int err;
@@ -1630,9 +1690,15 @@ out:
 
 void __init ip_init(void)
 {
+	/* 初始化 路由子系统 route table  */
 	ip_rt_init();
+
+	/* 初始化 peer    subsystem for ip or route 
+		两个ip建立连接，即这两个ip称为一个peer。
+	*/
 	inet_initpeers();
 
+	/* IP 组播初始化 */
 #if defined(CONFIG_IP_MULTICAST)
 	igmp_mc_init();
 #endif

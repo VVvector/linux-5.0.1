@@ -2158,6 +2158,7 @@ int ip_route_input_rcu(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 						      ip_hdr(skb)->protocol);
 		}
 
+		/* 如果配置的是多路由模式，检测目的地址最高字节是不是224，判断是否打开了多播转发。 */
 		if (our
 #ifdef CONFIG_IP_MROUTE
 			||
@@ -2165,12 +2166,16 @@ int ip_route_input_rcu(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 		     IN_DEV_MFORWARD(in_dev))
 #endif
 		   ) {
+		   	/* 产生与此报文信息相关多播路由项，添加到路由缓存表中。 */
 			err = ip_route_input_mc(skb, daddr, saddr,
 						tos, dev, our);
 		}
 		return err;
 	}
 
+	/* 如果在缓存中没有查到路由信息，则到路由表中处理及创建路由cache，
+		设置回调函数ip_local_deliver, ip_forward, ip_output.
+	*/
 	return ip_route_input_slow(skb, daddr, saddr, tos, dev, res);
 }
 
@@ -3181,15 +3186,32 @@ int __init ip_rt_init(void)
 	ipv4_dst_ops.gc_thresh = ~0;
 	ip_rt_max_size = INT_MAX;
 
+	/* 设备初始化 
+		1. proc相关
+		2. netdevice event 通知链注册
+		3.路由处理 inet_af_ops注册
+	*/
 	devinet_init();
+
+	/* 转发信息表初始化 
+		1. 注册 RTM_NEWROUTE, RTM_DELROUTE, RTM_GETROUTE
+		2. 注册 fib_net_ops for gib_net_init
+			RT_TABLE_LOCAL, RT_TABLE_MAIN table
+			NETLINK_FIB_LOOKUP
+			create file fib_trie, fib_triestat, route in /proc/net/dir
+	*/
 	ip_fib_init();
 
 	if (ip_rt_proc_init())
 		pr_err("Unable to create route proc files\n");
+
+	/* 安全相关初始化 */
 #ifdef CONFIG_XFRM
 	xfrm_init();
 	xfrm4_init();
 #endif
+
+	/* 获取路由信息  */
 	rtnl_register(PF_INET, RTM_GETROUTE, inet_rtm_getroute, NULL,
 		      RTNL_FLAG_DOIT_UNLOCKED);
 

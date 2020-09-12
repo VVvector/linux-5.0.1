@@ -446,6 +446,11 @@ void __init mark_linear_text_alias_ro(void)
 			    PAGE_KERNEL_RO);
 }
 
+/*
+map_mem主要完成的是物理内存的映射，这部分的物理内存是通过memblock_add添加到系统中的，
+当对应的memblock设置了MEMBLOCK_NOMAP的标志时，则不对其进行地址映射。
+
+*/
 static void __init map_mem(pgd_t *pgdp)
 {
 	phys_addr_t kernel_start = __pa_symbol(_text);
@@ -663,14 +668,20 @@ void __init paging_init(void)
 {
 	pgd_t *pgdp = pgd_set_fixmap(__pa_symbol(swapper_pg_dir));
 
+	/* 将内核的各段进行映射。text, rodata, init, data, bss等 */
 	map_kernel(pgdp);
+
+	/* 将memblock子系统添加的物理内存进行映射。 */
 	map_mem(pgdp);
 
 	pgd_clear_fixmap();
 
+	/* 切换页表，并将新建立的页表内容替换 swapper_pg_dir页表内容。（即更新 swapper_pg_dir页表） */
 	cpu_replace_ttbr1(lm_alias(swapper_pg_dir));
 	init_mm.pgd = swapper_pg_dir;
 
+	/*此外，在之前的文章也分析过swapper_pg_dir页表存放的时候，是连续存放的pgd, pud, pmd等，
+	现在只需要复用swapper_pg_dir，其余的当然也是可以释放的了*/
 	memblock_free(__pa_symbol(init_pg_dir),
 		      __pa_symbol(init_pg_end) - __pa_symbol(init_pg_dir));
 
@@ -798,13 +809,24 @@ static inline pte_t * fixmap_pte(unsigned long addr)
  * lm_alias so __p*d_populate functions must be used to populate with the
  * physical address from __pa_symbol.
  */
+
+/*
+	early_fixmap_init() 只是建立了一个映射的框架，具体的物理地址和虚拟地址的映射没有去填充，
+	这个是由使用者具体在使用时再去填充对应的pte entry。比如像 fixmap_remap_fdt()函数，
+	就是典型的填充pte entry的过程，完成最后的一步映射，然后才能读取dtb文件。
+
+
+*/
 void __init early_fixmap_init(void)
 {
 	pgd_t *pgdp, pgd;
 	pud_t *pudp;
 	pmd_t *pmdp;
+
+	/*1. 定义了fixed map区域的起始地址。 位于arch/arm64/include/asm/fixmap.h中*/
 	unsigned long addr = FIXADDR_START;
 
+	/*2. 获取addr地址对应pgd全局页表中entry，而这个pgd全局页表正是 swapper_pg_dir全局页表。 */
 	pgdp = pgd_offset_k(addr);
 	pgd = READ_ONCE(*pgdp);
 	if (CONFIG_PGTABLE_LEVELS > 3 &&
@@ -817,13 +839,18 @@ void __init early_fixmap_init(void)
 		BUG_ON(!IS_ENABLED(CONFIG_ARM64_16K_PAGES));
 		pudp = pud_offset_kimg(pgdp, addr);
 	} else {
+		/*3. 将bm_pud的物理地址写到pgd全局页目录表中。 */
 		if (pgd_none(pgd))
 			__pgd_populate(pgdp, __pa_symbol(bm_pud), PUD_TYPE_TABLE);
 		pudp = fixmap_pud(addr);
 	}
+
+	/*4. 将bm_pmd的物理地址写入到pud页目录表中。*/
 	if (pud_none(READ_ONCE(*pudp)))
 		__pud_populate(pudp, __pa_symbol(bm_pmd), PMD_TYPE_TABLE);
 	pmdp = fixmap_pmd(addr);
+
+	/*5. 将bm_pte的物理地址写到pmd页表目录中。*/
 	__pmd_populate(pmdp, __pa_symbol(bm_pte), PMD_TYPE_TABLE);
 
 	/*

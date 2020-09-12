@@ -1391,6 +1391,7 @@ static int __dev_open(struct net_device *dev, struct netlink_ext_ack *extack)
 	if (ops->ndo_validate_addr)
 		ret = ops->ndo_validate_addr(dev);
 
+	/*调用net device driver的 open函数*/
 	if (!ret && ops->ndo_open)
 		ret = ops->ndo_open(dev);
 
@@ -1401,6 +1402,8 @@ static int __dev_open(struct net_device *dev, struct netlink_ext_ack *extack)
 	else {
 		dev->flags |= IFF_UP;
 		dev_set_rx_mode(dev);
+
+		/*激活net device的qdisc，会重新安装默认的qdisc*/
 		dev_activate(dev);
 		add_device_randomness(dev->dev_addr, dev->addr_len);
 	}
@@ -1421,6 +1424,8 @@ static int __dev_open(struct net_device *dev, struct netlink_ext_ack *extack)
  *	Calling this function on an active interface is a nop. On a failure
  *	a negative errno code is returned.
  */
+
+/*网络设备的open函数入口*/
 int dev_open(struct net_device *dev, struct netlink_ext_ack *extack)
 {
 	int ret;
@@ -2736,6 +2741,9 @@ static void __netif_reschedule(struct Qdisc *q)
 	local_irq_save(flags);
 	sd = this_cpu_ptr(&softnet_data);
 	q->next_sched = NULL;
+
+	/* 在net_dev_init中，sd->output_queue_tailp = &sd->output_queue;所以相当于把q添加到了output_queue队列中 */
+	/* 将该qdisc加入到softnet_data的output_queue链表中，等待net_tx_action处理。*/
 	*sd->output_queue_tailp = q;
 	sd->output_queue_tailp = &q->next_sched;
 	raise_softirq_irqoff(NET_TX_SOFTIRQ);
@@ -2858,6 +2866,7 @@ static u16 skb_tx_hash(const struct net_device *dev,
 	u16 qoffset = 0;
 	u16 qcount = dev->real_num_tx_queues;
 
+	/*如果有多个tc,即多队列， 例如 mqprio*/
 	if (dev->num_tc) {
 		u8 tc = netdev_get_prio_tc_map(dev, skb->priority);
 
@@ -2902,6 +2911,7 @@ static void skb_warn_bad_offload(const struct sk_buff *skb)
  * Invalidate hardware checksum when packet is to be mangled, and
  * complete checksum manually on outgoing path.
  */
+ /* 软件计算checksum */
 int skb_checksum_help(struct sk_buff *skb)
 {
 	__wsum csum;
@@ -2926,6 +2936,8 @@ int skb_checksum_help(struct sk_buff *skb)
 
 	offset = skb_checksum_start_offset(skb);
 	BUG_ON(offset >= skb_headlen(skb));
+
+	/* 软件计算checksum */
 	csum = skb_checksum(skb, offset, skb->len - offset, 0);
 
 	offset += skb->csum_offset;
@@ -3281,6 +3293,9 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
 	return rc;
 }
 
+
+
+/* 这里为啥有一个 while()， 因为 该skb可能是 gso后的，被切片为多个skb了，list连接起来的。 */
 struct sk_buff *dev_hard_start_xmit(struct sk_buff *first, struct net_device *dev,
 				    struct netdev_queue *txq, int *ret)
 {
@@ -3325,6 +3340,7 @@ int skb_csum_hwoffload_help(struct sk_buff *skb,
 		return !!(features & NETIF_F_SCTP_CRC) ? 0 :
 			skb_crc32c_csum_help(skb);
 
+	/* 是否进行软件 计算checksum */
 	return !!(features & NETIF_F_CSUM_MASK) ? 0 : skb_checksum_help(skb);
 }
 EXPORT_SYMBOL(skb_csum_hwoffload_help);
@@ -3333,6 +3349,7 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 {
 	netdev_features_t features;
 
+	/* 获取该skb对于的net device feature */
 	features = netif_skb_features(skb);
 	skb = validate_xmit_vlan(skb, features);
 	if (unlikely(!skb))
@@ -3342,9 +3359,16 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 	if (unlikely(!skb))
 		goto out_null;
 
+	/* 如果开启了gso，则进行gso操作 */
 	if (netif_needs_gso(skb, features)) {
 		struct sk_buff *segs;
 
+		/* 对skb进行 gso处理。 
+		这里主要完成对skb的分片，并将分片存放在原始skb的skb->next中。
+
+		UDP:所有分片ip头部id都相同，设置IP_MF分片标志(除最后一片) （等同于IP分片）
+    	TCP:分片后，每个分片IP头部中id加1, （等同于TCP分段）
+	*/
 		segs = skb_gso_segment(skb, features);
 		if (IS_ERR(segs)) {
 			goto out_kfree_skb;
@@ -3352,7 +3376,11 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 			consume_skb(skb);
 			skb = segs;
 		}
+
+	/* 不进行gso， 需要将gso packet线性化。*/
 	} else {
+
+		/* 这里看 nic device是否支持 fraglist或者sg, 然后再决定是否做线性化处理。 */
 		if (skb_needs_linearize(skb, features) &&
 		    __skb_linearize(skb))
 			goto out_kfree_skb;
@@ -3361,6 +3389,7 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 		 * support checksumming for this protocol, complete
 		 * checksumming here.
 		 */
+		 /* tcp：在 /net/ipv4/tcp.c 中的 tcp_sendmsg_locked()进行赋值的。*/
 		if (skb->ip_summed == CHECKSUM_PARTIAL) {
 			if (skb->encapsulation)
 				skb_set_inner_transport_header(skb,
@@ -3368,6 +3397,8 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 			else
 				skb_set_transport_header(skb,
 							 skb_checksum_start_offset(skb));
+
+			/* 这里 会做tx checksum offload的工作 */
 			if (skb_csum_hwoffload_help(skb, features))
 				goto out_kfree_skb;
 		}
@@ -3395,6 +3426,7 @@ struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *d
 		/* in case skb wont be segmented, point to itself */
 		skb->prev = skb;
 
+		/* 验证要发送的skb数据包， 例如  checksum */
 		skb = validate_xmit_skb(skb, dev, again);
 		if (!skb)
 			continue;
@@ -3489,9 +3521,12 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 		spin_lock(&q->busylock);
 
 	spin_lock(root_lock);
+	
 	if (unlikely(test_bit(__QDISC_STATE_DEACTIVATED, &q->state))) {
 		__qdisc_drop(skb, &to_free);
 		rc = NET_XMIT_DROP;
+
+	/* 如果该qdisc允许bypass 且 qdisc skb为空，且，第一次进入qdisc */
 	} else if ((q->flags & TCQ_F_CAN_BYPASS) && !qdisc_qlen(q) &&
 		   qdisc_run_begin(q)) {
 		/*
@@ -3502,6 +3537,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 
 		qdisc_bstats_update(q, skb);
 
+		/* 直接发送数据出去 */
 		if (sch_direct_xmit(skb, q, dev, txq, root_lock, true)) {
 			if (unlikely(contended)) {
 				spin_unlock(&q->busylock);
@@ -3512,6 +3548,8 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 
 		qdisc_run_end(q);
 		rc = NET_XMIT_SUCCESS;
+
+	/* 先enqueue skb，在dequeue这样发送 */
 	} else {
 		rc = q->enqueue(skb, q, &to_free) & NET_XMIT_MASK;
 		if (qdisc_run_begin(q)) {
@@ -3524,6 +3562,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 		}
 	}
 	spin_unlock(root_lock);
+	
 	if (unlikely(to_free))
 		kfree_skb_list(to_free);
 	if (unlikely(contended))
@@ -3634,17 +3673,26 @@ static int __get_xps_queue_idx(struct net_device *dev, struct sk_buff *skb,
 
 	map = rcu_dereference(dev_maps->attr_map[tci]);
 	if (map) {
+		/*如果队列集合长度为1，则说明 cpu和tx queue是 1:1的； 就可以直接选择。*/
 		if (map->len == 1)
 			queue_index = map->queues[0];
 		else
 			queue_index = map->queues[reciprocal_scale(
-						skb_get_hash(skb), map->len)];
+						skb_get_hash(skb), map->len)]; /*否则，这个cpu关联到多个发送队列，通过hash选择*/
+
+						
 		if (unlikely(queue_index >= dev->real_num_tx_queues))
 			queue_index = -1;
 	}
 	return queue_index;
 }
 #endif
+
+/*
+这个函数是这个patch的核心，它的流程也很简单，就是通过当前的cpu id获得对应的xps_maps,
+然后，如果当前的cpu和队列是1:1对应则返回对应的队列id，
+否则计算skb的hash值，根据这个hash来得到在xps_maps 中的queue的位置，从而返回queue id.
+*/
 
 static int get_xps_queue(struct net_device *dev, struct net_device *sb_dev,
 			 struct sk_buff *skb)
@@ -3661,10 +3709,13 @@ static int get_xps_queue(struct net_device *dev, struct net_device *sb_dev,
 	if (!static_key_false(&xps_rxqs_needed))
 		goto get_cpus_map;
 
+	/*拿到dev的xps_rxqs_map*/
 	dev_maps = rcu_dereference(sb_dev->xps_rxqs_map);
 	if (dev_maps) {
+		/*获取skb->sk 的 sk_rx_queue_mapping*/
 		int tci = sk_rx_queue_get(sk);
 
+		/*获取分配的skb queue index*/
 		if (tci >= 0 && tci < dev->num_rx_queues)
 			queue_index = __get_xps_queue_idx(dev, skb, dev_maps,
 							  tci);
@@ -3704,6 +3755,20 @@ u16 dev_pick_tx_cpu_id(struct net_device *dev, struct sk_buff *skb,
 }
 EXPORT_SYMBOL(dev_pick_tx_cpu_id);
 
+/*XPS算法或者skb_tx_hash算法，得到skb对应的tx queue。*/
+/*XPS: 根据CPU来选择对应的队列，而这个CPU map可以通过sysctl来设置：
+	/sys/class/net/ethx/queues/tx-n/xps_cpus 
+	xps_cpus:是一个cpu掩码，表示当前队列对应的cpu。
+*/
+/*
+xps主要就是提高多对列下的数据包发送吞吐量，具体来说就是提高了发送的局部性。按照作者的benchmark，能够提高20%.
+原理很简单:
+	1. 就是根据当前skb对应的hash值(如果当前socket有hash，那么就使用当前socket的)来散列到xps_cpus这个掩码所设置的cpu上，
+		也就是cpu和队列是一个1对1，或者1对多的关系，这样一个队列只可能对应一个cpu，从而提高了传输结构的局部性。
+	2. 没有xps之前的做法是这样的，当前的cpu根据一个skb的4元组hash来选择队列发送数据，也就是说cpu和队列是一个多对多的关系，
+		而这样自然就会导致传输结构的cache line bouncing
+
+*/
 static u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
 			    struct net_device *sb_dev)
 {
@@ -3712,13 +3777,20 @@ static u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
 
 	sb_dev = sb_dev ? : dev;
 
+	/*ooo_okay: 由传输层负责适当地设置， 例如：TCP在已经ack了连接的所有数据时可以设置ooo_key*/
+	/*ooo_okay：数据流中没有未完成的数据包; 或者，为非法值； 则可以重新选择发送队列*/
 	if (queue_index < 0 || skb->ooo_okay ||
 	    queue_index >= dev->real_num_tx_queues) {
+
+		/*通过XPS算法获取发送队列索引。
+		XPS: Transmit Packet Steering； */
 		int new_index = get_xps_queue(dev, sb_dev, skb);
 
+		/*使用默认算法，优先使用rx对应的tx队列，否则使用hash的方式映射*/
 		if (new_index < 0)
 			new_index = skb_tx_hash(dev, sb_dev, skb);
 
+		/*更新sk_tx_queue_mapping*/
 		if (queue_index != new_index && sk &&
 		    sk_fullsock(sk) &&
 		    rcu_access_pointer(sk->sk_dst_cache))
@@ -3727,6 +3799,7 @@ static u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
 		queue_index = new_index;
 	}
 
+	/*返回发送队列*/
 	return queue_index;
 }
 
@@ -3746,15 +3819,20 @@ struct netdev_queue *netdev_pick_tx(struct net_device *dev,
 	if (dev->real_num_tx_queues != 1) {
 		const struct net_device_ops *ops = dev->netdev_ops;
 
+		/*如果dirver实现了自己的ndo_slect_queue，则调用driver的ops去拿到queue id。*/
 		if (ops->ndo_select_queue)
 			queue_index = ops->ndo_select_queue(dev, skb, sb_dev,
 							    __netdev_pick_tx);
+
+		/*否则，采用系统的算法       XPS 或者 skb_tx_hash*/
 		else
 			queue_index = __netdev_pick_tx(dev, skb, sb_dev);
 
+		/* 简单检查一下 是否无效 */
 		queue_index = netdev_cap_txqueue(dev, queue_index);
 	}
 
+	/*修改queue mapping*/
 	skb_set_queue_mapping(skb, queue_index);
 	return netdev_get_tx_queue(dev, queue_index);
 }
@@ -3801,6 +3879,7 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 	/* Disable soft irqs for various locks below. Also
 	 * stops preemption for RCU.
 	 */
+	/*关闭软中断*/
 	rcu_read_lock_bh();
 
 	skb_update_prio(skb);
@@ -3824,10 +3903,19 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 	else
 		skb_dst_force(skb);
 
+	/*取出net device的tx queue*/
 	txq = netdev_pick_tx(dev, skb, sb_dev);
+
+	/* 拿到txq对应的qdisc */
 	q = rcu_dereference_bh(txq->qdisc);
 
 	trace_net_dev_queue(skb);
+
+	/*如果这个设备启动了TC, 就对skb进行Qos处理。
+		一般是先调用该qdisc的enqueue方法将skb压入队列，
+		然后，调用该qdisc的dequeue方法从队列中取出数据包；
+		然后 调用网卡驱动的发送函数发送数据。
+	*/
 	if (q->enqueue) {
 		rc = __dev_xmit_skb(skb, q, dev, txq);
 		goto out;
@@ -3853,6 +3941,7 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 				     XMIT_RECURSION_LIMIT))
 				goto recursion_alert;
 
+			/*将会再次判断是否支持HW checksum offload*/
 			skb = validate_xmit_skb(skb, dev, &again);
 			if (!skb)
 				goto out;
@@ -3892,6 +3981,7 @@ out:
 	return rc;
 }
 
+/*该函数是网络设备驱动的传输入口*/
 int dev_queue_xmit(struct sk_buff *skb)
 {
 	return __dev_queue_xmit(skb, NULL);
@@ -3963,7 +4053,10 @@ int dev_tx_weight __read_mostly = 64;
 static inline void ____napi_schedule(struct softnet_data *sd,
 				     struct napi_struct *napi)
 {
+	/*把这个napi挂在给定的softnet_data->poll_list上, 后面rx softirq起来后，就会执行该napi poll*/
 	list_add_tail(&napi->poll_list, &sd->poll_list);
+
+	/*trigger NET_RX_SOFTIRQ*/
 	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
 }
 
@@ -4041,6 +4134,7 @@ static int get_rps_cpu(struct net_device *dev, struct sk_buff *skb,
 	u32 tcpu;
 	u32 hash;
 
+	/* 多rx 队列的网卡 */
 	if (skb_rx_queue_recorded(skb)) {
 		u16 index = skb_get_rx_queue(skb);
 
@@ -4053,6 +4147,7 @@ static int get_rps_cpu(struct net_device *dev, struct sk_buff *skb,
 		}
 		rxqueue += index;
 	}
+
 
 	/* Avoid computing hash if RFS/RPS is not active for this rxqueue */
 
@@ -4241,6 +4336,7 @@ static bool skb_flow_limit(struct sk_buff *skb, unsigned int qlen)
  * enqueue_to_backlog is called to queue an skb to a per CPU backlog
  * queue (may be a remote CPU queue).
  */
+ /*netdev_max_backlog最大值为1000*/
 static int enqueue_to_backlog(struct sk_buff *skb, int cpu,
 			      unsigned int *qtail)
 {
@@ -4256,7 +4352,10 @@ static int enqueue_to_backlog(struct sk_buff *skb, int cpu,
 	if (!netif_running(skb->dev))
 		goto drop;
 	qlen = skb_queue_len(&sd->input_pkt_queue);
+
+	/*如果大于了buffer最大长度 1000，或者流控了，则会被drop。*/
 	if (qlen <= netdev_max_backlog && !skb_flow_limit(skb, qlen)) {
+		/*将skb挂入sd->input_pkt_queue中*/
 		if (qlen) {
 enqueue:
 			__skb_queue_tail(&sd->input_pkt_queue, skb);
@@ -4269,6 +4368,7 @@ enqueue:
 		/* Schedule NAPI for backlog device
 		 * We can use non atomic operation since we own the queue lock
 		 */
+		 /*sd->input_pkt_queue为0,且该sd没有被sched，需要把sd->backlog挂入当前cpu的softnet_data中。*/
 		if (!__test_and_set_bit(NAPI_STATE_SCHED, &sd->backlog.state)) {
 			if (!rps_ipi_queued(sd))
 				____napi_schedule(sd, &sd->backlog);
@@ -4481,6 +4581,7 @@ static int netif_rx_internal(struct sk_buff *skb)
 {
 	int ret;
 
+	/*记录接收时间到skb->tstamp*/
 	net_timestamp_check(netdev_tstamp_prequeue, skb);
 
 	trace_netif_rx(skb);
@@ -4510,6 +4611,7 @@ static int netif_rx_internal(struct sk_buff *skb)
 		preempt_disable();
 		rcu_read_lock();
 
+		/*如果支持rps，这*/
 		cpu = get_rps_cpu(skb->dev, skb, &rflow);
 		if (cpu < 0)
 			cpu = smp_processor_id();
@@ -4586,6 +4688,14 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 		sd->completion_queue = NULL;
 		local_irq_enable();
 
+		/*
+			  * 如果当前CPU的softnet_data中存在已完成
+			  * 输出待释放的数据包，则遍历
+			  * completion_queue队列，释放该队列中所有
+			  * 数据包，对于发送而言，硬中断只是通过网卡把包发走，但是回收内存的事情是通过软中断来做的，
+			*设备驱动发送完数据之后，会调用dev_kfree_skb_irq，不过也有的设备比较个别
+			*自己去free，这个其实也没有什么问题的...省掉了软中断的处理
+		*/
 		while (clist) {
 			struct sk_buff *skb = clist;
 
@@ -4605,6 +4715,13 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 
 		__kfree_skb_flush();
 	}
+
+	/*
+		  * 如果当前CPU的softnet_data中存在待处理的输出网络
+		  * 设备，则遍历output_queue队列，调用qdisc_run()来发送
+		  * 数据包或者再次调度数据包输出软中断，在
+		  * 合适的时机发送数据包。
+		  */
 
 	if (sd->output_queue) {
 		struct Qdisc *head;
@@ -4636,6 +4753,7 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 		}
 	}
 
+	/* 发送backlog的skb  */
 	xfrm_dev_backlog(sd);
 }
 
@@ -4843,6 +4961,8 @@ another_round:
 
 	if (skb->protocol == cpu_to_be16(ETH_P_8021Q) ||
 	    skb->protocol == cpu_to_be16(ETH_P_8021AD)) {
+
+		/* 去掉vlan标签 */
 		skb = skb_vlan_untag(skb);
 		if (unlikely(!skb))
 			goto out;
@@ -4854,6 +4974,11 @@ another_round:
 	if (pfmemalloc)
 		goto skip_taps;
 
+	/* 1. 这里会将数据送入到 tap 抓包点。
+	如 packet tap （libpcap） net/core/dev.c; net/packet/af_packet.c
+	if a packet tap is installed(usually via libpcap)
+
+	*/
 	list_for_each_entry_rcu(ptype, &ptype_all, list) {
 		if (pt_prev)
 			ret = deliver_skb(skb, pt_prev, orig_dev);
@@ -4924,8 +5049,20 @@ skip_classify:
 		__vlan_hwaccel_clear_tag(skb);
 	}
 
-	type = skb->protocol;
 
+	/* 2. 把skb 数据上传到 协议层 ip layer。 
+		ptype_base是一个hash table (net/core/dev.c)
+		
+		struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
+
+		每一种协议在上面的 hash table的一个slot里，添加一个过滤器到列表里。
+
+		用 dev_add_pack() 这个函数进行添加。
+		
+		dev_add_pack(&ip_packet_type); 这就是协议层如何注册自身，用于处理相应协议的 网络数据的。
+			处理函数 ip_rcv()
+	*/
+	type = skb->protocol;
 	/* deliver only exact match when indicated */
 	if (likely(!deliver_exact)) {
 		deliver_ptype_list_skb(skb, &pt_prev, orig_dev, type,
@@ -4968,8 +5105,10 @@ static int __netif_receive_skb_one_core(struct sk_buff *skb, bool pfmemalloc)
 	struct packet_type *pt_prev = NULL;
 	int ret;
 
+	/*delivers data to packet taps and protocol layers*/
 	ret = __netif_receive_skb_core(skb, pfmemalloc, &pt_prev);
 	if (pt_prev)
+		/*调用对应的上层协议的接收函数(IP, ARP...)， eg: ip_rcv()--af_inet.c*/
 		ret = pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
 	return ret;
 }
@@ -5077,7 +5216,10 @@ static int __netif_receive_skb(struct sk_buff *skb)
 		 * context down to all allocation sites.
 		 */
 		noreclaim_flag = memalloc_noreclaim_save();
+	
+		/*会继续调用相关上层协议的接收函数， 包括 ip、arp、rarp*/
 		ret = __netif_receive_skb_one_core(skb, true);
+		
 		memalloc_noreclaim_restore(noreclaim_flag);
 	} else
 		ret = __netif_receive_skb_one_core(skb, false);
@@ -5176,6 +5318,7 @@ static int netif_receive_skb_internal(struct sk_buff *skb)
 		struct rps_dev_flow voidflow, *rflow = &voidflow;
 		int cpu = get_rps_cpu(skb->dev, skb, &rflow);
 
+		/* 将skb放入 对应的cpu的backlog buffer中 */
 		if (cpu >= 0) {
 			ret = enqueue_to_backlog(skb, cpu, &rflow->last_qtail);
 			rcu_read_unlock();
@@ -5183,6 +5326,7 @@ static int netif_receive_skb_internal(struct sk_buff *skb)
 		}
 	}
 #endif
+
 	ret = __netif_receive_skb(skb);
 	rcu_read_unlock();
 	return ret;
@@ -5252,6 +5396,7 @@ static void netif_receive_skb_list_internal(struct list_head *head)
  *	NET_RX_SUCCESS: no congestion
  *	NET_RX_DROP: packet was dropped
  */
+ /*接收skb，然后把skb直接上传到stack上*/
 int netif_receive_skb(struct sk_buff *skb)
 {
 	int ret;
@@ -5350,6 +5495,7 @@ static int napi_gro_complete(struct sk_buff *skb)
 
 	BUILD_BUG_ON(sizeof(struct napi_gro_cb) > sizeof(skb->cb));
 
+	/* 如果该gro skb只有一个，则直接flush到stack。 */
 	if (NAPI_GRO_CB(skb)->count == 1) {
 		skb_shinfo(skb)->gso_size = 0;
 		goto out;
@@ -5374,6 +5520,7 @@ static int napi_gro_complete(struct sk_buff *skb)
 	}
 
 out:
+	/* 把gro skb送入stack */
 	return netif_receive_skb_internal(skb);
 }
 
@@ -5415,28 +5562,40 @@ EXPORT_SYMBOL(napi_gro_flush);
 static struct list_head *gro_list_prepare(struct napi_struct *napi,
 					  struct sk_buff *skb)
 {
+	/* mac的header长度 */
 	unsigned int maclen = skb->dev->hard_header_len;
 	u32 hash = skb_get_hash_raw(skb);
 	struct list_head *head;
 	struct sk_buff *p;
 
+	/* 有8个链表，表示 gro 连接的 桶个数，即8个gro 桶。 
+		拿到该skb hash对应的 桶。
+	*/
 	head = &napi->gro_hash[hash & (GRO_HASH_BUCKETS - 1)].list;
+
+	/* 遍历桶中的skb，即将收到的skb与桶中已有的skb进行匹配。*/
 	list_for_each_entry(p, head, list) {
 		unsigned long diffs;
 
+		/* 初始化为不flush */
 		NAPI_GRO_CB(p)->flush = 0;
 
+		/* 对比hash桶中的skb的hash值与 接收的skb hash值；
+		如果相同，才有可能是属于 same flow。*/
 		if (hash != skb_get_hash_raw(p)) {
 			NAPI_GRO_CB(p)->same_flow = 0;
 			continue;
 		}
 
+		/* 判断skb对应的nic device是否一样 */
 		diffs = (unsigned long)p->dev ^ (unsigned long)skb->dev;
 		diffs |= skb_vlan_tag_present(p) ^ skb_vlan_tag_present(skb);
 		if (skb_vlan_tag_present(p))
 			diffs |= p->vlan_tci ^ skb->vlan_tci;
 		diffs |= skb_metadata_dst_cmp(p, skb);
 		diffs |= skb_metadata_differs(p, skb);
+
+		/* 判断mac header是否一样 */
 		if (maclen == ETH_HLEN)
 			diffs |= compare_ether_header(skb_mac_header(p),
 						      skb_mac_header(skb));
@@ -5444,6 +5603,8 @@ static struct list_head *gro_list_prepare(struct napi_struct *napi,
 			diffs = memcmp(skb_mac_header(p),
 				       skb_mac_header(skb),
 				       maclen);
+
+		/* 设置是否是属于 same_flow */
 		NAPI_GRO_CB(p)->same_flow = !diffs;
 	}
 
@@ -5459,6 +5620,11 @@ static void skb_gro_reset_offset(struct sk_buff *skb)
 	NAPI_GRO_CB(skb)->frag0 = NULL;
 	NAPI_GRO_CB(skb)->frag0_len = 0;
 
+	/*
+	1. skb线性区没有数据，而所有数据均保存在skb_shared_info中(支持S/G的网卡可能会这么做),
+	   此时，我们如果想要合并，就必须把包头信息取出来，也就是从skb_shared_info中的frags[0]中取的，
+	   会把头信息保存到napi_gro_cb的frag0中。
+	2. 且地址不在高端内存high mem, 要么是线性区，要么是dma(S/G io)*/
 	if (skb_mac_header(skb) == skb_tail_pointer(skb) &&
 	    pinfo->nr_frags &&
 	    !PageHighMem(skb_frag_page(frag0))) {
@@ -5513,9 +5679,14 @@ INDIRECT_CALLABLE_DECLARE(struct sk_buff *inet_gro_receive(struct list_head *,
 							   struct sk_buff *));
 INDIRECT_CALLABLE_DECLARE(struct sk_buff *ipv6_gro_receive(struct list_head *,
 							   struct sk_buff *));
+
+/* gro核心函数  */
 static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 {
+	/* 8个hash桶 */
 	u32 hash = skb_get_hash_raw(skb) & (GRO_HASH_BUCKETS - 1);
+
+	/* 注册的各种协议的offload，比如ipv4， ipv6 */
 	struct list_head *head = &offload_base;
 	struct packet_offload *ptype;
 	__be16 type = skb->protocol;
@@ -5525,20 +5696,26 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	int same_flow;
 	int grow;
 
+	/*判断 NIC设备是否支持gro*/
 	if (netif_elide_gro(skb->dev))
 		goto normal;
 
+	/* 链路层判断 该skb是否属于某个已有的gro */
 	gro_head = gro_list_prepare(napi, skb);
 
+	/*开始遍历对应的协议表，包括ip等*/
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, head, list) {
+
+		/* 查找到 skb对应的协议的 offload callback */
 		if (ptype->type != type || !ptype->callbacks.gro_receive)
 			continue;
 
+		/* 设置 skb中network header的offset，根据这个可以找到ip header。 */
 		skb_set_network_header(skb, skb_gro_offset(skb));
 		skb_reset_mac_len(skb);
 		NAPI_GRO_CB(skb)->same_flow = 0;
-		NAPI_GRO_CB(skb)->flush = skb_is_gso(skb) || skb_has_frag_list(skb);
+		NAPI_GRO_CB(skb)->flush = skb_is_gso(skb) || skb_has_frag_list(skb); //如果是gso或者有frag list，则需要flush到stack。
 		NAPI_GRO_CB(skb)->free = 0;
 		NAPI_GRO_CB(skb)->encap_mark = 0;
 		NAPI_GRO_CB(skb)->recursion_counter = 0;
@@ -5547,6 +5724,7 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 		NAPI_GRO_CB(skb)->gro_remcsum_start = 0;
 
 		/* Setup for GRO checksum validation */
+		/* checksum 记录 */
 		switch (skb->ip_summed) {
 		case CHECKSUM_COMPLETE:
 			NAPI_GRO_CB(skb)->csum = skb->csum;
@@ -5562,6 +5740,11 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 			NAPI_GRO_CB(skb)->csum_valid = 0;
 		}
 
+		/*每一层协议都实现了自己的gro回调函数，gro_receive和gro_complete，
+		gro系统会根据协议来调用对应回调函数，其中gro_receive是将输入skb尽量合并到我们gro_list中。
+		而gro_complete则是当我们需要提交gro合并的数据包到协议栈时被调用的。*/
+		
+		/*调用个协议注册的gro接收函数：inet_gro_recive， ipv6_gro_receive*/
 		pp = INDIRECT_CALL_INET(ptype->callbacks.gro_receive,
 					ipv6_gro_receive, inet_gro_receive,
 					gro_head, skb);
@@ -5569,34 +5752,46 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	}
 	rcu_read_unlock();
 
+	/*如果没有实现offload callback，则也直接走normal处理*/
 	if (&ptype->list == head)
 		goto normal;
 
+	/* 正在处理中 */
 	if (IS_ERR(pp) && PTR_ERR(pp) == -EINPROGRESS) {
 		ret = GRO_CONSUMED;
 		goto ok;
 	}
 
+	/*########到达这里， 说明gro_receive已经都调用过了，则可以进行后续处理。*/
+
 	same_flow = NAPI_GRO_CB(skb)->same_flow;
 	ret = NAPI_GRO_CB(skb)->free ? GRO_MERGED_FREE : GRO_MERGED;
 
+	/* 如果返回pp不为空，则需要马上feed进入协议栈*/
 	if (pp) {
 		skb_list_del_init(pp);
 		napi_gro_complete(pp);
 		napi->gro_hash[hash].count--;
 	}
 
+	/* 如果same_flow有设置，则说明skb已经被正确的合并，因此直接返回。 */
 	if (same_flow)
 		goto ok;
 
+	/* 查看该skb是否需要flush,由上层gro callback设置的*/
 	if (NAPI_GRO_CB(skb)->flush)
 		goto normal;
 
+	/*查看gro list的个数是否已经超过限制 8个，即每个hash桶中，只能有最多8个gro skb。*/
 	if (unlikely(napi->gro_hash[hash].count >= MAX_GRO_SKBS)) {
+		/*把最旧的那个skb刷入stack*/
 		gro_flush_oldest(gro_head);
 	} else {
 		napi->gro_hash[hash].count++;
 	}
+
+	/*########到达这里，说明skb对应的gro list是一个新的skb，也就是说当前的gro list并不存在可以和skb合并的数据包，
+	因此，此时将这个skb插入到gro_list的头部。即建立了一个新的gro skb*/
 	NAPI_GRO_CB(skb)->count = 1;
 	NAPI_GRO_CB(skb)->age = jiffies;
 	NAPI_GRO_CB(skb)->last = skb;
@@ -5604,12 +5799,16 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	list_add(&skb->list, gro_head);
 	ret = GRO_HELD;
 
+	/*处理frag0的部分，以及不支持gro的处理。
+		skb_headlen：线性区长度。
+	*/
 pull:
 	grow = skb_gro_offset(skb) - skb_headlen(skb);
 	if (grow > 0)
-		gro_pull_from_frag0(skb, grow);
+		gro_pull_from_frag0(skb, grow); //把frag0中的header部分移动到线性区。
+
 ok:
-	if (napi->gro_hash[hash].count) {
+	if (napi->gro_hash[hash].count) { //如果该hash桶中有skb，就把 gro_bitmask置起；反之，去掉。
 		if (!test_bit(hash, &napi->gro_bitmask))
 			__set_bit(hash, &napi->gro_bitmask);
 	} else if (test_bit(hash, &napi->gro_bitmask)) {
@@ -5658,18 +5857,22 @@ static void napi_skb_free_stolen_head(struct sk_buff *skb)
 	kmem_cache_free(skbuff_head_cache, skb);
 }
 
+/*决定对包的处理*/
 static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 {
 	switch (ret) {
+	/*将数据包送进协议栈*/
 	case GRO_NORMAL:
 		if (netif_receive_skb_internal(skb))
 			ret = GRO_DROP;
 		break;
 
+	/*DRO*/
 	case GRO_DROP:
 		kfree_skb(skb);
 		break;
 
+	/*表示skb可以被free，因为gro已经将skb合并，并保存起来了。*/
 	case GRO_MERGED_FREE:
 		if (NAPI_GRO_CB(skb)->free == NAPI_GRO_FREE_STOLEN_HEAD)
 			napi_skb_free_stolen_head(skb);
@@ -5677,6 +5880,7 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 			__kfree_skb(skb);
 		break;
 
+	/*表示当前数据已经被gro保存起来了，但是并没有进行合并，因此skb还需要保存。*/
 	case GRO_HELD:
 	case GRO_MERGED:
 	case GRO_CONSUMED:
@@ -5686,6 +5890,7 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 	return ret;
 }
 
+/*GRO(Generic receive offload) 收包函数， 处理skb数据包的。*/
 gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 {
 	gro_result_t ret;
@@ -5693,8 +5898,14 @@ gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 	skb_mark_napi_id(skb, napi);
 	trace_napi_gro_receive_entry(skb);
 
+	/*将skb包含的gro上下文reset（某些包线性区没有数据，都存在非线性区中。）
+		frag0的作用是: 有些包的包头会存在skb->frag[0]里面，
+		gro合并时会调用skb_gro_header_slow将包头拉到线性空间中，
+		那么在非线性skb->frag[0]中的包头部分就应该删掉。
+	*/
 	skb_gro_reset_offset(skb);
 
+	/**/
 	ret = napi_skb_finish(dev_gro_receive(napi, skb), skb);
 	trace_napi_gro_receive_exit(ret);
 
@@ -5814,6 +6025,7 @@ static struct sk_buff *napi_frags_skb(struct napi_struct *napi)
 	return skb;
 }
 
+/*GRO收包函数，应用于 对分散聚合dma的nic设备。即收到的数据存在于多个不同的page buffer中。*/
 gro_result_t napi_gro_frags(struct napi_struct *napi)
 {
 	gro_result_t ret;
@@ -5900,6 +6112,7 @@ static bool sd_has_rps_ipi_waiting(struct softnet_data *sd)
 #endif
 }
 
+/*非napi的poll回调，把skb往上层协议传送*/
 static int process_backlog(struct napi_struct *napi, int quota)
 {
 	struct softnet_data *sd = container_of(napi, struct softnet_data, backlog);
@@ -5920,6 +6133,7 @@ static int process_backlog(struct napi_struct *napi, int quota)
 
 		while ((skb = __skb_dequeue(&sd->process_queue))) {
 			rcu_read_lock();
+			/*把skb网协议栈上push*/
 			__netif_receive_skb(skb);
 			rcu_read_unlock();
 			input_queue_head_incr(sd);
@@ -5959,10 +6173,12 @@ static int process_backlog(struct napi_struct *napi, int quota)
  * The entry's receive function will be scheduled to run.
  * Consider using __napi_schedule_irqoff() if hard irqs are masked.
  */
+ /*获取当前被中断的cpu的softnet_data*/
 void __napi_schedule(struct napi_struct *n)
 {
 	unsigned long flags;
 
+	/*关中断*/
 	local_irq_save(flags);
 	____napi_schedule(this_cpu_ptr(&softnet_data), n);
 	local_irq_restore(flags);
@@ -6341,6 +6557,13 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 	 * actually make the ->poll() call.  Therefore we avoid
 	 * accidentally calling ->poll() when NAPI is not scheduled.
 	 */
+	 
+	/*
+	调用NAIP struct的poll函数：
+		非napi的poll为 process_backlog(); 
+		napi的poll为driver自己注册的。
+	*/
+	
 	work = 0;
 	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
 		work = n->poll(n, weight);
@@ -6362,6 +6585,7 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 		goto out_unlock;
 	}
 
+	/*flush gro 数据包 */
 	if (n->gro_bitmask) {
 		/* flush too old packets
 		 * If HZ < 1000, flush all packets.
@@ -6386,11 +6610,16 @@ out_unlock:
 	return work;
 }
 
+/*网络rx softirq*/
 static __latent_entropy void net_rx_action(struct softirq_action *h)
 {
 	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+
+	/*2ms的时间窗*/
 	unsigned long time_limit = jiffies +
 		usecs_to_jiffies(netdev_budget_usecs);
+
+	/*300个packet*/
 	int budget = netdev_budget;
 	LIST_HEAD(list);
 	LIST_HEAD(repoll);
@@ -8197,6 +8426,8 @@ static netdev_features_t netdev_fix_features(struct net_device *dev,
 		features &= ~(NETIF_F_IP_CSUM|NETIF_F_IPV6_CSUM);
 	}
 
+
+	/* 即TSO需要网卡支持 SG和HW_CSUM */
 	/* TSO requires that SG is present as well. */
 	if ((features & NETIF_F_ALL_TSO) && !(features & NETIF_F_SG)) {
 		netdev_dbg(dev, "Dropping TSO features since no SG feature.\n");
@@ -8224,6 +8455,8 @@ static netdev_features_t netdev_fix_features(struct net_device *dev,
 	if ((features & NETIF_F_ALL_TSO) == NETIF_F_TSO_ECN)
 		features &= ~NETIF_F_TSO_ECN;
 
+	
+	/* GSO需要网卡支持 SG */
 	/* Software GSO depends on SG. */
 	if ((features & NETIF_F_GSO) && !(features & NETIF_F_SG)) {
 		netdev_dbg(dev, "Dropping NETIF_F_GSO since no SG feature.\n");
@@ -8531,6 +8764,7 @@ EXPORT_SYMBOL(netif_tx_stop_all_queues);
  *	will not get the same name.
  */
 
+/*注册网络设备*/
 int register_netdevice(struct net_device *dev)
 {
 	int ret;
@@ -8550,6 +8784,7 @@ int register_netdevice(struct net_device *dev)
 	spin_lock_init(&dev->addr_list_lock);
 	netdev_set_addr_lockdep_class(dev);
 
+	/* 获取网卡的名字 */
 	ret = dev_get_valid_name(net, dev, dev->name);
 	if (ret < 0)
 		goto out;
@@ -8582,6 +8817,9 @@ int register_netdevice(struct net_device *dev)
 	/* Transfer changeable features to wanted_features and enable
 	 * software offloads (GSO and GRO).
 	 */
+	 /* 这里看出 默认网卡device都开启了gro/gso feature的
+		但， GSO 需要依赖网卡支持SG， TSO需要网卡支持SG, HW_CSUM, IP_CSUM/IPV6_CSUM
+	 */
 	dev->hw_features |= NETIF_F_SOFT_FEATURES;
 	dev->features |= NETIF_F_SOFT_FEATURES;
 
@@ -8590,6 +8828,7 @@ int register_netdevice(struct net_device *dev)
 		dev->hw_features |= NETIF_F_RX_UDP_TUNNEL_PORT;
 	}
 
+	/* 这里看出 wanted_features是 features和hw_features都有的部分。 */
 	dev->wanted_features = dev->features & dev->hw_features;
 
 	if (!(dev->flags & IFF_LOOPBACK))
@@ -8626,11 +8865,13 @@ int register_netdevice(struct net_device *dev)
 	if (ret)
 		goto err_uninit;
 
+	/* 注册设备 */
 	ret = netdev_register_kobject(dev);
 	if (ret)
 		goto err_uninit;
 	dev->reg_state = NETREG_REGISTERED;
 
+	/* 修正一些不合法的features */
 	__netdev_update_features(dev);
 
 	/*
@@ -8642,7 +8883,9 @@ int register_netdevice(struct net_device *dev)
 
 	linkwatch_init_dev(dev);
 
+	/* 向net dev注册qdisc (每个tx queue都有一个qdisc)，并设置watchdog timer */
 	dev_init_scheduler(dev);
+	
 	dev_hold(dev);
 	list_netdevice(dev);
 	add_device_randomness(dev->dev_addr, dev->addr_len);
@@ -9696,6 +9939,7 @@ static struct pernet_operations __net_initdata default_device_ops = {
  *       This is called single threaded during boot, so no need
  *       to take the rtnl semaphore.
  */
+ /*网络device dirver子系统初始化*/
 static int __init net_dev_init(void)
 {
 	int i, rc = -ENOMEM;
@@ -9720,7 +9964,7 @@ static int __init net_dev_init(void)
 	/*
 	 *	Initialise the packet receive queues.
 	 */
-
+	/*List for NAPI structures to be registered to this CPU.*/
 	for_each_possible_cpu(i) {
 		struct work_struct *flush = per_cpu_ptr(&flush_works, i);
 		struct softnet_data *sd = &per_cpu(softnet_data, i);
@@ -9741,6 +9985,8 @@ static int __init net_dev_init(void)
 #endif
 
 		init_gro_hash(&sd->backlog);
+
+		/*初始化非napi的poll函数*/
 		sd->backlog.poll = process_backlog;
 		sd->backlog.weight = weight_p;
 	}
@@ -9762,6 +10008,7 @@ static int __init net_dev_init(void)
 	if (register_pernet_device(&default_device_ops))
 		goto out;
 
+	/*注册tx和rx的softirq*/
 	open_softirq(NET_TX_SOFTIRQ, net_tx_action);
 	open_softirq(NET_RX_SOFTIRQ, net_rx_action);
 

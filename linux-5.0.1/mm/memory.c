@@ -89,6 +89,7 @@
 unsigned long max_mapnr;
 EXPORT_SYMBOL(max_mapnr);
 
+/* 系统中所有的页面都存储在 mem_map中。*/
 struct page *mem_map;
 EXPORT_SYMBOL(mem_map);
 #endif

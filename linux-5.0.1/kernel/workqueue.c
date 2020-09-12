@@ -1746,6 +1746,8 @@ static void worker_attach_to_pool(struct worker *worker,
 {
 	mutex_lock(&wq_pool_attach_mutex);
 
+	
+	/*将workder线程和cpu绑定*/
 	/*
 	 * set_cpus_allowed_ptr() will fail if the cpumask doesn't have any
 	 * online CPUs.  It'll be re-applied when any of the CPUs come up.
@@ -1760,6 +1762,7 @@ static void worker_attach_to_pool(struct worker *worker,
 	if (pool->flags & POOL_DISASSOCIATED)
 		worker->flags |= WORKER_UNBOUND;
 
+	/*将worker加入 worker_pool链表*/
 	list_add_tail(&worker->node, &pool->workers);
 	worker->pool = pool;
 
@@ -1825,22 +1828,28 @@ static struct worker *create_worker(struct worker_pool *pool)
 	worker->id = id;
 
 	if (pool->cpu >= 0)
+		/*给normal worker_pool的worker构造进程名*/
 		snprintf(id_buf, sizeof(id_buf), "%d:%d%s", pool->cpu, id,
 			 pool->attrs->nice < 0  ? "H" : "");
 	else
+		/*给unbound worker_pool的worker构造进程名*/
 		snprintf(id_buf, sizeof(id_buf), "u%d:%d", pool->id, id);
 
+	/*创建worker对应的内核进程*/
 	worker->task = kthread_create_on_node(worker_thread, worker, pool->node,
 					      "kworker/%s", id_buf);
 	if (IS_ERR(worker->task))
 		goto fail;
 
+	/*设置内核进程对应的优先级 nice*/
 	set_user_nice(worker->task, pool->attrs->nice);
 	kthread_bind_mask(worker->task, pool->attrs->cpumask);
 
+	/*将worker和worker_pool绑定*/
 	/* successful, attach the worker to the pool */
 	worker_attach_to_pool(worker, pool);
 
+	/*将worker初始状态设置为idle。 wake_up_process后，worker自动leave idle状态。*/
 	/* start the newly created worker */
 	spin_lock_irq(&pool->lock);
 	worker->pool->nr_workers++;
@@ -3316,12 +3325,20 @@ static int init_worker_pool(struct worker_pool *pool)
 	pool->node = NUMA_NO_NODE;
 	pool->flags |= POOL_DISASSOCIATED;
 	pool->watchdog_ts = jiffies;
+
+	/*worker_pool的work_list, 各个workqueue把work挂载到这个链表上，让worker_pool 对应的多个worker来执行*/
 	INIT_LIST_HEAD(&pool->worklist);
+
+	/*worker_pool的idle worker list, worker没有活干时，不会马上被销毁，先进入idle状态备选。*/
 	INIT_LIST_HEAD(&pool->idle_list);
+
+	/*worker_pool的busy worker list, worker正在干活，在执行work*/
 	hash_init(pool->busy_hash);
 
+	/*检查idle状态的worker是否需要destroy的timer*/
 	timer_setup(&pool->idle_timer, idle_worker_timeout, TIMER_DEFERRABLE);
 
+	/*在worker_pool创建新的worker时，检查是否超时的timer*/
 	timer_setup(&pool->mayday_timer, pool_mayday_timeout, 0);
 
 	INIT_LIST_HEAD(&pool->workers);
@@ -5707,8 +5724,10 @@ static void __init wq_numa_init(void)
  * items.  Actual work item execution starts only after kthreads can be
  * created and scheduled right before early initcalls.
  */
+ /*workqueue的初始化函数*/
 int __init workqueue_init_early(void)
 {
+	/*两个优先级，一个nice=0, 一个是nice=-20，是普通进程中的最高优先级。*/
 	int std_nice[NR_STD_WORKER_POOLS] = { 0, HIGHPRI_NICE_LEVEL };
 	int hk_flags = HK_FLAG_DOMAIN | HK_FLAG_WQ;
 	int i, cpu;
@@ -5720,15 +5739,23 @@ int __init workqueue_init_early(void)
 
 	pwq_cache = KMEM_CACHE(pool_workqueue, SLAB_PANIC);
 
+
+	/*为每个cpu创建两个worker_pool。*/
 	/* initialize CPU pools */
 	for_each_possible_cpu(cpu) {
 		struct worker_pool *pool;
 
 		i = 0;
+		/*每个cpu两个worker_pool, cpu_worker_pools[0]和cpu_worker_pools[1]*/
 		for_each_cpu_worker_pool(pool, cpu) {
+			/*初始化worker_pool*/
 			BUG_ON(init_worker_pool(pool));
+
+			/*指定cpu*/
 			pool->cpu = cpu;
 			cpumask_copy(pool->attrs->cpumask, cpumask_of(cpu));
+
+			/*设置nice值*/
 			pool->attrs->nice = std_nice[i++];
 			pool->node = cpu_to_node(cpu);
 
@@ -5739,10 +5766,13 @@ int __init workqueue_init_early(void)
 		}
 	}
 
+
+	/*初始化 unbound worker_pool*/
 	/* create default unbound and ordered wq attrs */
 	for (i = 0; i < NR_STD_WORKER_POOLS; i++) {
 		struct workqueue_attrs *attrs;
 
+		/*设置unbound类型workqueue的属性*/
 		BUG_ON(!(attrs = alloc_workqueue_attrs(GFP_KERNEL)));
 		attrs->nice = std_nice[i];
 		unbound_std_wq_attrs[i] = attrs;
@@ -5752,21 +5782,37 @@ int __init workqueue_init_early(void)
 		 * guaranteed by max_active which is enforced by pwqs.
 		 * Turn off NUMA so that dfl_pwq is used for all nodes.
 		 */
+		 /*设置ordered类型workqueue的属性。ordered类型的workqueue同一时刻只能有一个work item在运行*/
 		BUG_ON(!(attrs = alloc_workqueue_attrs(GFP_KERNEL)));
 		attrs->nice = std_nice[i];
 		attrs->no_numa = true;
 		ordered_wq_attrs[i] = attrs;
 	}
 
+	/*创建系统默认的workqueue*/
+	
+	/*普通优先级bound类型工作队列 system_wq*/
 	system_wq = alloc_workqueue("events", 0, 0);
+	
+	/*高优先级bound类型工作队列 system_highpri_wq*/
 	system_highpri_wq = alloc_workqueue("events_highpri", WQ_HIGHPRI, 0);
+
+	/**/
 	system_long_wq = alloc_workqueue("events_long", 0, 0);
+
+	/*普通优先级unbound类型工作队列 system_unbound_wq*/
 	system_unbound_wq = alloc_workqueue("events_unbound", WQ_UNBOUND,
 					    WQ_UNBOUND_MAX_ACTIVE);
+
+	/*frezable类型工作队列 system_freeazble_wq*/
 	system_freezable_wq = alloc_workqueue("events_freezable",
 					      WQ_FREEZABLE, 0);
+
+	/*省电类型的工作队列 system_power_efficient_wq*/
 	system_power_efficient_wq = alloc_workqueue("events_power_efficient",
 					      WQ_POWER_EFFICIENT, 0);
+
+	/*freezable且省电类型的工作队列 system_freezable_power_efficient_wq*/
 	system_freezable_power_efficient_wq = alloc_workqueue("events_freezable_power_efficient",
 					      WQ_FREEZABLE | WQ_POWER_EFFICIENT,
 					      0);
@@ -5821,6 +5867,8 @@ int __init workqueue_init(void)
 
 	mutex_unlock(&wq_pool_mutex);
 
+
+	/*为每个在线cpu 创建 worker */
 	/* create the initial workers */
 	for_each_online_cpu(cpu) {
 		for_each_cpu_worker_pool(pool, cpu) {

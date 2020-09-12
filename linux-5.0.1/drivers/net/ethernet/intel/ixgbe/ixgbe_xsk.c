@@ -507,7 +507,11 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 	xdp.rxq = &rx_ring->xdp_rxq;
 
 	while (likely(total_rx_packets < budget)) {
+
+		/* ixgbe的dma descriptor */
 		union ixgbe_adv_rx_desc *rx_desc;
+
+		/* skb对应的信息记录 */
 		struct ixgbe_rx_buffer *bi;
 		unsigned int size;
 
@@ -530,6 +534,7 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 		 */
 		dma_rmb();
 
+		/* cpu获取dma buffer的的使用权 */
 		bi = ixgbe_get_rx_buffer_zc(rx_ring, size);
 
 		if (unlikely(!ixgbe_test_staterr(rx_desc,
@@ -591,6 +596,8 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 		total_rx_packets++;
 
 		ixgbe_process_skb_fields(rx_ring, rx_desc, skb);
+
+		/* 通过 napi_gro_receive()把skb上传到tcp/ip stack。 */
 		ixgbe_rx_skb(q_vector, skb);
 	}
 

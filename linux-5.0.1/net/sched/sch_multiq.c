@@ -252,6 +252,7 @@ static int multiq_init(struct Qdisc *sch, struct nlattr *opt,
 	if (err)
 		return err;
 
+	/*multiq的band数量和tx queue的数量一样， 每一个为 pfifo_qdisc_ops*/
 	q->max_bands = qdisc_dev(sch)->num_tx_queues;
 
 	q->queues = kcalloc(q->max_bands, sizeof(struct Qdisc *), GFP_KERNEL);
@@ -260,6 +261,7 @@ static int multiq_init(struct Qdisc *sch, struct nlattr *opt,
 	for (i = 0; i < q->max_bands; i++)
 		q->queues[i] = &noop_qdisc;
 
+	/* 初始化每个tx queue的qdisc为 pfifo_qdisc_ops*/
 	return multiq_tune(sch, opt, extack);
 }
 

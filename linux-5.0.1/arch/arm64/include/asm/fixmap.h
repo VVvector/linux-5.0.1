@@ -33,6 +33,7 @@
  * physical memory with fixmap indices.
  *
  */
+ /* 可看出 fixed map区域的布局。 */
 enum fixed_addresses {
 	FIX_HOLE,
 

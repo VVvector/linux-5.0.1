@@ -67,6 +67,12 @@ static void mq_destroy(struct Qdisc *sch)
 	kfree(priv->qdiscs);
 }
 
+
+/* qdisc的初始化函数
+它的parent为  TC_H_ROOT，即根qdisc。
+且 device必须为 多队列。
+
+*/
 static int mq_init(struct Qdisc *sch, struct nlattr *opt,
 		   struct netlink_ext_ack *extack)
 {
@@ -83,13 +89,17 @@ static int mq_init(struct Qdisc *sch, struct nlattr *opt,
 		return -EOPNOTSUPP;
 
 	/* pre-allocate qdiscs, attachment can't fail */
+	/* 为每个硬件tx queue申请了一个qdisc指针。 */
 	priv->qdiscs = kcalloc(dev->num_tx_queues, sizeof(priv->qdiscs[0]),
 			       GFP_KERNEL);
 	if (!priv->qdiscs)
 		return -ENOMEM;
 
+	/* 初始化每个tx queue的qdisc，且为 default_qdisc_ops或者   pfifo_fast_op */
 	for (ntx = 0; ntx < dev->num_tx_queues; ntx++) {
 		dev_queue = netdev_get_tx_queue(dev, ntx);
+		
+		/*每个txq的 qdisc，都是 default_qdisc_ops 或者   pfifo_fast_ops*/
 		qdisc = qdisc_create_dflt(dev_queue, get_default_qdisc_ops(dev, ntx),
 					  TC_H_MAKE(TC_H_MAJ(sch->handle),
 						    TC_H_MIN(ntx + 1)),
@@ -102,10 +112,14 @@ static int mq_init(struct Qdisc *sch, struct nlattr *opt,
 
 	sch->flags |= TCQ_F_MQROOT;
 
+	/*hw offload*/
 	mq_offload(sch, TC_MQ_CREATE);
 	return 0;
 }
 
+/* 在net device open时会调用这个 
+	就是将mq的各sub qdisc挂载到实际device的tx queue上。
+		   */
 static void mq_attach(struct Qdisc *sch)
 {
 	struct net_device *dev = qdisc_dev(sch);

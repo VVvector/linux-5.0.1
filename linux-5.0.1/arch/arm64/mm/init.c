@@ -473,6 +473,18 @@ void __init arm64_memblock_init(void)
 	dma_contiguous_reserve(arm64_dma_phys_limit);
 }
 
+
+/*
+page：
+	线性地址被分成以固定长度为单位的组，称为页，比如典型的4K大小，
+	页内部连续的线性地址被映射到连续的物理地址中；
+
+page frame：
+	内存被分成固定长度的存储区域，称为页框，也叫物理页。每一个页框会包含一个页，
+	页框的长度和一个页的长度是一致的，在内核中使用struct page来关联物理页。
+
+*/
+
 void __init bootmem_init(void)
 {
 	unsigned long min, max;
@@ -489,9 +501,21 @@ void __init bootmem_init(void)
 	 * Sparsemem tries to allocate bootmem in memory_present(), so must be
 	 * done after the fixed reservations.
 	 */
+	 /*
+	在Sparse Memory模型中，section是管理内存online/offline的最小内存单元，在ARM64中，
+	section的大小为1G，而在Linux内核中，通过一个全局的二维数组struct mem_section **mem_section来维护映射关系。
+	*/
 	arm64_memory_present();
 
 	sparse_init();
+
+	/*在Linux中，物理内存地址区域采用zone来管理。ARM64，UMA（只有一个Node）为例。
+		struct pglist_data描述单个Node的内存（UMA架构中的所有内存），
+		然后内存又分成不同的zone区域，zone描述区域内的不同页面，
+		包括空闲页面，Buddy System管理的页面等。
+
+		ARM64不再有 ZONE_HIGHEM区域。
+	*/
 	zone_sizes_init(min, max);
 
 	memblock_dump_all();

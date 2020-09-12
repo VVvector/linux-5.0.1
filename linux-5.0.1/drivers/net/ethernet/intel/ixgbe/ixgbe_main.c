@@ -132,6 +132,16 @@ static const struct pci_device_id ixgbe_pci_tbl[] = {
 	{0, }
 };
 MODULE_DEVICE_TABLE(pci, ixgbe_pci_tbl);
+/* 
+	PCIe设备通过PCI Configuration space里面的寄存器识别自己。
+
+	当设备驱动编译时， MODULE_DEVICE_TABLE宏会导出一个 PCI 设备ID列表，
+	驱动据此识别它，可以控制的设备，内核也会根据这个列表对不同设备加载相应驱动。
+
+	通过 PCI ID 识别设备后，内核就会匹配对应的驱动，然后 调到驱动的probe方法。
+*/
+
+
 
 #ifdef CONFIG_IXGBE_DCA
 static int ixgbe_notify_dca(struct notifier_block *, unsigned long event,
@@ -1592,7 +1602,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 	bufsz = ixgbe_rx_bufsz(rx_ring);
 
 	do {
-		if (!ixgbe_alloc_mapped_page(rx_ring, bi))
+	if (!ixgbe_alloc_mapped_page(rx_ring, bi))
 			break;
 
 		/* sync the buffer for use by the device */
@@ -1604,6 +1614,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 		 * Refresh the desc even if buffer_addrs didn't change
 		 * because each write-back erases this info.
 		 */
+		 /* 写到硬件中*/
 		rx_desc->read.pkt_addr = cpu_to_le64(bi->dma + bi->page_offset);
 
 		rx_desc++;
@@ -2114,10 +2125,14 @@ static struct sk_buff *ixgbe_construct_skb(struct ixgbe_ring *rx_ring,
 	 */
 
 	/* allocate a skb to store the frags */
+	/* 申请skb结构 */
 	skb = napi_alloc_skb(&rx_ring->q_vector->napi, IXGBE_RX_HDR_SIZE);
 	if (unlikely(!skb))
 		return NULL;
 
+	/* 根据buffer的大小，来看是把buffer数据拷贝到skb线性区，
+		还是 直接挂到skb的frags[]上。
+	*/
 	if (size > IXGBE_RX_HDR_SIZE) {
 		if (!ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_EOP))
 			IXGBE_CB(skb)->dma = rx_buffer->dma;
@@ -2292,6 +2307,9 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		struct sk_buff *skb;
 		unsigned int size;
 
+		/* 批量更新 rx descriptor， 包括alloc page buffer。
+			一次更新16个skb buffer。
+		*/
 		/* return some buffers to hardware, one at a time is too slow */
 		if (cleaned_count >= IXGBE_RX_BUFFER_WRITE) {
 			ixgbe_alloc_rx_buffers(rx_ring, cleaned_count);
@@ -2309,6 +2327,7 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		 */
 		dma_rmb();
 
+		/* 接收rx page buffer的数据 */
 		rx_buffer = ixgbe_get_rx_buffer(rx_ring, rx_desc, &skb, size);
 
 		/* retrieve a buffer from the ring */
@@ -2323,6 +2342,7 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 			skb = ixgbe_run_xdp(adapter, rx_ring, &xdp);
 		}
 
+		/* 这里会根据不同情况去组织skb，可以挂载多个skb frags[] , paged buffer。 */
 		if (IS_ERR(skb)) {
 			unsigned int xdp_res = -PTR_ERR(skb);
 
@@ -2340,7 +2360,8 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 			skb = ixgbe_build_skb(rx_ring, rx_buffer,
 					      &xdp, rx_desc);
 		} else {
-			skb = ixgbe_construct_skb(rx_ring, rx_buffer,
+			/* 这里会申请一个skb数据结构来挂载dma buffer。 */
+			skb = ixgbe_construct_skb(rx_ring, rx_buffer,  
 						  &xdp, rx_desc);
 		}
 
@@ -2354,7 +2375,10 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		ixgbe_put_rx_buffer(rx_ring, rx_buffer, skb);
 		cleaned_count++;
 
-		/* place incomplete frames back on ring for completion */
+		/* place incomplete frames back on ring for completion
+			判断一个skb buffer是否已经接收完成，例如，可能一个
+			skb有多个page data构成。
+		*/
 		if (ixgbe_is_non_eop(rx_ring, rx_desc, skb))
 			continue;
 
@@ -2393,6 +2417,8 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		}
 
 #endif /* IXGBE_FCOE */
+
+		/* 通过 napi_gro_receive()把skb上传到tcp/ip stack。 */
 		ixgbe_rx_skb(q_vector, skb);
 
 		/* update budget accounting */
@@ -3147,6 +3173,7 @@ static irqreturn_t ixgbe_msix_clean_rings(int irq, void *data)
  *
  * This function is used for legacy and MSI, NAPI mode
  **/
+ /* NAPI的poll函数 */
 int ixgbe_poll(struct napi_struct *napi, int budget)
 {
 	struct ixgbe_q_vector *q_vector =
@@ -3161,6 +3188,9 @@ int ixgbe_poll(struct napi_struct *napi, int budget)
 		ixgbe_update_dca(q_vector);
 #endif
 
+	/* 处理 tx interrupt, 即处理发送队列中的数据。
+		ixgbe_clean_tx_irq: 每次限制发送 q_vector->tx.work_limit 个报文，底层网卡逻辑暂时不看了。
+	*/
 	ixgbe_for_each_ring(ring, q_vector->tx) {
 		bool wd = ring->xsk_umem ?
 			  ixgbe_clean_xdp_tx_irq(q_vector, ring, budget) :
@@ -3181,6 +3211,15 @@ int ixgbe_poll(struct napi_struct *napi, int budget)
 	else
 		per_ring_budget = budget;
 
+	/* 处理rx interrupt， 即处理接收队列中的数据。
+	
+	ixgbe_clean_rx_irq: 每个 ixgbe_ring 保存一个环形数组，ring buffer，
+	读出 skb 数据后调用 ixgbe_rx_skb 开始处理，如果开启了 GRO 那么合并小包，
+	然后再查看是否有 RPS 逻辑，如果有就走，没有就调用 __netif_receive_skb
+	根据上文提到的 ptype_all，来选择是 ip_rcv, 还是 ipv6_rcv 再继续上层逻辑。
+	调用 ip_rcv 之后会回调 NF_INET_PRE_ROUTING hook, 也就是大家都熟悉的 iptables pre_routing 链。
+
+	*/
 	ixgbe_for_each_ring(ring, q_vector->rx) {
 		int cleaned = ring->xsk_umem ?
 			      ixgbe_clean_rx_irq_zc(q_vector, ring,
@@ -3240,6 +3279,8 @@ static int ixgbe_request_msix_irqs(struct ixgbe_adapter *adapter)
 			/* skip this unused q_vector */
 			continue;
 		}
+
+		/* 这里就是注册了中断，服务函数为  ixgbe_msix_clean_rings() */
 		err = request_irq(entry->vector, &ixgbe_msix_clean_rings, 0,
 				  q_vector->name, q_vector);
 		if (err) {
@@ -3284,6 +3325,9 @@ free_queue_irqs:
  * @irq: interrupt number
  * @data: pointer to a network interface device structure
  **/
+
+/* ixgbe的中断服务函数 */
+
 static irqreturn_t ixgbe_intr(int irq, void *data)
 {
 	struct ixgbe_adapter *adapter = data;
@@ -3341,6 +3385,8 @@ static irqreturn_t ixgbe_intr(int irq, void *data)
 		ixgbe_ptp_check_pps_event(adapter);
 
 	/* would disable interrupts here but EIAM disabled it */
+	
+	/* ixgbe_poll() napi poll函数, 触发NET_RX_SOFTIRQ 调度napi。 */
 	napi_schedule_irqoff(&q_vector->napi);
 
 	/*
@@ -4138,7 +4184,9 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 		ring->rx_buf_len = xsk_buf_len;
 	}
 
-	/* initialize rx_buffer_info */
+	/* initialize rx_buffer_info 
+		初始化 rx_buffer_info, 这个buffer是用于记录skb信息的。
+	*/
 	memset(ring->rx_buffer_info, 0,
 	       sizeof(struct ixgbe_rx_buffer) * ring->count);
 
@@ -4151,10 +4199,12 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 	IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(reg_idx), rxdctl);
 
 	ixgbe_rx_desc_queue_enable(adapter, ring);
+
+	/* 这里会调用 dev_alloc_pages() 来获取rx buffer。 即会分配skb buffer用于接收数据。*/
 	if (ring->xsk_umem)
 		ixgbe_alloc_rx_buffers_zc(ring, ixgbe_desc_unused(ring));
 	else
-		ixgbe_alloc_rx_buffers(ring, ixgbe_desc_unused(ring));
+		ixgbe_alloc_rx_buffers(ring, ixgbe_desc_unused(ring)); //dev_alloc_pages()
 }
 
 static void ixgbe_setup_psrtype(struct ixgbe_adapter *adapter)
@@ -4402,6 +4452,7 @@ static void ixgbe_configure_rx(struct ixgbe_adapter *adapter)
 	 * Setup the HW Rx Head and Tail Descriptor Pointers and
 	 * the Base and Length of the Rx Descriptor Ring
 	 */
+	 /*申请skb 记录信息 和 skb buffer。*/
 	for (i = 0; i < adapter->num_rx_queues; i++)
 		ixgbe_configure_rx_ring(adapter, adapter->rx_ring[i]);
 
@@ -5451,8 +5502,13 @@ static void ixgbe_configure(struct ixgbe_adapter *adapter)
 	ixgbe_configure_fcoe(adapter);
 
 #endif /* IXGBE_FCOE */
+
 	ixgbe_configure_tx(adapter);
+
+	/* 这里会申请rx的资源，包括rx descriptor和对应skb buffer。 */
 	ixgbe_configure_rx(adapter);
+
+	
 	ixgbe_configure_dfwd(adapter);
 }
 
@@ -6232,7 +6288,6 @@ static int ixgbe_sw_init(struct ixgbe_adapter *adapter,
 	int i;
 
 	/* PCI config space info */
-
 	hw->vendor_id = pdev->vendor;
 	hw->device_id = pdev->device;
 	hw->revision_id = pdev->revision;
@@ -6433,6 +6488,7 @@ int ixgbe_setup_tx_resources(struct ixgbe_ring *tx_ring)
 		goto err;
 
 	/* round up to nearest 4K */
+	/*由cpu填写信息，dma读取并搬运指定的buffer。一共 1024个 */
 	tx_ring->size = tx_ring->count * sizeof(union ixgbe_adv_tx_desc);
 	tx_ring->size = ALIGN(tx_ring->size, 4096);
 
@@ -6520,6 +6576,7 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 	if (rx_ring->q_vector)
 		ring_node = rx_ring->q_vector->numa_node;
 
+	/* 申请rx descriptor对应的skb的buffer信息。 记录 skb的信息，用于管理skb buffer。*/
 	rx_ring->rx_buffer_info = vmalloc_node(size, ring_node);
 	if (!rx_ring->rx_buffer_info)
 		rx_ring->rx_buffer_info = vmalloc(size);
@@ -6527,6 +6584,7 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 		goto err;
 
 	/* Round up to nearest 4K */
+	/* 申请rx descriptor DMA buffer，该buffer是用于cpu写入skb buffer信息，dma读取并搬运。 */
 	rx_ring->size = rx_ring->count * sizeof(union ixgbe_adv_rx_desc);
 	rx_ring->size = ALIGN(rx_ring->size, 4096);
 
@@ -6739,6 +6797,9 @@ static int ixgbe_change_mtu(struct net_device *netdev, int new_mtu)
  * handler is registered with the OS, the watchdog timer is started,
  * and the stack is notified that the interface is ready.
  **/
+/*
+在网卡激活时调用。其本功能很简单，申请所有 rx, tx 队列资源，申请中断，配置 msi-x.
+*/
 int ixgbe_open(struct net_device *netdev)
 {
 	struct ixgbe_adapter *adapter = netdev_priv(netdev);
@@ -6752,22 +6813,45 @@ int ixgbe_open(struct net_device *netdev)
 	netif_carrier_off(netdev);
 
 	/* allocate transmit descriptors */
+	/*为adapter->tx_ring[i]分配1024个ixgbe_tx_buffer，地址赋给adapter->tx_ring[i].tx_buffer_info*/
+	/* 
+		分配发送队列，每个队列申请自己的DMA buffer，总长度为sizeof(struct ixgbe_tx_buffer) * tx_ring->count,
+		其中，count就是大家常说的网卡队列ring buffer个数，默认为512，一般都要调大，防止丢包。
+	*/
 	err = ixgbe_setup_all_tx_resources(adapter);
 	if (err)
 		goto err_setup_tx;
 
 	/* allocate receive descriptors */
+	/*为adapter->rx_ring[i]分配1024个ixgbe_rx_buffer，地址赋给adapter->rx_ring[i].rx_buffer_info*/
+	/*
+		同理，分配接收队列。
+	*/
 	err = ixgbe_setup_all_rx_resources(adapter);
 	if (err)
 		goto err_setup_rx;
 
+	/*配置网卡 -- 这里会申请rx、rx的资源，包括skb buffer。
+	
+		设置网卡虚拟化，接收模式，flow director等，最后调用 ixgbe_configure_tx, ixgbe_configure_rx
+		网卡硬件配置接收发送队列。
+	*/
 	ixgbe_configure(adapter);
 
+	/* 向系统申请irq中断服务函数 --》最终调用ixgbe_request_msix_irqs()申请中断向量，
+	并配置中断服务函数ixgbe_msix_clean_rings()
+
+		注： 中断vector的申请是在  pci_enable_msix_range()中进行的。
+	*/
 	err = ixgbe_request_irq(adapter);
 	if (err)
 		goto err_req_irq;
 
-	/* Notify the stack of the actual queue counts. */
+	/* Notify the stack of the actual queue counts. 
+		通知tcp/ip stack网卡实际的tx/rx queue个数。
+
+		即stack的qdisc的queue个数应该与网卡硬件queue个数一致。
+	*/
 	queues = adapter->num_tx_queues;
 	err = netif_set_real_num_tx_queues(netdev, queues);
 	if (err)
@@ -6780,6 +6864,12 @@ int ixgbe_open(struct net_device *netdev)
 
 	ixgbe_ptp_init(adapter);
 
+	/*
+	设置网卡寄存器IVAR
+	清除napi->state的NAPI_STATE_SCHED标志
+	打开中断
+	清除所有发送队列的__QUEUE_STATE_XOFF标志 
+	*/
 	ixgbe_up_complete(adapter);
 
 	ixgbe_clear_udp_tunnel_port(adapter, IXGBE_VXLANCTRL_ALL_UDPPORT_MASK);
@@ -8015,6 +8105,7 @@ static int ixgbe_tso(struct ixgbe_ring *tx_ring,
 	vlan_macip_lens |= (ip.hdr - skb->data) << IXGBE_ADVTXD_MACLEN_SHIFT;
 	vlan_macip_lens |= first->tx_flags & IXGBE_TX_FLAGS_VLAN_MASK;
 
+
 	ixgbe_tx_ctxtdesc(tx_ring, vlan_macip_lens, fceof_saidx, type_tucmd,
 			  mss_l4len_idx);
 
@@ -8585,6 +8676,7 @@ int ixgbe_xmit_xdp_ring(struct ixgbe_adapter *adapter,
 	return IXGBE_XDP_TX;
 }
 
+/*  */
 netdev_tx_t ixgbe_xmit_frame_ring(struct sk_buff *skb,
 			  struct ixgbe_adapter *adapter,
 			  struct ixgbe_ring *tx_ring)
@@ -8703,6 +8795,7 @@ netdev_tx_t ixgbe_xmit_frame_ring(struct sk_buff *skb,
 	    !ixgbe_ipsec_tx(tx_ring, first, &ipsec_tx))
 		goto out_drop;
 #endif
+
 	tso = ixgbe_tso(tx_ring, first, &hdr_len, &ipsec_tx);
 	if (tso < 0)
 		goto out_drop;
@@ -8716,6 +8809,8 @@ netdev_tx_t ixgbe_xmit_frame_ring(struct sk_buff *skb,
 #ifdef IXGBE_FCOE
 xmit_fcoe:
 #endif /* IXGBE_FCOE */
+
+	/* 将skb相关信息填入到dma buffer中，触发硬件发送数据。*/
 	if (ixgbe_tx_map(tx_ring, first, hdr_len))
 		goto cleanup_tx_timestamp;
 
@@ -8749,13 +8844,18 @@ static netdev_tx_t __ixgbe_xmit_frame(struct sk_buff *skb,
 	if (skb_put_padto(skb, 17))
 		return NETDEV_TX_OK;
 
+	/* 这里的tx queue应该和qdisc的tx queue相对应。 */
+	/*找到给skb对应的tx queue。 */
 	tx_ring = ring ? ring : adapter->tx_ring[skb->queue_mapping];
 	if (unlikely(test_bit(__IXGBE_TX_DISABLED, &tx_ring->state)))
 		return NETDEV_TX_BUSY;
 
+	
 	return ixgbe_xmit_frame_ring(skb, adapter, tx_ring);
 }
 
+
+/* 网卡发送函数接口 */
 static netdev_tx_t ixgbe_xmit_frame(struct sk_buff *skb,
 				    struct net_device *netdev)
 {
@@ -10715,12 +10815,42 @@ static void ixgbe_set_fw_version(struct ixgbe_adapter *adapter)
  * The OS initialization, configuring of the adapter private structure,
  * and a hardware reset occur.
  **/
+/*
+	EP: endpoint，如 显卡，网卡，声卡，硬盘等pcie 接口的设备。
+	SW: switch，bridge。
+	RC: Root complex，根设备，通过switch和下游设备(EP或者switch)进行桥接，从而各PCIe设备
+		组成了一个PCIe设备网络，信息就以数据包(TLP, DLLP)的形式在网络中传递。
+
+*/
+
+
+/*
+CPU 可以访问PCI设备上的所有地址空间，其中I/O空间和存储空间提供给设备驱动程序使用，
+而配置空间则由Linux内核中的PCI初始化代码使用，内核在启动时负责对所有PCI设备进行初始化，
+配置好所有的PCI设备，包括中断号以及I/O基址，
+并在文件/proc/pci中列出所有找到的PCI设备，以及这些设备的参数和属性。
+*/
+
+/*
+1. 系统是怎样枚举出PCIe设备的？
+
+*/
+
+ /*ixgbe device初始化*/
 static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct net_device *netdev;
+
+	/* ixgbe device的描述 */
 	struct ixgbe_adapter *adapter = NULL;
+
+	/* ixgbe 硬件的信息描述  */
 	struct ixgbe_hw *hw;
+
+	/* 根据网卡型号(82598/82599)选择ixgbe_info ， 这里的pci_device_id 是系统枚举出来的。*/
 	const struct ixgbe_info *ii = ixgbe_info_tbl[ent->driver_data];
+
+	
 	int i, err, pci_using_dac, expected_gts;
 	unsigned int indices = MAX_TX_QUEUES;
 	u8 part_str[IXGBE_PBANUM_LENGTH];
@@ -10739,10 +10869,14 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return -EINVAL;
 	}
 
+	/*向配置寄存器Command(0x4)中写入 PCI_COMMAND_MEMORY(0x2)，允许网卡驱动访问网卡的memory空间。
+		激活PCIe设备。
+	*/
 	err = pci_enable_device_mem(pdev);
 	if (err)
 		return err;
 
+	/*检查并设置PCI总线地址位数*/
 	if (!dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
 		pci_using_dac = 1;
 	} else {
@@ -10755,6 +10889,9 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		pci_using_dac = 0;
 	}
 
+	/*登记BAR中的总线地址(将resource插入iomem_resource资源)
+		PCIe设备申请memory资源
+	*/
 	err = pci_request_mem_regions(pdev, ixgbe_driver_name);
 	if (err) {
 		dev_err(&pdev->dev,
@@ -10764,7 +10901,10 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_enable_pcie_error_reporting(pdev);
 
+	/*向配置寄存器Command(0x4)中写入PCI_COMMAND_MASTER(0x4)，允许网卡申请PCI总线控制权*/
 	pci_set_master(pdev);
+
+	/*读取并保存配置空间到dev->saved_config_space*/
 	pci_save_state(pdev);
 
 	if (ii->mac == ixgbe_mac_82598EB) {
@@ -10776,6 +10916,9 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 #endif
 	}
 
+	/*分配net_device和ixgbe_adapter，发送队列数为 indices
+		默认64个tx/rx队列。
+	*/
 	netdev = alloc_etherdev_mq(sizeof(struct ixgbe_adapter), indices);
 	if (!netdev) {
 		err = -ENOMEM;
@@ -10792,6 +10935,11 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	hw->back = adapter;
 	adapter->msg_enable = netif_msg_init(debug, DEFAULT_MSG_ENABLE);
 
+	/*将BAR0中的总线地址映射为内存地址，赋值给hw->hw_addr, 允许网卡驱动通过hw->hw_addr访问网卡的BAR0对应的memory空间。
+		即 这里就拿到了 device的地址空间，后续就可以对device进行操作了。
+
+		PCIe配置空间的 Type0和Type1。
+	*/
 	hw->hw_addr = ioremap(pci_resource_start(pdev, 0),
 			      pci_resource_len(pdev, 0));
 	adapter->io_addr = hw->hw_addr;
@@ -10800,12 +10948,17 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_ioremap;
 	}
 
+	/* 注册ixgbe_netdev_ops */
 	netdev->netdev_ops = &ixgbe_netdev_ops;
+
+	/* 设置ethtool的接口 */
 	ixgbe_set_ethtool_ops(netdev);
 	netdev->watchdog_timeo = 5 * HZ;
 	strlcpy(netdev->name, pci_name(pdev), sizeof(netdev->name));
 
-	/* Setup hw api */
+	/* Setup hw api
+		即 ixgbe的硬件信息
+	*/
 	hw->mac.ops   = *ii->mac_ops;
 	hw->mac.type  = ii->mac;
 	hw->mvals     = ii->mvals;
@@ -10835,6 +10988,12 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	hw->phy.mdio.mdio_write = ixgbe_mdio_write;
 
 	/* setup the private structure */
+	/* 初始化ixgbe_adapter:
+		设置adapter->tx/rx_ring_count (默认1024，最小64，最大4096)，即RSS 取硬件队列和cpu的最小值。
+		设置adapter->ring_feature[RING_F_RSS].indices为min(cpu数， IXGBE_MAX_RSS_INDICES(16))
+		设置adapter->ring_feature[RING_F_FDIR].indices为IXGBE_MAX_FDIR_INDICES(64)
+		设置adapter->flags的IXGBE_FLAG_RSS_ENABLED和IXGBE_FLAG_FDIR_HASH_CAPABLE */
+	*/
 	err = ixgbe_sw_init(adapter, ii);
 	if (err)
 		goto err_sw_init;
@@ -10893,6 +11052,8 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	ixgbe_init_mbx_params_pf(hw);
 	hw->mbx.ops = ii->mbx_ops;
 	pci_sriov_set_totalvfs(pdev, IXGBE_MAX_VFS_DRV_LIMIT);
+
+	/* 打开 sriov 硬件虚拟化 */
 	ixgbe_enable_sriov(adapter, max_vfs);
 skip_sriov:
 
@@ -11005,9 +11166,11 @@ skip_sriov:
 		goto err_sw_init;
 	}
 
+	/* 设置网卡硬件 mac地址和mac filter */
 	eth_platform_get_mac_address(&adapter->pdev->dev,
 				     adapter->hw.mac.perm_addr);
 
+	/*设置netdev->dev_addr的mac地址*/
 	memcpy(netdev->dev_addr, hw->mac.perm_addr, netdev->addr_len);
 
 	if (!is_valid_ether_addr(netdev->dev_addr)) {
@@ -11030,6 +11193,17 @@ skip_sriov:
 	set_bit(__IXGBE_SERVICE_INITED, &adapter->state);
 	clear_bit(__IXGBE_SERVICE_SCHED, &adapter->state);
 
+	/*
+	    根据DIR/RSS设置adapter->num_tx/rx_queues向PCI子系统请求中断；
+	设置poll函数，分配ixgbe_q_vector, 初始化napi并加入napi_list；
+	分配发送、接收ring数组
+
+	    ixgbe_alloc_q_vectors 在内核申请空间，可以看到队列结构体 ixgbe_ring 
+	是和 ixgbe_q_vector 一起分配的，将 vector 中断和队列绑定，rx 和 tx 
+	两个队列同时绑定到一个 vector 中断，理想情况下一对队列拥有一个中断，
+	如果中断不够用，那么会有多个共用。这里还涉及到 cpu 亲缘性和 numa. 
+	最后 netif_napi_add 给每个中断设置 NAPI_POLL 回调。
+	*/
 	err = ixgbe_init_interrupt_scheme(adapter);
 	if (err)
 		goto err_sw_init;
@@ -11104,6 +11278,8 @@ skip_sriov:
 	}
 	strcpy(netdev->name, "eth%d");
 	pci_set_drvdata(pdev, adapter);
+
+	/*注册net dev， 将网卡设备注册到名字空间。*/
 	err = register_netdev(netdev);
 	if (err)
 		goto err_register;
@@ -11492,14 +11668,18 @@ static int __init ixgbe_init_module(void)
 	pr_info("%s - version %s\n", ixgbe_driver_string, ixgbe_driver_version);
 	pr_info("%s\n", ixgbe_copyright);
 
+	/* 注意：percpu，unbound，ordered三种类型的workqueue的区别和用法。*/
+	/* 创建 driver的 workqueue ， 内核只负责在一个cpu上创建worker_thread内核线程。*/
 	ixgbe_wq = create_singlethread_workqueue(ixgbe_driver_name);
 	if (!ixgbe_wq) {
 		pr_err("%s: Failed to create workqueue\n", ixgbe_driver_name);
 		return -ENOMEM;
 	}
 
+	/* 创建debug fs的接口 */
 	ixgbe_dbg_init();
 
+	/*ixgbe driver注册，加入到pcie总线上*/
 	ret = pci_register_driver(&ixgbe_driver);
 	if (ret) {
 		destroy_workqueue(ixgbe_wq);
@@ -11514,6 +11694,7 @@ static int __init ixgbe_init_module(void)
 	return 0;
 }
 
+/*注册pcie driver*/
 module_init(ixgbe_init_module);
 
 /**
@@ -11527,9 +11708,14 @@ static void __exit ixgbe_exit_module(void)
 #ifdef CONFIG_IXGBE_DCA
 	dca_unregister_notify(&dca_notifier);
 #endif
+
+	/* 注销pcie driver */
 	pci_unregister_driver(&ixgbe_driver);
 
+	/* remove debug fs接口*/
 	ixgbe_dbg_exit();
+
+	/* destroy workqueue */
 	if (ixgbe_wq) {
 		destroy_workqueue(ixgbe_wq);
 		ixgbe_wq = NULL;

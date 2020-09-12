@@ -180,11 +180,14 @@ static void __init smp_build_mpidr_hash(void)
 		pr_warn("Large number of MPIDR hash buckets detected\n");
 }
 
+
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
 {
+	/* 建立 PTE entry映射，才能访问物理地址。 */
 	void *dt_virt = fixmap_remap_fdt(dt_phys);
 	const char *name;
 
+	/* 扫描DTB中的节点， 主要是 /root, /chosen, memory */
 	if (!dt_virt || !early_init_dt_scan(dt_virt)) {
 		pr_crit("\n"
 			"Error: invalid device tree blob at physical address %pa (virtual address 0x%p)\n"
@@ -288,9 +291,19 @@ void __init setup_arch(char **cmdline_p)
 
 	*cmdline_p = boot_command_line;
 
+	/* fixmap区域页表映射初始化 */
 	early_fixmap_init();
+
+	/* IO映射初始化 */
 	early_ioremap_init();
 
+	/* 读取DTB文件，获取物理内存信息。 
+	memblock子模块，基本的逻辑都是围绕内存的添加和移除操作来展开，
+	最终是通过调用memblock_add_range/memblock_remove_range来实现的。
+	
+	setup_machine_fdt--->early_init_dt_scan--->early_init_dt_scan_nodes
+
+	*/
 	setup_machine_fdt(__fdt_pointer);
 
 	parse_early_param();
@@ -310,8 +323,15 @@ void __init setup_arch(char **cmdline_p)
 
 	xen_early_init();
 	efi_init();
+
+	/* 当物理内存都添加进系统之后，arm64_memblock_init会对整个物理内存进行整理，
+	主要的工作就是将一些特殊的区域添加进reserved内存中。 */
 	arm64_memblock_init();
 
+	/* 在这之前，存放kernel_image和DTB的两段物理内存区域可以访问了(相应的页表已经建立好)
+	尽管物理内存已经通过 memblock_add添加进系统了，但是，这部分的物理内存到虚拟内存的
+	映射还没有建立，可以通过 memblock_alloc分配一段物理内存，但是，还不能访问，一切
+	还需要等待paging_init的执行。最终，页表建立好后，可以通过虚拟地址去访问最终的物理地址了。*/
 	paging_init();
 
 	acpi_table_upgrade();
@@ -322,6 +342,9 @@ void __init setup_arch(char **cmdline_p)
 	if (acpi_disabled)
 		unflatten_device_tree();
 
+	/* Sparse Memory Model相关，包括 PFN, NUMA概念。
+	完成了linux物理内存框架的初始化，包括Node, Zone, Page Frame，以及对应的数据结构等。
+	*/
 	bootmem_init();
 
 	kasan_init();

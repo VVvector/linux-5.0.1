@@ -205,6 +205,8 @@ resubmit:
 			}
 			nf_reset(skb);
 		}
+
+		/* 这里会调用ip层之上的 传输层协议*/
 		ret = ipprot->handler(skb);
 		if (ret < 0) {
 			protocol = -ret;
@@ -231,6 +233,19 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 	__skb_pull(skb, skb_network_header_len(skb));
 
 	rcu_read_lock();
+	/*
+	这里会从数据包中读取协议类型，然后 调用该协议的 handler方法进行处理。
+
+	可能会调用 tcp_v4_rcv() （TCP）, udp_rcv() （UDP），icmp_rcv() (ICMP)，igmp_rcv()(IGMP)
+		net/ipv4/af_inet.c：用inet_add_protocol()接口注册各协议。
+
+
+	inet_protos: 这里有保存不同的高层协议。 
+	net/ipv4/af_inet.c
+	tcp_protocol, udp_protocol, icmp_protocol 等
+
+	这些变量在inet 地址族初始化的时候被注册。 inet_add_protocol()
+	*/
 	ip_protocol_deliver_rcu(net, skb, ip_hdr(skb)->protocol);
 	rcu_read_unlock();
 
@@ -240,6 +255,7 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 /*
  * 	Deliver IP Packets to the higher protocol layers.
  */
+ /*把skb往上层push, 到tcp、udp层*/
 int ip_local_deliver(struct sk_buff *skb)
 {
 	/*
@@ -247,11 +263,13 @@ int ip_local_deliver(struct sk_buff *skb)
 	 */
 	struct net *net = dev_net(skb->dev);
 
+	/* ip层的  defrag 的处理 */
 	if (ip_is_fragment(ip_hdr(skb))) {
 		if (ip_defrag(net, skb, IP_DEFRAG_LOCAL_DELIVER))
 			return 0;
 	}
 
+	/*继续把skb传入传输层。 netfilter后，会调用 ip_local_deliver_finish()结束，然后把skb继续往传输层上传输*/
 	return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN,
 		       net, NULL, skb, skb->dev, NULL,
 		       ip_local_deliver_finish);
@@ -335,6 +353,9 @@ static int ip_rcv_finish_core(struct net *net, struct sock *sk,
 	 *	Initialise the virtual path cache for the packet. It describes
 	 *	how the packet travels inside Linux networking.
 	 */
+	 /* 获取路由信息，如果skb->dst是空，调用ip_route_input_noref获取路由
+		刚开始时，没有进行路由查询，所以还没有相应的路由表项；即skb_dst(skb) == NULL, 则在路由表中查询。
+	 */
 	if (!skb_valid_dst(skb)) {
 		err = ip_route_input_noref(skb, iph->daddr, iph->saddr,
 					   iph->tos, dev);
@@ -353,6 +374,8 @@ static int ip_rcv_finish_core(struct net *net, struct sock *sk,
 	}
 #endif
 
+
+	/* ip_rcv_options() 会查询路由信息。。。 */
 	if (iph->ihl > 5 && ip_rcv_options(skb))
 		goto drop;
 
@@ -409,9 +432,28 @@ static int ip_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 	if (!skb)
 		return NET_RX_SUCCESS;
 
+	/* 
+
+	主要工作就是完成路由表的查询，决定报文经过IP层处理后，是继续向上传递
+	还是继续转发，还是丢弃。
+	
+	获取skb的路由信息， 这里会根据ip packet不同的目的地，进行不同的赋值。
+	
+	根据路由信息：
+	1. 可能会进行forwad转发 ip_forward()，
+	2. 或者继续往上层传 ip_local_deliver()调用传输层的回调函数，把skb传入传输层。tcp/udp ...
+	*/
 	ret = ip_rcv_finish_core(net, sk, skb, dev);
+
+
+	/*
+	Once the routing layer completes, statistics counters are updated and the function ends by 
+	calling dst_input(skb) which in turn calls the input function pointer on the packet’s dst_entry
+	structure that was affixed by the routing system.
+	*/
+	/*  */
 	if (ret != NET_RX_DROP)
-		ret = dst_input(skb);
+		ret = dst_input(skb); //ip_local_deliver()
 	return ret;
 }
 
@@ -432,6 +474,7 @@ static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
 
 	__IP_UPD_PO_STATS(net, IPSTATS_MIB_IN, skb->len);
 
+	/* 判断skb是否被共享 */
 	skb = skb_share_check(skb, GFP_ATOMIC);
 	if (!skb) {
 		__IP_INC_STATS(net, IPSTATS_MIB_INDISCARDS);
@@ -454,6 +497,7 @@ static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
 	 *	4.	Doesn't have a bogus length
 	 */
 
+	/* ip header基本检查 */
 	if (iph->ihl < 5 || iph->version != 4)
 		goto inhdr_error;
 
@@ -469,9 +513,11 @@ static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
 
 	iph = ip_hdr(skb);
 
+	/* ipv4 checksum的检查 */
 	if (unlikely(ip_fast_csum((u8 *)iph, iph->ihl)))
 		goto csum_error;
 
+	/* ipv4 lenght的长度检查 */
 	len = ntohs(iph->tot_len);
 	if (skb->len < len) {
 		__IP_INC_STATS(net, IPSTATS_MIB_INTRUNCATEDPKTS);
@@ -488,6 +534,7 @@ static struct sk_buff *ip_rcv_core(struct sk_buff *skb, struct net *net)
 		goto drop;
 	}
 
+	/* 解析出 传输层header数据 */
 	iph = ip_hdr(skb);
 	skb->transport_header = skb->network_header + iph->ihl*4;
 
@@ -513,14 +560,29 @@ out:
 /*
  * IP receive entry point
  */
+ 
+ /* ip层的接收函数 
+
+ */
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
 	   struct net_device *orig_dev)
 {
 	struct net *net = dev_net(dev);
 
+	/* ip packet的检查，如ip header， ip checksum, ip length等 */
 	skb = ip_rcv_core(skb, net);
 	if (skb == NULL)
 		return NET_RX_DROP;
+
+	/*netfilter 的hook -- pre_routing, 然后会调用 ip_rcv_finish()函数，把skb继续往上传
+
+	这样 任何iptables规则都能在packet刚进入到ip层协议的时候被应用，在其他处理之前。
+
+	netfilter 或 iptables 规则都是在软中断上下文中执行的，数量很多或规则很 复杂时会导致网络延迟。
+	但如果你就是需要一些规则的话，那这个性能损失看起来是无 法避免的。
+
+	目前有一种基于ebpf的技术在NIC driver层进行过滤。
+	*/
 	return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING,
 		       net, NULL, skb, dev, NULL,
 		       ip_rcv_finish);

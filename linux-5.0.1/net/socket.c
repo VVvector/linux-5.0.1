@@ -617,6 +617,7 @@ void __sock_tx_timestamp(__u16 tsflags, __u8 *tx_flags)
 }
 EXPORT_SYMBOL(__sock_tx_timestamp);
 
+/* the sendmsg function registered to this socket ops structure is inet_sendmsg.*/
 static inline int sock_sendmsg_nosec(struct socket *sock, struct msghdr *msg)
 {
 	int ret = sock->ops->sendmsg(sock, msg, msg_data_left(msg));
@@ -795,6 +796,7 @@ static inline int sock_recvmsg_nosec(struct socket *sock, struct msghdr *msg,
 	return sock->ops->recvmsg(sock, msg, msg_data_left(msg), flags);
 }
 
+/**/
 int sock_recvmsg(struct socket *sock, struct msghdr *msg, int flags)
 {
 	int err = security_socket_recvmsg(sock, msg, msg_data_left(msg), flags);
@@ -1273,6 +1275,13 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	/* Now protected by module ref count */
 	rcu_read_unlock();
 
+	/* 调用相应的af的create， 例如  
+						static const struct net_proto_family inet_family_ops = {
+							.family = PF_INET,
+							.create = inet_create,
+							.owner	= THIS_MODULE,
+						};
+	*/
 	err = pf->create(net, sock, protocol, kern);
 	if (err < 0)
 		goto out_module_put;
@@ -1784,6 +1793,8 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
 	msg.msg_flags = flags;
+	
+	/*调用对应sock协议相关的ops，向下发生数据*/
 	err = sock_sendmsg(sock, &msg);
 
 out_put:
@@ -1791,6 +1802,8 @@ out_put:
 out:
 	return err;
 }
+
+/*在user space调用 sendto()发生upd数据时，系统会调用该系统调用。*/
 
 SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len,
 		unsigned int, flags, struct sockaddr __user *, addr,
@@ -2713,6 +2726,7 @@ bool sock_is_registered(int family)
 static int __init sock_init(void)
 {
 	int err;
+
 	/*
 	 *      Initialize the network sysctl infrastructure.
 	 */
@@ -2720,20 +2734,24 @@ static int __init sock_init(void)
 	if (err)
 		goto out;
 
+
 	/*
 	 *      Initialize skbuff SLAB cache
 	 */
 	skb_init();
 
+
 	/*
 	 *      Initialize the protocols module.
 	 */
-
 	init_inodecache();
 
+	/* 注册sock 文件系统 file_systems*/
 	err = register_filesystem(&sock_fs_type);
 	if (err)
 		goto out_fs;
+
+	/* 挂载sock 文件系统 */
 	sock_mnt = kern_mount(&sock_fs_type);
 	if (IS_ERR(sock_mnt)) {
 		err = PTR_ERR(sock_mnt);
@@ -2742,7 +2760,6 @@ static int __init sock_init(void)
 
 	/* The real protocol initialization is performed in later initcalls.
 	 */
-
 #ifdef CONFIG_NETFILTER
 	err = netfilter_init();
 	if (err)

@@ -1452,6 +1452,8 @@ static void neigh_hh_init(struct neighbour *n)
 }
 
 /* Slow and careful. */
+/*This function’s purpose is to attempt to resolve a neighbour that is not connected or one which is connected, 
+but has no cached hardware header.*/
 
 int neigh_resolve_output(struct neighbour *neigh, struct sk_buff *skb)
 {

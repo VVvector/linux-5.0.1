@@ -574,6 +574,8 @@ void __enable_irq(struct irq_desc *desc)
 		WARN(1, KERN_WARNING "Unbalanced enable for IRQ %d\n",
 		     irq_desc_get_irq(desc));
 		break;
+
+	/* 这里会调用     GIC chip对应的函数 */
 	case 1: {
 		if (desc->istate & IRQS_SUSPENDED)
 			goto err_out;
@@ -1020,6 +1022,7 @@ static void irq_wake_secondary(struct irq_desc *desc, struct irqaction *action)
 /*
  * Interrupt handler thread
  */
+ /* 中断线程的处理函数 */
 static int irq_thread(void *data)
 {
 	struct callback_head on_exit_work;
@@ -1044,10 +1047,12 @@ static int irq_thread(void *data)
 
 		irq_thread_check_affinity(desc, action);
 
+		/* 处理具体的action */
 		action_ret = handler_fn(desc, action);
 		if (action_ret == IRQ_WAKE_THREAD)
 			irq_wake_secondary(desc, action);
 
+		/* 唤醒需要和本线程同步的其他线程 */
 		wake_threads_waitq(desc);
 	}
 
@@ -1200,7 +1205,7 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
  * interrupt related functions. desc->request_mutex solely serializes
  * request/free_irq().
  */
-/*irq的申请宣告完毕，当中断发生时，处理的路径将会沿着：irq_desc.handle_irq ->irqaction.handler ->
+/* irq的申请宣告完毕，当中断发生时，处理的路径将会沿着：irq_desc.handle_irq ->irq_desc.action.handler ->
  irqaction.thread_fn（irqaction.handler的返回值是IRQ_WAKE_THREAD）这个过程进行处理。
  */
 static int
@@ -1245,7 +1250,9 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 		 */
 		new->handler = irq_nested_primary_handler;
 	} else {
+		/* 判断中断是否可以被线程化 */
 		if (irq_settings_can_thread(desc)) {
+			/* 这里返回一个 IRQ_WAKE_THREAD就好， handle_irq_event_percpu()会唤醒对应的中断线程。 */
 			ret = irq_setup_forced_threading(new);
 			if (ret)
 				goto out_mput;
@@ -1257,8 +1264,9 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * and the interrupt does not nest into another interrupt
 	 * thread.
 	 */
-	 /*不是嵌套线程中断，且设置了中断线程，则会创建中断对应的内核线程*/
+	 /* 不是嵌套线程中断，且设置了中断线程，则会创建中断对应的内核线程 */
 	if (new->thread_fn && !nested) {
+		/* 创建中断线程 */
 		ret = setup_irq_thread(new, irq, false);
 		if (ret)
 			goto out_mput;
@@ -1313,12 +1321,12 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * management calls which are not serialized via
 	 * desc->request_mutex or the optional bus lock.
 	 */
-	 /*检查是否为共享中断*/
+	 /* 检查是否为共享中断 */
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	old_ptr = &desc->action;
 	old = *old_ptr;
 	if (old) {
-		/*检查是否符合共享中断的要求(level, edge, polarity要一致)*/
+		/* 检查是否符合共享中断的要求(level, edge, polarity要一致 )*/
 		/*
 		 * Can't share interrupts unless both agree to and are
 		 * the same type (level, edge, polarity). So both flag
@@ -1422,7 +1430,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 		goto out_unlock;
 	}
 
-	/*非共享中断*/
+	/* 非共享中断， 做必要的初始化*/
 	if (!shared) {
 		init_waitqueue_head(&desc->wait_for_threads);
 
@@ -1492,7 +1500,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 				irq, omsk, nmsk);
 	}
 
-	/*把新的irqaction实例链接到action链表的最后*/
+	/* 把新的irqaction实例链接到action链表的最后 */
 	*old_ptr = new;
 
 	irq_pm_install_action(desc, new);
@@ -1520,13 +1528,13 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 	 * Strictly no need to wake it up, but hung_task complains
 	 * when no hard interrupt wakes the thread up.
 	 */
-	 /*唤醒中断线程*/
+	 /* 唤醒中断线程 */
 	if (new->thread)
 		wake_up_process(new->thread);
 	if (new->secondary)
 		wake_up_process(new->secondary->thread);
 
-	/*注册相关的/proc文件节点*/
+	/* 注册相关的/proc文件节点 */
 	register_irq_proc(irq, desc);
 	new->dir = NULL;
 	register_handler_proc(irq, new);
@@ -1856,6 +1864,7 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 	    ((irqflags & IRQF_NO_SUSPEND) && (irqflags & IRQF_COND_SUSPEND)))
 		return -EINVAL;
 
+	/* 根据中断号找到对应的desc结构 */
 	desc = irq_to_desc(irq);
 	if (!desc)
 		return -EINVAL;
@@ -1864,12 +1873,15 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 	    WARN_ON(irq_settings_is_per_cpu_devid(desc)))
 		return -EINVAL;
 
+
+	/* 表示用户想创建一个 线程化中断 */
 	if (!handler) {
 		if (!thread_fn)
 			return -EINVAL;
 		handler = irq_default_primary_handler;
 	}
 
+	/* 分配一个新的action数据结构 */
 	action = kzalloc(sizeof(struct irqaction), GFP_KERNEL);
 	if (!action)
 		return -ENOMEM;
@@ -1886,6 +1898,7 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 		return retval;
 	}
 
+	/* 将新的action安装到desc中 */
 	retval = __setup_irq(irq, desc, action);
 
 	if (retval) {

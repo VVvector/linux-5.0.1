@@ -359,10 +359,23 @@ struct cfs_bandwidth {
 #endif
 };
 
+/* 用于描述 任务组：
+
+   引入task_group后，调度器的调度对象不仅仅是进程了，
+Linux内核抽象出了sched_entity/sched_rt_entity/sched_dl_entity描述调度实体，
+调度实体可以是进程或task_group；
+
+  使用数据结构struct task_group来描述任务组，
+任务组在每个CPU上都会维护一个CFS调度实体、CFS运行队列，RT调度实体，RT运行队列；
+
+*/
 /* Task group related information */
 struct task_group {
 	struct cgroup_subsys_state css;
 
+
+
+	/* 为每个cpu都分配一个CFS调度实体和CFS运行队列 */
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* schedulable entities of this group on each CPU */
 	struct sched_entity	**se;
@@ -380,6 +393,7 @@ struct task_group {
 #endif
 #endif
 
+	/* 为每个cpu都分配一个RT调度实体和RT运行队列 */
 #ifdef CONFIG_RT_GROUP_SCHED
 	struct sched_rt_entity	**rt_se;
 	struct rt_rq		**rt_rq;
@@ -387,6 +401,7 @@ struct task_group {
 	struct rt_bandwidth	rt_bandwidth;
 #endif
 
+	/* task_group之间的组织关系 */
 	struct rcu_head		rcu;
 	struct list_head	list;
 
@@ -804,6 +819,17 @@ extern void rto_push_irq_work_func(struct irq_work *work);
  * (such as the load balancing or the thread migration code), lock
  * acquire operations must be ordered by ascending &runqueue.
  */
+ /*
+ 
+每个CPU都有一个运行队列，每个调度器都作用于运行队列；
+
+分配给CPU的task，作为调度实体加入到运行队列中；
+
+task首次运行时，如果可能，尽量将它加入到父task所在的运行队列中
+（分配给相同的CPU，缓存affinity会更高，性能会有改善）；
+
+
+*/
 struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t		lock;
@@ -835,6 +861,7 @@ struct rq {
 	unsigned long		nr_load_updates;
 	u64			nr_switches;
 
+	/* 三个调度队列： CFS调度， RT调度， DL调度 */
 	struct cfs_rq		cfs;
 	struct rt_rq		rt;
 	struct dl_rq		dl;
@@ -853,6 +880,7 @@ struct rq {
 	 */
 	unsigned long		nr_uninterruptible;
 
+	/* stop指向迁移内核进程， idle指向空闲内核线程。 */
 	struct task_struct	*curr;
 	struct task_struct	*idle;
 	struct task_struct	*stop;

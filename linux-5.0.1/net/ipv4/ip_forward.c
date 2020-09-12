@@ -83,6 +83,7 @@ static int ip_forward_finish(struct net *net, struct sock *sk, struct sk_buff *s
 	return dst_output(net, sk, skb);
 }
 
+/* ip转发函数  */
 int ip_forward(struct sk_buff *skb)
 {
 	u32 mtu;
@@ -91,6 +92,7 @@ int ip_forward(struct sk_buff *skb)
 	struct ip_options *opt	= &(IPCB(skb)->opt);
 	struct net *net;
 
+	/* 广播，多播包，混杂模式下得到的包，不允许转发。 */
 	/* that should never happen */
 	if (skb->pkt_type != PACKET_HOST)
 		goto drop;
@@ -121,8 +123,10 @@ int ip_forward(struct sk_buff *skb)
 	if (!xfrm4_route_forward(skb))
 		goto drop;
 
+	/* 到这里，表示这个包的skb->dst肯定有内容。 */
 	rt = skb_rtable(skb);
 
+	/* 如果路由选出的源路由的下一站不是网关，丢弃这个包。 */
 	if (opt->is_strictroute && rt->rt_uses_gateway)
 		goto sr_failed;
 
@@ -135,6 +139,7 @@ int ip_forward(struct sk_buff *skb)
 		goto drop;
 	}
 
+	/* 重新组织这个skbuff结构 */
 	/* We are about to mangle packet. Copy it! */
 	if (skb_cow(skb, LL_RESERVED_SPACE(rt->dst.dev)+rt->dst.header_len))
 		goto drop;
@@ -147,6 +152,7 @@ int ip_forward(struct sk_buff *skb)
 	 *	We now generate an ICMP HOST REDIRECT giving the route
 	 *	we calculated.
 	 */
+	 /* 路由重新定向且没有源路由选项的时候，必须产生一个重定向的icmp包。 */
 	if (IPCB(skb)->flags & IPSKB_DOREDIRECT && !opt->srr &&
 	    !skb_sec_path(skb))
 		ip_rt_send_redirect(skb);

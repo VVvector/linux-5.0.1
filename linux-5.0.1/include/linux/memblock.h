@@ -50,6 +50,8 @@ enum memblock_flags {
  * @flags: memory region attributes
  * @nid: NUMA node id
  */
+
+/* 用来描述具体的内存区域，包含在 struct memblock_type中的regions数组中，最大可以存放128个。 */
 struct memblock_region {
 	phys_addr_t base;
 	phys_addr_t size;
@@ -67,6 +69,7 @@ struct memblock_region {
  * @regions: array of regions
  * @name: the memory type symbolic name
  */
+ /* 代表系统中的内存类型，包括实际使用的内存和保留的内存。 */
 struct memblock_type {
 	unsigned long cnt;
 	unsigned long max;
@@ -93,6 +96,13 @@ struct memblock {
 #endif
 };
 
+/* 一个全局变量，用来维护所有的物理内存的。
+在定义的时候就进行了初始化。初始化的时候，regions指向的也是静态全局的数组，
+其中数组的大小为INIT_MEMBLOCK_REGIONS，也就是128个，限制了这些内存块的个数了，
+实际在代码中可以看到，当超过这个数值时，数组会以2倍的速度动态扩大。
+
+
+*/
 extern struct memblock memblock;
 extern int memblock_debug;
 

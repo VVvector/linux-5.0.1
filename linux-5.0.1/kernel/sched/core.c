@@ -220,6 +220,7 @@ static void hrtick_clear(struct rq *rq)
  * High-resolution timer tick.
  * Runs from hardirq context with interrupts disabled.
  */
+ /* 高精度时钟调度 */
 static enum hrtimer_restart hrtick(struct hrtimer *timer)
 {
 	struct rq *rq = container_of(timer, struct rq, hrtick_timer);
@@ -2137,6 +2138,7 @@ out:
  *
  * This function executes a full memory barrier before accessing the task state.
  */
+ /* 进程唤醒时调度 */
 int wake_up_process(struct task_struct *p)
 {
 	return try_to_wake_up(p, TASK_NORMAL, 0);
@@ -3046,6 +3048,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
  * This function gets called by the timer code, with HZ frequency.
  * We call it with interrupts disabled.
  */
+ /* 周期调度 */
 void scheduler_tick(void)
 {
 	int cpu = smp_processor_id();
@@ -3312,6 +3315,7 @@ static inline void schedule_debug(struct task_struct *prev)
 /*
  * Pick up the highest-prio task:
  */
+ /* 实际上 会根据进程所指向的调度类，来选择对应的调度器中的方法。 */
 static inline struct task_struct *
 pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
@@ -3400,7 +3404,10 @@ static void __sched notrace __schedule(bool preempt)
 	struct rq *rq;
 	int cpu;
 
+	/* 获取所在的CPU */
 	cpu = smp_processor_id();
+
+	/* 获取该CPU对应的运行队列 */
 	rq = cpu_rq(cpu);
 	prev = rq->curr;
 
@@ -3425,6 +3432,8 @@ static void __sched notrace __schedule(bool preempt)
 
 	/* Promote REQ to ACT */
 	rq->clock_update_flags <<= 1;
+	
+	/* 更新运行队列的时钟值 */
 	update_rq_clock(rq);
 
 	switch_count = &prev->nivcsw;
@@ -3456,6 +3465,7 @@ static void __sched notrace __schedule(bool preempt)
 		switch_count = &prev->nvcsw;
 	}
 
+	/* 选择需要进行切换的task */
 	next = pick_next_task(rq, prev, &rf);
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
@@ -3482,6 +3492,7 @@ static void __sched notrace __schedule(bool preempt)
 		trace_sched_switch(preempt, prev, next);
 
 		/* Also unlocks the rq: */
+		/* 完成进程的切换 */
 		rq = context_switch(rq, prev, next, &rf);
 	} else {
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
@@ -3519,14 +3530,20 @@ static inline void sched_submit_work(struct task_struct *tsk)
 		blk_schedule_flush_plug(tsk);
 }
 
+/* 主动调度 */
 asmlinkage __visible void __sched schedule(void)
 {
 	struct task_struct *tsk = current;
 
 	sched_submit_work(tsk);
 	do {
+		/* 关闭内核抢占 */
 		preempt_disable();
+
+		/* 选择切换的进程，以及 进行任务切换工作 */
 		__schedule(false);
+
+		/* 打开内核抢占 */
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 }

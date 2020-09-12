@@ -1941,7 +1941,10 @@ static netdev_tx_t mpi_start_xmit(struct sk_buff *skb,
 	}
 
 	spin_lock_irqsave(&ai->aux_lock, flags);
+	
+	/* 这里有enqueue动作，即先把skb queue到一个list中。 */
 	skb_queue_tail (&ai->txq, skb);
+	
 	pending = test_bit(FLAG_PENDING_XMIT, &ai->flags);
 	spin_unlock_irqrestore(&ai->aux_lock,flags);
 	netif_wake_queue (dev);

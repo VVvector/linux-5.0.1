@@ -498,9 +498,14 @@ struct skb_shared_info {
 	__u8		meta_len;
 	__u8		nr_frags;
 	__u8		tx_flags;
+
+	/* 表示gso 分片的长度 */
 	unsigned short	gso_size;
+
+	/*表示gso分片的个数 ， gso用来delay大包的分片，一直到 dev_hard_start_xmit()才会被调用。*/
 	/* Warning: this field is not always filled in (UFO)! */
 	unsigned short	gso_segs;
+	
 	struct sk_buff	*frag_list;
 	struct skb_shared_hwtstamps hwtstamps;
 	unsigned int	gso_type;
@@ -1260,6 +1265,8 @@ skb_flow_dissect_tunnel_info(const struct sk_buff *skb,
 			     struct flow_dissector *flow_dissector,
 			     void *target_container);
 
+/*如果sk_hash存在，则取得sk_hash(这个hash，在我们rps和rfs的时候计算过的,也就是四元组的hash值)；
+否则， 需要重新计算。*/
 static inline __u32 skb_get_hash(struct sk_buff *skb)
 {
 	if (!skb->l4_hash && !skb->sw_hash)

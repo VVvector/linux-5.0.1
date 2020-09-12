@@ -351,7 +351,7 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 #endif
 
 /*第一阶段的执行都是用汇编写的，开始进入el1的中断向量入口，
-然后会调用到handle_arch_irq，此变量为全局的，会在中断控制器初始化的时候设置函数变量*/
+然后会调用到handle_arch_irq，此变量为全局的，会在 中断控制器 初始化的时候设置函数变量*/
 static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 {
 	u32 irqstat, irqnr;
@@ -362,6 +362,7 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 		irqstat = readl_relaxed(cpu_base + GIC_CPU_INTACK);
 		irqnr = irqstat & GICC_IAR_INT_ID_MASK;
 
+		/* 处理PPI和SPI中断 */
 		if (likely(irqnr > 15 && irqnr < 1020)) {
 			if (static_branch_likely(&supports_deactivate_key))
 				writel_relaxed(irqstat, cpu_base + GIC_CPU_EOI);
@@ -370,6 +371,8 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 			handle_domain_irq(gic->domain, irqnr, regs);
 			continue;
 		}
+
+		/* 处理IPI中断 */
 		if (irqnr < 16) {
 			writel_relaxed(irqstat, cpu_base + GIC_CPU_EOI);
 			if (static_branch_likely(&supports_deactivate_key))
@@ -1197,6 +1200,7 @@ error:
 	return ret;
 }
 
+/* gic-400驱动*/
 static int __init __gic_init_bases(struct gic_chip_data *gic,
 				   int irq_start,
 				   struct fwnode_handle *handle)
@@ -1221,6 +1225,8 @@ static int __init __gic_init_bases(struct gic_chip_data *gic,
 		cpuhp_setup_state_nocalls(CPUHP_AP_IRQ_GIC_STARTING,
 					  "irqchip/arm/gic:starting",
 					  gic_starting_cpu, NULL);
+
+		/* 注册irq的处理函数， 当cpu收到irq后，最后会调用到该接口 -- gic_handle_irq() */
 		set_handle_irq(gic_handle_irq);
 		if (static_branch_likely(&supports_deactivate_key))
 			pr_info("GIC: Using split EOI/Deactivate mode\n");

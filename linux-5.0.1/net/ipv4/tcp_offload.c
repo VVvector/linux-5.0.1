@@ -181,6 +181,7 @@ out:
 	return segs;
 }
 
+/* tcp层的gro处理 */
 struct sk_buff *tcp_gro_receive(struct list_head *head, struct sk_buff *skb)
 {
 	struct sk_buff *pp = NULL;
@@ -205,6 +206,7 @@ struct sk_buff *tcp_gro_receive(struct list_head *head, struct sk_buff *skb)
 			goto out;
 	}
 
+	/* 检查tcp header size是否正确 */
 	thlen = th->doff * 4;
 	if (thlen < sizeof(*th))
 		goto out;
@@ -221,12 +223,16 @@ struct sk_buff *tcp_gro_receive(struct list_head *head, struct sk_buff *skb)
 	len = skb_gro_len(skb);
 	flags = tcp_flag_word(th);
 
+	/* 在ip已经属于same flow的gro skb中，去检查tcp层gro规则。 */
 	list_for_each_entry(p, head, list) {
+
+		/* 如果ip层已经不可能same flow则直接进行下一次匹配 */
 		if (!NAPI_GRO_CB(p)->same_flow)
 			continue;
 
 		th2 = tcp_hdr(p);
 
+		/* source port要一样，因为hash一样，source一样的情况下，dst不一样的概率很小，所有没有去检查dst。 */
 		if (*(u32 *)&th->source ^ *(u32 *)&th2->source) {
 			NAPI_GRO_CB(p)->same_flow = 0;
 			continue;
@@ -239,6 +245,14 @@ struct sk_buff *tcp_gro_receive(struct list_head *head, struct sk_buff *skb)
 
 found:
 	/* Include the IP ID check below from the inner most IP hdr */
+	/* 检查是否需要flush：
+		1. 拥塞状态被置起 TCP_FLAG_CWR
+		2.  skb的flag和从gro list中查找到要合并skb的flag。
+		    如果他们中有不同位 不包括TCP_FLAG_CWR | TCP_FLAG_FIN | TCP_FLAG_PSH，这三个任意一个域
+		3. tcp的ack的序列号不匹配
+		4. tcp的option不一样
+		5. packet的seq序列号
+	*/
 	flush = NAPI_GRO_CB(p)->flush;
 	flush |= (__force int)(flags & TCP_FLAG_CWR);
 	flush |= (__force int)((flags ^ tcp_flag_word(th2)) &
@@ -260,18 +274,26 @@ found:
 		NAPI_GRO_CB(p)->is_atomic = false;
 
 	mss = skb_shinfo(p)->gso_size;
-
+	
+	// 0-1 = 0xFFFFFFFF, 所以skb的数据部分长度为0的包是不会被合并的,会被直接flush出去。
 	flush |= (len - 1) >= mss;
+
+	// 检查tcp seq是否正确，否则，直接flush出去。
 	flush |= (ntohl(th2->seq) + skb_gro_len(p)) ^ ntohl(th->seq);
+	
 #ifdef CONFIG_TLS_DEVICE
 	flush |= p->decrypted ^ skb->decrypted;
 #endif
 
+	/* 
+	如果flush有设置，则不会调用 skb_gro_receive，也就是不需要进行合并，
+	否则，调用skb_gro_receive进行数据包合并*/
 	if (flush || skb_gro_receive(p, skb)) {
 		mss = 1;
 		goto out_check_final;
 	}
 
+	//###########更新p的头。到达这里说明合并完毕，因此需要更新合并完的新包的头。########################
 	tcp_flag_word(th2) |= flags & (TCP_FLAG_FIN | TCP_FLAG_PSH);
 
 out_check_final:
@@ -280,6 +302,12 @@ out_check_final:
 					TCP_FLAG_RST | TCP_FLAG_SYN |
 					TCP_FLAG_FIN));
 
+	/* 
+	这里要知道每次我们只会刷出gro list中的一个skb节点，这是因为每次进来的数据包我们也只会匹配一个。
+	因此如果遇到需要刷出的数据包，会在dev_gro_receive中先刷出gro list中的所有数据包，然后再将当前的skb feed进协议栈。
+
+	这里的p是指 skb匹配的gro skb节点。
+	 */
 	if (p && (!NAPI_GRO_CB(skb)->same_flow || flush))
 		pp = p;
 
@@ -310,6 +338,7 @@ INDIRECT_CALLABLE_SCOPE
 struct sk_buff *tcp4_gro_receive(struct list_head *head, struct sk_buff *skb)
 {
 	/* Don't bother verifying checksum if we're going to flush anyway. */
+	/* tcp preudo checksum 错误，则需要flush出去。*/
 	if (!NAPI_GRO_CB(skb)->flush &&
 	    skb_gro_checksum_validate(skb, IPPROTO_TCP,
 				      inet_gro_compute_pseudo)) {
@@ -317,6 +346,7 @@ struct sk_buff *tcp4_gro_receive(struct list_head *head, struct sk_buff *skb)
 		return NULL;
 	}
 
+	/* 进行tcp gro的处理 */
 	return tcp_gro_receive(head, skb);
 }
 

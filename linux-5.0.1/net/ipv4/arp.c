@@ -675,7 +675,7 @@ static bool arp_is_garp(struct net *net, struct net_device *dev,
 /*
  *	Process an arp request.
  */
-
+ /* arp 处理函数 */
 static int arp_process(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
@@ -1294,7 +1294,10 @@ void __init arp_init(void)
 {
 	neigh_table_init(NEIGH_ARP_TABLE, &arp_tbl);
 
+	/* 处理arp packet */
 	dev_add_pack(&arp_packet_type);
+
+	/* arp 相关的proc文件创建 */
 	arp_proc_init();
 #ifdef CONFIG_SYSCTL
 	neigh_sysctl_register(NULL, &arp_tbl.parms, NULL);

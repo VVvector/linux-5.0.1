@@ -404,6 +404,10 @@ static u64 tcp_compute_delivery_rate(const struct tcp_sock *tp)
  * NOTE: A lot of things set to zero explicitly by call to
  *       sk_alloc() so need not be done here.
  */
+ /*  应用层创建socket时，会被调用到。
+
+	socket() -> inet_creat() -> .init() //tcp_init_sock()
+ */
 void tcp_init_sock(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -411,14 +415,18 @@ void tcp_init_sock(struct sock *sk)
 
 	tp->out_of_order_queue = RB_ROOT;
 	sk->tcp_rtx_queue = RB_ROOT;
+
+	/* timer初始化  */
 	tcp_init_xmit_timers(sk);
 	INIT_LIST_HEAD(&tp->tsq_node);
 	INIT_LIST_HEAD(&tp->tsorted_sent_queue);
 
+	/* 重传超时 */
 	icsk->icsk_rto = TCP_TIMEOUT_INIT;
 	tp->mdev_us = jiffies_to_usecs(TCP_TIMEOUT_INIT);
 	minmax_reset(&tp->rtt_min, tcp_jiffies32, ~0U);
 
+	/* 拥塞算法相关 */
 	/* So many TCP implementations out there (incorrectly) count the
 	 * initial SYN frame in their delayed-ACK and congestion control
 	 * algorithms that we must have the following bandaid to talk
@@ -444,6 +452,7 @@ void tcp_init_sock(struct sock *sk)
 
 	sk->sk_state = TCP_CLOSE;
 
+	/* 用于在发送时，检查发送的buffer空间 */
 	sk->sk_write_space = sk_stream_write_space;
 	sock_set_flag(sk, SOCK_USE_WRITE_QUEUE);
 
@@ -1171,6 +1180,7 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	return err;
 }
 
+/* tcp 发送函数 */
 int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -1283,12 +1293,19 @@ new_segment:
 			}
 			first_skb = tcp_rtx_and_write_queues_empty(sk);
 			linear = select_size(first_skb, zc);
+
+			/*  分配skb 空间 */
 			skb = sk_stream_alloc_skb(sk, linear, sk->sk_allocation,
 						  first_skb);
 			if (!skb)
 				goto wait_for_memory;
 
 			process_backlog = true;
+
+			/* 这里tcp checksum初始化为CHECKSUM_PARTIAL。
+			1. 在tcp层，就只算伪头部 checksum。
+			2. 后面的数据，放到 /net/core/dev.c中的 xmit_one()中最后确定计算。
+			*/
 			skb->ip_summed = CHECKSUM_PARTIAL;
 
 			skb_entail(sk, skb);
@@ -1310,6 +1327,8 @@ new_segment:
 		if (skb_availroom(skb) > 0 && !zc) {
 			/* We have some space in skb head. Superb! */
 			copy = min_t(int, copy, skb_availroom(skb));
+
+			/* 把用户态buffer的数据拷贝到skb中 */
 			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
 			if (err)
 				goto do_fault;
@@ -1383,6 +1402,7 @@ new_segment:
 			tcp_mark_push(tp, skb);
 			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
 		} else if (skb == tcp_send_head(sk))
+			/*这里会把skb继续往下传*/
 			tcp_push_one(sk, mss_now);
 		continue;
 
@@ -1435,6 +1455,7 @@ out_err:
 }
 EXPORT_SYMBOL_GPL(tcp_sendmsg_locked);
 
+/*tcp 的 send 函数*/
 int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	int ret;
@@ -1999,7 +2020,10 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		}
 
 		/* Next get a buffer. */
-
+	
+		/* 从socket的接收队列中取出一个skb。
+			这个队列由driver向上填充。
+		*/
 		last = skb_peek_tail(&sk->sk_receive_queue);
 		skb_queue_walk(&sk->sk_receive_queue, skb) {
 			last = skb;
@@ -2112,6 +2136,9 @@ found_ok_skb:
 			}
 		}
 
+
+		/* 拷贝skb中的数据到用户层
+		*/
 		if (!(flags & MSG_TRUNC)) {
 			err = skb_copy_datagram_msg(skb, offset, msg, used);
 			if (err) {
@@ -3845,6 +3872,8 @@ void __init tcp_init(void)
 
 	percpu_counter_init(&tcp_sockets_allocated, 0, GFP_KERNEL);
 	percpu_counter_init(&tcp_orphan_count, 0, GFP_KERNEL);
+
+	/* 初始化hash信息 */
 	inet_hashinfo_init(&tcp_hashinfo);
 	inet_hashinfo2_init(&tcp_hashinfo, "tcp_listen_portaddr_hash",
 			    thash_entries, 21,  /* one slot per 2 MB*/
@@ -3894,25 +3923,34 @@ void __init tcp_init(void)
 	cnt = tcp_hashinfo.ehash_mask + 1;
 	sysctl_tcp_max_orphans = cnt / 2;
 
+	/* 初始化 sysctl_tcp_mem
+		/proc/sys/net/ipv4/tcp_mem
+	*/
 	tcp_init_mem();
 	/* Set per-socket limits to no more than 1/128 the pressure threshold */
 	limit = nr_free_buffer_pages() << (PAGE_SHIFT - 7);
 	max_wshare = min(4UL*1024*1024, limit);
 	max_rshare = min(6UL*1024*1024, limit);
 
+	/* /proc/sys/net/ipv4/tcp_wmem */
 	init_net.ipv4.sysctl_tcp_wmem[0] = SK_MEM_QUANTUM;
 	init_net.ipv4.sysctl_tcp_wmem[1] = 16*1024;
 	init_net.ipv4.sysctl_tcp_wmem[2] = max(64*1024, max_wshare);
 
+	/* /proc/sys/net/ipv4/tcp_rmem */
 	init_net.ipv4.sysctl_tcp_rmem[0] = SK_MEM_QUANTUM;
-	init_net.ipv4.sysctl_tcp_rmem[1] = 131072;
+	init_net.ipv4.sysctl_tcp_rmem[1] = 131072;  //128k
 	init_net.ipv4.sysctl_tcp_rmem[2] = max(131072, max_rshare);
 
 	pr_info("Hash tables configured (established %u bind %u)\n",
 		tcp_hashinfo.ehash_mask + 1, tcp_hashinfo.bhash_size);
 
+	/* ipv4 tcp 初始化 */
 	tcp_v4_init();
+	
 	tcp_metrics_init();
+
+	/* 拥塞算法初始化， 最终 ubunut会用到 cubic拥塞算法 */
 	BUG_ON(tcp_register_congestion_control(&tcp_reno) != 0);
 	tcp_tasklet_init();
 }
