@@ -931,7 +931,7 @@ struct ath10k {
 	struct device *dev;
 	u8 mac_addr[ETH_ALEN];
 
-	enum ath10k_hw_rev hw_rev;
+ 	enum ath10k_hw_rev hw_rev;
 	u16 dev_id;
 	u32 chip_id;
 	enum ath10k_dev_type dev_type;

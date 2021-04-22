@@ -5531,6 +5531,7 @@ static void __napi_gro_flush_chain(struct napi_struct *napi, u32 index,
 	struct sk_buff *skb, *p;
 
 	list_for_each_entry_safe_reverse(skb, p, head, list) {
+		/* 表示一个jiffies以内的gro packets不会被刷新掉。 */
 		if (flush_old && NAPI_GRO_CB(skb)->age == jiffies)
 			return;
 		skb_list_del_init(skb);

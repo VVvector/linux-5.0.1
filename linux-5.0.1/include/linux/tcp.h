@@ -144,10 +144,19 @@ static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
 	return (struct tcp_request_sock *)req;
 }
 
+
+/* TCP套接字的数据结构，包含了管理TCP协议各方面的信息。 */
 struct tcp_sock {
+	/* INET协议族面向连接的套接字结构 include/net/inet_connection_sock,
+		其中包含的 struct inet_connection_sock_af_ops *icsk_af_ops数据结构，
+		是套接字操作函数指针ops，各协议实例在初始化时将函数指针初始化为自己的函数实例。
+	*/
 	/* inet_connection_sock has to be the first member of tcp_sock */
 	struct inet_connection_sock	inet_conn;
+
+	/* 传送数据段TCP协议头的长度 */
 	u16	tcp_header_len;	/* Bytes of tcp header to send		*/
+	
 	u16	gso_segs;	/* Max number of segs per GSO packet	*/
 
 /*
@@ -171,9 +180,12 @@ struct tcp_sock {
 	u32	data_segs_in;	/* RFC4898 tcpEStatsPerfDataSegsIn
 				 * total number of data segments in.
 				 */
+	/* 下一个输入数据段的序列号 */
  	u32	rcv_nxt;	/* What we want to receive next 	*/
 	u32	copied_seq;	/* Head of yet unread data		*/
 	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
+
+	/* 下一个发送数据段的序列号 */
  	u32	snd_nxt;	/* Next sequence we send		*/
 	u32	segs_out;	/* RFC4898 tcpEStatsPerfSegsOut
 				 * The total number of segments sent.
@@ -273,6 +285,8 @@ struct tcp_sock {
 
 	u16	urg_data;	/* Saved octet of OOB data and control flags */
 	u8	ecn_flags;	/* ECN status bits.			*/
+
+	/* TCP_KEEPCNT - SO_KEEPALIVE 设置在断开连接之前通过套接字发送多少个保存连接活动的探测数据段。 */
 	u8	keepalive_probes; /* num of allowed keep alive probes	*/
 	u32	reordering;	/* Packet reordering metric.		*/
 	u32	reord_seen;	/* number of data packet reordering events */
@@ -352,9 +366,16 @@ struct tcp_sock {
 	u32	total_retrans;	/* Total retransmits for entire connection */
 
 	u32	urg_seq;	/* Seq of received urgent pointer */
+
+	/* 在TCP开始传送连接是否保存活动的探测数据段之前，连接处于空闲状态的时间值(秒)，默认为2小时。需设置SO_KEEPLIVE才有效 */
 	unsigned int		keepalive_time;	  /* time before keep alive takes place */
+
+	/* 设定在两次传送探测连接保存活动数据段之间要等待多少秒。初始值为75秒 */
 	unsigned int		keepalive_intvl;  /* time interval between keep alive probes */
 
+	/* 指定处于FIN_WAIT2状态的孤立套接字还应报纸存活多少时间。如果其值为0，则关闭选项。
+	linux使用常规方式处理FIN_WAIT_2和TIME_WAIT状态。如果值小于0，则套接字立即从FIN_WAIT_2
+	状态进入CLOSE状态，不经过TIME_WAIT。*/
 	int			linger2;
 
 

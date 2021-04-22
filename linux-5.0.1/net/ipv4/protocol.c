@@ -28,8 +28,10 @@
 #include <linux/spinlock.h>
 #include <net/protocol.h>
 
+/* 用于存放已注册的传输层协议实例从IP层接收数据包的处理函数 */
 struct net_protocol __rcu *inet_protos[MAX_INET_PROTOS] __read_mostly;
 EXPORT_SYMBOL(inet_protos);
+
 const struct net_offload __rcu *inet_offloads[MAX_INET_PROTOS] __read_mostly;
 EXPORT_SYMBOL(inet_offloads);
 

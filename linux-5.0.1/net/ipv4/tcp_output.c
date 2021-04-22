@@ -1054,6 +1054,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	tcb = TCP_SKB_CB(skb);
 	memset(&opts, 0, sizeof(opts));
 
+	/* 确定TCP协议选项长度，不同packet的flow */
 	if (unlikely(tcb->tcp_flags & TCPHDR_SYN))
 		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
 	else
@@ -1061,6 +1062,8 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 							   &md5);
 	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
 
+	
+	/* 网络拥塞控制管理 */
 	/* if no packet is in qdisc/device queue, then allow XPS to select
 	 * another queue. We can be called from tcp_tsq_handler()
 	 * which holds one reference to sk.
@@ -1159,8 +1162,8 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	memset(skb->cb, 0, max(sizeof(struct inet_skb_parm),
 			       sizeof(struct inet6_skb_parm)));
 
-	/* 实际会调用 ip_queue_xmit， 把skb传入网络层。
 
+	/* 发送数据：实际会调用 ip_queue_xmit， 把skb传入网络层。
 		icsk:  internet connect socket
 	*/
 	err = icsk->icsk_af_ops->queue_xmit(sk, skb, &inet->cork.fl);
@@ -1176,6 +1179,17 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	return err;
 }
 
+
+/* TCP数据最终都是通过  tcp_transmit_skb()函数传送给IP层的。
+	包括：
+		.来自用户空间的数据包
+		.重传数据包	- tcp_retransmit_skb
+		.探测路由最大传送单元数据包 - tcp_mtu_probe
+		.发送复位连接数据包 - tcp_send_active_reset
+		.发送连接请求数据包 - tcp_connect
+		.发送回答数据包 - tcp_send_ack
+		.0窗口探测数据包等 - tcp_xmit_probe_skb
+*/
 static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 			    gfp_t gfp_mask)
 {
@@ -2584,7 +2598,7 @@ void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
 
 	if (tcp_write_xmit(sk, cur_mss, nonagle, 0,
 			   sk_gfp_mask(sk, GFP_ATOMIC)))
-		tcp_check_probe_timer(sk);
+		tcp_check_probe_timer(sk); //如果发送失败，检查是否需要启动零窗口探测定时器。
 }
 
 /* Send _single_ skb sitting at the send head. This function requires
@@ -2961,6 +2975,7 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 	return err;
 }
 
+/* 重传数据包 */
 int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 {
 	struct tcp_sock *tp = tcp_sk(sk);

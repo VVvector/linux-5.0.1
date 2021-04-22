@@ -1772,9 +1772,14 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 	struct iovec iov;
 	int fput_needed;
 
+	//初始化消息头
 	err = import_single_range(WRITE, buff, len, &iov, &msg.msg_iter);
 	if (unlikely(err))
 		return err;
+
+	/* 通过文件描述符fd，找到对应的socket实例。
+	以fd为索引，从当前进程的文件描述符files_struct实例中找到对应的file实例，
+	然后，从file实例的private_data成员中获取socket实例。*/
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (!sock)
 		goto out;
@@ -1783,6 +1788,8 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 	msg.msg_control = NULL;
 	msg.msg_controllen = 0;
 	msg.msg_namelen = 0;
+
+	//把套接字地址从用户空间拷贝到内核空间
 	if (addr) {
 		err = move_addr_to_kernel(addr, addr_len, &address);
 		if (err < 0)
@@ -1790,11 +1797,13 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 		msg.msg_name = (struct sockaddr *)&address;
 		msg.msg_namelen = addr_len;
 	}
+
+	//非阻塞io
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
 	msg.msg_flags = flags;
 	
-	/*调用对应sock协议相关的ops，向下发生数据*/
+	/*调用统一的发送入口函数 */
 	err = sock_sendmsg(sock, &msg);
 
 out_put:
@@ -1804,7 +1813,6 @@ out:
 }
 
 /*在user space调用 sendto()发生upd数据时，系统会调用该系统调用。*/
-
 SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len,
 		unsigned int, flags, struct sockaddr __user *, addr,
 		int, addr_len)
@@ -2287,6 +2295,10 @@ static int ___sys_recvmsg(struct socket *sock, struct user_msghdr __user *msg,
 
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
+
+	/* 调用socket对应的recvmsg函数，sock->ops_recvmsg()，然后，
+	再mapping协议族的recv函数sk->sk_port->recvmsg (inet_recvmsg)，然后，
+	再调用具体协议的recv函数，例如tcp的tcp_recvmsg()函数 */
 	err = (nosec ? sock_recvmsg_nosec : sock_recvmsg)(sock, msg_sys, flags);
 	if (err < 0)
 		goto out_freeiov;
@@ -2536,7 +2548,7 @@ static const unsigned char nargs[21] = {
  *  This function doesn't need to set the kernel lock because
  *  it is set by the callees.
  */
-
+/* 是所有socket函数进入内核空间的共同入口 */
 SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
 {
 	unsigned long a[AUDITSC_ARGS];
@@ -2593,6 +2605,8 @@ SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
 	case SYS_SOCKETPAIR:
 		err = __sys_socketpair(a0, a1, a[2], (int __user *)a[3]);
 		break;
+
+	//发送函数
 	case SYS_SEND:
 		err = __sys_sendto(a0, (void __user *)a1, a[2], a[3],
 				   NULL, 0);
@@ -2601,6 +2615,7 @@ SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
 		err = __sys_sendto(a0, (void __user *)a1, a[2], a[3],
 				   (struct sockaddr __user *)a[4], a[5]);
 		break;
+		
 	case SYS_RECV:
 		err = __sys_recvfrom(a0, (void __user *)a1, a[2], a[3],
 				     NULL, NULL);
@@ -2723,6 +2738,8 @@ bool sock_is_registered(int family)
 	return family < NPROTO && rcu_access_pointer(net_families[family]);
 }
 
+
+/* 套接字层初始化接口 */
 static int __init sock_init(void)
 {
 	int err;

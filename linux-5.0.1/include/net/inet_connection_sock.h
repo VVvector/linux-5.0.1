@@ -34,22 +34,39 @@ struct tcp_congestion_ops;
  * Pointers to address related TCP functions
  * (i.e. things that depend on the address family)
  */
+ //以TCP为例注释：包含了一组AF_INET地址族中TCP协议实例的操作函数
 struct inet_connection_sock_af_ops {
+	/* IPv4网络层传输函数 */
 	int	    (*queue_xmit)(struct sock *sk, struct sk_buff *skb, struct flowi *fl);
+
+	/* 计算TCP发送数据段校验和函数 */
 	void	    (*send_check)(struct sock *sk, struct sk_buff *skb);
+
+	/* 创建TCP协议头 */
 	int	    (*rebuild_header)(struct sock *sk);
+
 	void	    (*sk_rx_dst_set)(struct sock *sk, const struct sk_buff *skb);
+
+	/* 处理连接请求数据段 */
 	int	    (*conn_request)(struct sock *sk, struct sk_buff *skb);
+
+	/* 从另一端点收到SYN ACK回答后，创建新的子套接字的函数。 */
 	struct sock *(*syn_recv_sock)(const struct sock *sk, struct sk_buff *skb,
 				      struct request_sock *req,
 				      struct dst_entry *dst,
 				      struct request_sock *req_unhash,
 				      bool *own_req);
+
+	/* 网络层协议头的大小，设置为IPv4协议头长度 */
 	u16	    net_header_len;
 	u16	    net_frag_header_len;
 	u16	    sockaddr_len;
+
+	/* 设置IPv4在网络层的套接字选项 */
 	int	    (*setsockopt)(struct sock *sk, int level, int optname,
 				  char __user *optval, unsigned int optlen);
+
+	/* 获取IPv4在网络层的套接字选项 */
 	int	    (*getsockopt)(struct sock *sk, int level, int optname,
 				  char __user *optval, int __user *optlen);
 #ifdef CONFIG_COMPAT
@@ -60,6 +77,8 @@ struct inet_connection_sock_af_ops {
 				int level, int optname,
 				char __user *optval, int __user *optlen);
 #endif
+
+	/* 为IPv4生成常规sockaddr_in类型地址 */
 	void	    (*addr2sockaddr)(struct sock *sk, struct sockaddr *);
 	void	    (*mtu_reduced)(struct sock *sk);
 };

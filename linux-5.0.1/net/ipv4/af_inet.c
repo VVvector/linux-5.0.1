@@ -178,7 +178,11 @@ static int inet_autobind(struct sock *sk)
 	/* We may need to bind the socket. */
 	lock_sock(sk);
 	inet = inet_sk(sk);
+
+	//如果还没有分配本地端口
 	if (!inet->inet_num) {
+
+		//SOCK_STREAM套接字的TCP操作函数集为tcp_prot, 其中，端口绑定函数为inet_csk_get_port()
 		if (sk->sk_prot->get_port(sk, 0)) {
 			release_sock(sk);
 			return -EAGAIN;
@@ -269,6 +273,7 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 lookup_protocol:
 	err = -ESOCKTNOSUPPORT;
 	rcu_read_lock();
+	//查找协议交换表，根据协议族套接字创建类型type获取要创建的协议实例。例如，TCP --> SOCK_STREAM
 	list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
 
 		err = 0;
@@ -326,6 +331,7 @@ lookup_protocol:
 
 	WARN_ON(!answer_prot->slab);
 
+	/* 分配一个新的struct sock数据结构， 套接字类型为PF_INET,协议为从协议交换表中获取的协议类型。*/
 	err = -ENOBUFS;
 	sk = sk_alloc(net, PF_INET, GFP_KERNEL, answer_prot, kern);
 	if (!sk)
@@ -335,6 +341,7 @@ lookup_protocol:
 	if (INET_PROTOSW_REUSE & answer_flags)
 		sk->sk_reuse = SK_CAN_REUSE;
 
+	/* AF_INET支持两个协议 IPv4和IPv6,由inet_sk宏确定是哪个协议 */
 	inet = inet_sk(sk);
 	inet->is_icsk = (INET_PROTOSW_ICSK & answer_flags) != 0;
 
@@ -353,6 +360,7 @@ lookup_protocol:
 
 	inet->inet_id = 0;
 
+	/* 初始化sock相关数据 */
 	sock_init_data(sock, sk);
 
 	sk->sk_destruct	   = inet_sock_destruct;
@@ -384,6 +392,7 @@ lookup_protocol:
 		}
 	}
 
+	/* 调用具体协议的init函数，例如：tcp_v4_init_sock() */
 	if (sk->sk_prot->init) {
 		err = sk->sk_prot->init(sk);
 		if (err) {
@@ -793,6 +802,7 @@ int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 }
 EXPORT_SYMBOL(inet_getname);
 
+/* TCP/UDP/RAW 的发送函数都是先调用这个。 */
 int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
@@ -807,12 +817,14 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	/* record the last CPU that the flow was processed on*/
 	sock_rps_record_flow(sk);
 
+	//如果连接还没分配本地端口，且允许自动绑定，那么给连接绑定一个本地端口。
+	//tcp_prot的no_autobind是为true，即TCP是不允许自动绑定端口的。
 	/* We may need to bind the socket. */
 	if (!inet_sk(sk)->inet_num && !sk->sk_prot->no_autobind &&
 	    inet_autobind(sk))
 		return -EAGAIN;
 
-	/*udp_sendmsg*/
+	/*根据不同的协议调用相应的接口，例 udp_sendmsg, tcp_sendmsg, raw_sendmsg*/
 	return sk->sk_prot->sendmsg(sk, msg, size);
 }
 EXPORT_SYMBOL(inet_sendmsg);
@@ -1964,11 +1976,12 @@ static int __init inet_init(void)
 
 	sock_skb_cb_check_size(sizeof(struct inet_skb_parm));
 
-	/* 协议操作的注册 */
+	/* 初始化tcp协议实例，并放入全局链表中。 */
 	rc = proto_register(&tcp_prot, 1);
 	if (rc)
 		goto out;
 
+	/* 初始化tcp协议实例，并放入全局链表中。 */
 	rc = proto_register(&udp_prot, 1);
 	if (rc)
 		goto out_unregister_tcp_proto;
@@ -1987,6 +2000,8 @@ static int __init inet_init(void)
 	/*The AF_INET protocol family exports a structure that has a create function. 
 	This function is called by the kernel when a socket is created from a user program.
 	*/
+
+	/* 注册各协议的create函数，在应用层创建socket时，会调用。 */
 	(void)sock_register(&inet_family_ops);
 
 	/* 创建route proc文件 */
@@ -2009,11 +2024,12 @@ static int __init inet_init(void)
 		pr_crit("%s: Cannot add IGMP protocol\n", __func__);
 #endif
 
-	/* 将socket api和具体协议api建立联系*/
+	/* 初始化协议交换表的套接字层的存放各协议族API的连表  */
 	/* Register the socket-side information for inet_create. */
 	for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
 		INIT_LIST_HEAD(r);
 
+	/* 将AF_INET协议族套接字层的API注册到协议交换表inetsw[SOCK_MAX]中 */
 	for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
 		inet_register_protosw(q);
 

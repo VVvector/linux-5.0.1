@@ -44,13 +44,24 @@ struct linger {
  *	system, not 4.3. Thus msg_accrights(len) are now missing. They
  *	belong in an obscure libc emulation or the bin.
  */
- 
+ //应用层传送给传输层信息的数据结构
 struct msghdr {
+	/* 套接字的名字，指向struct sockaddr_in数据结构。包含目标IP地址和端口号。*/
 	void		*msg_name;	/* ptr to socket address structure */
+
+	/* 套接字名字的长度 */
 	int		msg_namelen;	/* size of socket address structure */
+
+	/* 分散的数据块 */
 	struct iov_iter	msg_iter;	/* data */
+
+	/* 控制数据，用于支持应用程序的控制信息API功能，向套接字层下的协议传送控制信息。 */
 	void		*msg_control;	/* ancillary data */
+
+	/* 控制描述符链表的长度 */
 	__kernel_size_t	msg_controllen;	/* ancillary data buffer length */
+
+	/* 为套接字从应用层接收到控制的标志。 */
 	unsigned int	msg_flags;	/* flags on received message */
 	struct kiocb	*msg_iocb;	/* ptr to iocb for async requests */
 };

@@ -53,31 +53,47 @@ void sk_stream_write_space(struct sock *sk)
  *
  * Must be called with the socket locked.
  */
+ /* 等待连接建立 */
 int sk_stream_wait_connect(struct sock *sk, long *timeo_p)
 {
+	/* 初始化等待任务 */
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct task_struct *tsk = current;
 	int done;
 
 	do {
 		int err = sock_error(sk);
+
+		/* 连接发生错误 */
 		if (err)
 			return err;
+
+		/* 此时连接必须处于SYN_SENT或者SYN_RECV的状态 */
 		if ((1 << sk->sk_state) & ~(TCPF_SYN_SENT | TCPF_SYN_RECV))
 			return -EPIPE;
+
+		/* 如果是非阻塞的，或者等待时间耗尽了，直接返回 */
 		if (!*timeo_p)
 			return -EAGAIN;
+
+		/* 如果进程有待处理的信号，返回 */
 		if (signal_pending(tsk))
 			return sock_intr_errno(*timeo_p);
 
+		/* 把等待任务加入到socket等待队列头部 */
 		add_wait_queue(sk_sleep(sk), &wait);
 		sk->sk_write_pending++;
+
+		/* 进入睡眠，返回值为真的条件：
+			连接没有错误，且状态为 TCPF_ESTABLISHED和TCPF_CLOSE_WAIT */
 		done = sk_wait_event(sk, timeo_p,
 				     !sk->sk_err &&
 				     !((1 << sk->sk_state) &
 				       ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)), &wait);
+
+		/* 把等待任务从等待队列中删除 */
 		remove_wait_queue(sk_sleep(sk), &wait);
-		sk->sk_write_pending--;
+		sk->sk_write_pending--; //更新写等待计数
 	} while (!done);
 	return 0;
 }

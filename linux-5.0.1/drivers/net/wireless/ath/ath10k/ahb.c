@@ -761,6 +761,8 @@ static int ath10k_ahb_probe(struct platform_device *pdev)
 	hw_rev = (enum ath10k_hw_rev)of_id->data;
 
 	size = sizeof(*ar_pci) + sizeof(*ar_ahb);
+
+	/* core的创建 */
 	ar = ath10k_core_create(size, &pdev->dev, ATH10K_BUS_AHB,
 				hw_rev, &ath10k_ahb_hif_ops);
 	if (!ar) {
@@ -776,6 +778,8 @@ static int ath10k_ahb_probe(struct platform_device *pdev)
 	ar_ahb->pdev = pdev;
 	platform_set_drvdata(pdev, ar);
 
+
+	/*获取板级信息*/
 	ret = ath10k_ahb_resource_init(ar);
 	if (ret)
 		goto err_core_destroy;
@@ -814,6 +818,7 @@ static int ath10k_ahb_probe(struct platform_device *pdev)
 		goto err_halt_device;
 	}
 
+	/* core的init */
 	ret = ath10k_core_register(ar, &bus_params);
 	if (ret) {
 		ath10k_err(ar, "failed to register driver core: %d\n", ret);

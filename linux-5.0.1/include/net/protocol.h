@@ -37,6 +37,7 @@
  */
 #define MAX_INET_PROTOS		256
 
+/* 描述IP层与传输层数据包接收接口的数据结构 */
 /* This is used to register protocols. */
 struct net_protocol {
 	int			(*early_demux)(struct sk_buff *skb);

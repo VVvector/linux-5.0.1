@@ -35,7 +35,7 @@ struct iov_iter {
 	size_t iov_offset;
 	size_t count;
 	union {
-		const struct iovec *iov;
+		const struct iovec *iov; //指向缓冲区数组的起始地址。
 		const struct kvec *kvec;
 		const struct bio_vec *bvec;
 		struct pipe_inode_info *pipe;

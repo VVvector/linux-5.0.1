@@ -529,7 +529,9 @@ static size_t simple_copy_to_iter(const void *addr, size_t bytes,
 int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
 			   struct iov_iter *to, int len)
 {
+	/* skb tracing 点，可以查看skb和长度 */
 	trace_skb_copy_datagram_iovec(skb, len);
+	
 	return __skb_datagram_iter(skb, offset, to, len, false,
 		simple_copy_to_iter, NULL);
 }

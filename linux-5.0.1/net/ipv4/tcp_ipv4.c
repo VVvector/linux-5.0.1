@@ -1538,7 +1538,8 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct sock *rsk;
 
-	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
+	/* 如果套接字当前状态为连接状态，缓冲区可能可以通过 fast path路径处理。 */
+	if (sk->sk_state == TCP_ESTABLISHED) {
 		struct dst_entry *dst = sk->sk_rx_dst;
 
 		sock_rps_save_rxhash(sk, skb);
@@ -1551,19 +1552,24 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 			}
 		}
 
-		/*将skb放入receive队列中*/
+		/*skb接收函数 - fast path/ slowa path*/
 		tcp_rcv_established(sk, skb);
 		return 0;
 	}
 
+	/* 检查数据包的正确性*/
+	/*数据包校验和 */
 	if (tcp_checksum_complete(skb))
 		goto csum_err;
 
+	/* 套接字状态切换与数据包处理 - 侦听状态 - LISTEN*/
 	if (sk->sk_state == TCP_LISTEN) {
 		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
 
 		if (!nsk)
 			goto discard;
+
+		/* 转换至连接状态：ESTABLISHED */
 		if (nsk != sk) {
 			if (tcp_child_process(sk, nsk, skb)) {
 				rsk = nsk;
@@ -1574,12 +1580,14 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	} else
 		sock_rps_save_rxhash(sk, skb);
 
+	/* 当前套接字不处于侦听状态 - LISTEN */
 	if (tcp_rcv_state_process(sk, skb)) {
 		rsk = sk;
 		goto reset;
 	}
 	return 0;
 
+	/* 错误状态处理 */
 reset:
 	tcp_v4_send_reset(rsk, skb);
 discard:
@@ -1792,7 +1800,7 @@ static void tcp_v4_fill_cb(struct sk_buff *skb, const struct iphdr *iph,
  *	From tcp_input.c
  */
 
-/*传输层的接收函数*/
+/*传输层TCP的接收函数*/
 int tcp_v4_rcv(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb->dev);
@@ -1803,17 +1811,22 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	struct sock *sk;
 	int ret;
 
+	/* 1. 数据包合法性检查 */
+	
+	/* 指明数据包的目标地址不是本机地址时，扔掉数据包 */
 	if (skb->pkt_type != PACKET_HOST)
 		goto discard_it;
 
 	/* Count it even if it's bad */
 	__TCP_INC_STATS(net, TCP_MIB_INSEGS);
 
+	/* 查看TCP协议头的正确性 */
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		goto discard_it;
 
 	th = (const struct tcphdr *)skb->data;
 
+	/* 读取TCP协议头信息，查看协议头中doff数据域的正确性 */
 	if (unlikely(th->doff < sizeof(struct tcphdr) / 4))
 		goto bad_packet;
 	if (!pskb_may_pull(skb, th->doff * 4))
@@ -1823,18 +1836,24 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * Packet length and doff are validated by header prediction,
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
-
+	/* 查看数据包校验和的正确性 */
 	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo))
 		goto csum_error;
 
+	/* 2.保存协议头信息 */
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
+
+	/* 3. 查看数据段是否属于某个套接字
+		查看依据：接收数据包的网络接口，源端口号，目的端口号。
+	*/
 lookup:
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
 			       th->dest, sdif, &refcounted);
 	if (!sk)
 		goto no_tcp_socket;
 
+	/* 4. 数据段的处理 */
 process:
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
@@ -1923,13 +1942,14 @@ process:
 
 	sk_incoming_cpu_update(sk);
 
+	/* 获取套接字锁并开始处理数据 */
 	bh_lock_sock_nested(sk);
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
 	if (!sock_owned_by_user(sk)) {
 		/*继续往上传skb*/
-		ret = tcp_v4_do_rcv(sk, skb);
-	} else if (tcp_add_backlog(sk, skb)) {
+		ret = tcp_v4_do_rcv(sk, skb); //放入sk->sk_receive_queue中
+	} else if (tcp_add_backlog(sk, skb)) { //放入sk->sk_backlog中
 		goto discard_and_relse;
 	}
 	bh_unlock_sock(sk);
@@ -1940,6 +1960,7 @@ put_and_return:
 
 	return ret;
 
+	/* 收到一包为打开socket的数据，会向外发送一个复位请求来关闭连接。 */
 no_tcp_socket:
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 		goto discard_it;
@@ -1952,6 +1973,7 @@ csum_error:
 bad_packet:
 		__TCP_INC_STATS(net, TCP_MIB_INERRS);
 	} else {
+		/* 向外发送一个复位请求来关闭连接 */
 		tcp_v4_send_reset(NULL, skb);
 	}
 
@@ -1978,6 +2000,7 @@ do_time_wait:
 		inet_twsk_put(inet_twsk(sk));
 		goto csum_error;
 	}
+	/*根据数据包的类型进行处理 -SYN, FIN 等*/
 	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
 	case TCP_TW_SYN: {
 		struct sock *sk2 = inet_lookup_listener(dev_net(skb->dev),
@@ -2059,6 +2082,7 @@ static const struct tcp_sock_af_ops tcp_sock_ipv4_specific = {
  */
 static int tcp_v4_init_sock(struct sock *sk)
 {
+	/* 获取套接字指针 */
 	struct inet_connection_sock *icsk = inet_csk(sk);
 
 	tcp_init_sock(sk);
@@ -2552,6 +2576,8 @@ void tcp4_proc_exit(void)
 struct proto tcp_prot = {
 	.name			= "TCP",
 	.owner			= THIS_MODULE,
+
+	/* 从tcp_close到tcp_shutdow的函数，用于管理TCP连接的函数实例。 */
 	.close			= tcp_close,
 	.pre_connect		= tcp_v4_pre_connect,
 	.connect		= tcp_v4_connect,
@@ -2561,17 +2587,27 @@ struct proto tcp_prot = {
 	.init			= tcp_v4_init_sock,
 	.destroy		= tcp_v4_destroy_sock,
 	.shutdown		= tcp_shutdown,
+
+	
 	.setsockopt		= tcp_setsockopt,
 	.getsockopt		= tcp_getsockopt,
 	.keepalive		= tcp_set_keepalive,
+
+	/* tcp_recvmsg和tcp_v4_do_rcv是TCP数据接收 */
 	.recvmsg		= tcp_recvmsg,
+
+	/*TCP数据发送 */
 	.sendmsg		= tcp_sendmsg,
 	.sendpage		= tcp_sendpage,
 	.backlog_rcv		= tcp_v4_do_rcv,
 	.release_cb		= tcp_release_cb,
+
+	/* 哈希链表，用于存放打开的套接字的端点地址(端口号)，是
+	传输层协议端口与套接字端口的对应链表。*/
 	.hash			= inet_hash,
 	.unhash			= inet_unhash,
 	.get_port		= inet_csk_get_port,
+	
 	.enter_memory_pressure	= tcp_enter_memory_pressure,
 	.leave_memory_pressure	= tcp_leave_memory_pressure,
 	.stream_memory_free	= tcp_stream_memory_free,

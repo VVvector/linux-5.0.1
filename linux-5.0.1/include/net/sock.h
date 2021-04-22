@@ -420,7 +420,7 @@ struct sock {
 	__u32			sk_dst_pending_confirm;
 	u32			sk_pacing_status; /* see enum sk_pacing */
 	long			sk_sndtimeo;
-	struct timer_list	sk_timer;
+	struct timer_list	sk_timer; //tcp用到的定时器
 	__u32			sk_priority;
 	__u32			sk_mark;
 	unsigned long		sk_pacing_rate; /* bytes per second */
@@ -458,8 +458,8 @@ struct sock {
 				sk_no_check_tx : 1,
 				sk_no_check_rx : 1,
 				sk_userlocks : 4,
-				sk_protocol  : 8,
-				sk_type      : 16;
+				sk_protocol  : 8, //在某个网络协议族中，该套接字属于哪个协议使用。
+				sk_type      : 16; //套接字类型，其值为SOCK_XXX形式。eg: SOCK_STREAM
 #define SK_PROTOCOL_MAX U8_MAX
 	u16			sk_gso_max_segs;
 	u8			sk_pacing_shift;
@@ -479,7 +479,7 @@ struct sock {
 	seqlock_t		sk_stamp_seq;
 #endif
 	u16			sk_tsflags;
-	u8			sk_shutdown;
+	u8			sk_shutdown; //存放套接字的RCV_SHUTDOWN和SEND_SHUTDOWN选项。
 	u32			sk_tskey;
 	atomic_t		sk_zckey;
 
@@ -1954,8 +1954,11 @@ static inline int skb_do_copy_data_nocache(struct sock *sk, struct sk_buff *skb,
 					   struct iov_iter *from, char *to,
 					   int copy, int offset)
 {
+	/* 需要TCP自己计算校验和 */
 	if (skb->ip_summed == CHECKSUM_NONE) {
 		__wsum csum = 0;
+
+		/* 拷贝用户空间的数据到内核空间，同时计算用户数据的校验和 */
 		if (!csum_and_copy_from_iter_full(to, copy, &csum, from))
 			return -EFAULT;
 		skb->csum = csum_block_add(skb->csum, csum, offset);
@@ -1973,8 +1976,12 @@ static inline int skb_add_data_nocache(struct sock *sk, struct sk_buff *skb,
 {
 	int err, offset = skb->len;
 
+	
+    /* 拷贝用户空间的数据到内核空间，同时计算校验和 */
 	err = skb_do_copy_data_nocache(sk, skb, from, skb_put(skb, copy),
 				       copy, offset);
+					   
+    /* 如果拷贝失败，恢复skb->len和data room的大小 */
 	if (err)
 		__skb_trim(skb, offset);
 

@@ -791,7 +791,11 @@ static inline u64 tcp_skb_timestamp_us(const struct sk_buff *skb)
  * If this grows please adjust skbuff.h:skbuff->cb[xxx] size appropriately.
  */
 struct tcp_skb_cb {
+
+	/* 输出数据段的起始序列号 */
 	__u32		seq;		/* Starting sequence number	*/
+
+	/* 最后一个输出数据段结束序列号 */
 	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
 	union {
 		/* Note : tcp_tw_isn is used in input path only
@@ -806,8 +810,11 @@ struct tcp_skb_cb {
 			u16	tcp_gso_size;
 		};
 	};
+
+	/* 与TCP协议头中的flags数据域定义相同 */
 	__u8		tcp_flags;	/* TCP header flags. (tcp[13])	*/
 
+	/* 保存了选择回答(SACK: selective acknowledge)和前送回答(FACK: forward acknowledge)的状态标志 */
 	__u8		sacked;		/* State flags for SACK.	*/
 #define TCPCB_SACKED_ACKED	0x01	/* SKB ACK'd by a SACK block	*/
 #define TCPCB_SACKED_RETRANS	0x02	/* SKB retransmitted		*/
@@ -823,7 +830,10 @@ struct tcp_skb_cb {
 			eor:1,		/* Is skb MSG_EOR marked? */
 			has_rxtstamp:1,	/* SKB has a RX timestamp	*/
 			unused:5;
+
+	/* 与TCP协议头中的ack数据域相同 */
 	__u32		ack_seq;	/* Sequence number ACK'd	*/
+
 	union {
 		struct {
 			/* There is space for up to 24 bytes */
@@ -837,6 +847,8 @@ struct tcp_skb_cb {
 			/* when we reached the "delivered" count */
 			u64 delivered_mstamp;
 		} tx;   /* only used for outgoing skbs */
+
+		/* 存放输入数据段的IP选项 */
 		union {
 			struct inet_skb_parm	h4;
 #if IS_ENABLED(CONFIG_IPV6)
