@@ -627,12 +627,23 @@ out:
 	return 0;
 }
 
+/* https://blog.csdn.net/zhangskd/article/details/11770647
+
+#define CHECKSUM_NONE 0        // 需要由传输层自己计算校验和
+#define CHECKSUM_HW 1          // 由硬件计算报头和首部的校验和
+#define CHECKSUM_UNNECESSARY 2 // 表示不需要校验，或者已经成功校验了
+#define CHECKSUM_PARTIAL CHECKSUM_HW
+#define CHECKSUM_COMPLETE CHECKSUM_HW
+
+*/
 void __tcp_v4_send_check(struct sk_buff *skb, __be32 saddr, __be32 daddr)
 {
 	struct tcphdr *th = tcp_hdr(skb);
 
-	/* 只计算了伪首部。 
-		tcp报头和tcp数据的由硬件完成。
+	/* 只计算了伪首部 pseude header，计算了源和目的ip addr，protocol号， TCP报文长度（报文头+数据）。
+		伪首部作用：为了增加TCP校验和的检错能力：如检查TCP报文是否收错(目的IP地址)，传输层协议是否选对了(协议号）等。
+
+		csum_start和csum_offset是给硬件用，如果硬件有tx checksum offload或gso等功能。
 	*/
 	th->check = ~tcp_v4_check(skb->len, saddr, daddr, 0);
 	skb->csum_start = skb_transport_header(skb) - skb->head;
@@ -2051,7 +2062,10 @@ EXPORT_SYMBOL(inet_sk_rx_dst_set);
 
 const struct inet_connection_sock_af_ops ipv4_specific = {
 	.queue_xmit	   = ip_queue_xmit,
-	.send_check	   = tcp_v4_send_check, /* checkusum 计算, 只进行了伪头部的计算，剩余的推迟到 最后sxmit_one() ->validate_xmit_skb*/
+
+	/* checksum 计算, 只进行了伪头部的计算，剩余的推迟到 最后 sch_generic.c中sch_direct_xmit->validate_xmit_skb */
+	.send_check	   = tcp_v4_send_check,
+
 	.rebuild_header	   = inet_sk_rebuild_header,
 	.sk_rx_dst_set	   = inet_sk_rx_dst_set,
 	.conn_request	   = tcp_v4_conn_request,

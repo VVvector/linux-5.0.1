@@ -768,7 +768,12 @@ static void tcp_push(struct sock *sk, int flags, int mss_now,
 	/* 如果设置了MSG_OOB标志，就记录紧急指针。 */
 	tcp_mark_urg(tp, flags);
 
-	/* 如果需要自动阻塞小包 */
+	/* 当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少
+		总的发包个数。tcp_autocorking的思路是当规则队列Qdisc、或网卡的发送队列中有尚未发出的
+		数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
+		包成功发送出去为止。
+	*/
+	/* 如果需要自动阻塞小包, 有相关条件进行判断。*/
 	if (tcp_should_autocork(sk, skb, size_goal)) {
 
 		/* 设置阻塞标志位 */
@@ -779,7 +784,8 @@ static void tcp_push(struct sock *sk, int flags, int mss_now,
 		}
 
 		/* 当提交给IP层的数据包都发送出去后，sk_wmem_alloc的值就会变小，
-		此时这个条件就为假，之后就可以发送被阻塞的数据包了。*/
+		此时这个条件就为假，之后就可以发送被阻塞的数据包了。
+		*/
 		/* It is possible TX completion already happened
 		 * before we set TSQ_THROTTLED.
 		 */
