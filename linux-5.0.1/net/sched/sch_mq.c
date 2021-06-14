@@ -71,7 +71,6 @@ static void mq_destroy(struct Qdisc *sch)
 /* qdisc的初始化函数
 它的parent为  TC_H_ROOT，即根qdisc。
 且 device必须为 多队列。
-
 */
 static int mq_init(struct Qdisc *sch, struct nlattr *opt,
 		   struct netlink_ext_ack *extack)

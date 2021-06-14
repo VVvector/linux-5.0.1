@@ -2025,6 +2025,13 @@ static int packet_rcv_vnet(struct msghdr *msg, const struct sk_buff *skb,
  * we will not harm anyone.
  */
 
+/*
+套接口PF_PACKET目前有两种工作模式，以（SOCK_PACKET）类别运行的模式和以（SOCK_DGRAM/SOCK_RAW）类别运行的模式。
+前者为传统的方式，在内核和用户层拷贝数据包，并且兼容老内核的数据包抓取接口（参考以下介绍）；
+后者为前者的替代类型，而且可以通过设置共享内存的方式，在内核与用户层交换数据，节省内存拷贝的消耗。
+以下内容主要介绍后一种模式的共享内存方式
+*/
+
 static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 		      struct packet_type *pt, struct net_device *orig_dev)
 {
@@ -2117,6 +2124,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	spin_lock(&sk->sk_receive_queue.lock);
 	po->stats.stats1.tp_packets++;
 	sock_skb_set_dropcount(sk, skb);
+	/* 将skb放入raw socket的接收buffer中 */
 	__skb_queue_tail(&sk->sk_receive_queue, skb);
 	spin_unlock(&sk->sk_receive_queue.lock);
 	sk->sk_data_ready(sk);

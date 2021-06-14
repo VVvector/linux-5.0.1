@@ -498,12 +498,21 @@ static suspend_state_t decode_state(const char *buf, size_t n)
 	return PM_SUSPEND_ON;
 }
 
+/* Linux内核提供了三种Suspend: Freeze、Standby和STR(Suspend to RAM)，
+ * 在用户空间向”/sys/power/state”文件分别写入”freeze”、”standby”和”mem”，即可触发它们。
+ * 
+ * 内核中，Suspend及Resume过程涉及到PM Core、Device PM、各个设备的驱动、Platform dependent PM、
+ * CPU control等多个模块，涉及了console switch、process freeze、CPU hotplug、wakeup处理等过个知识点。
+ *
+ * 该文件提供用户空间接口 /sys/power/state
+ */
 static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 			   const char *buf, size_t n)
 {
 	suspend_state_t state;
 	int error;
 
+	/* lock住autosleep功能 */
 	error = pm_autosleep_lock();
 	if (error)
 		return error;
@@ -518,6 +527,7 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 		if (state == PM_SUSPEND_MEM)
 			state = mem_sleep_current;
 
+		/* suspend的入口 */
 		error = pm_suspend(state);
 	} else if (state == PM_SUSPEND_MAX) {
 		error = hibernate();
@@ -530,6 +540,11 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 	return error ? error : n;
 }
 
+/* 
+ * power_attr（展开一下就知道了，是个宏定义）定义了一个名称为state的attribute文件，
+ * 该文件的store接口为state_store，该接口在lock住autosleep功能后，
+ * 解析用户传入的buffer（freeze、standby or mem），转换成state参数。
+ */
 power_attr(state);
 
 #ifdef CONFIG_PM_SLEEP

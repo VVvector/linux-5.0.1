@@ -6,6 +6,7 @@
 #include <linux/export.h>
 #include "vlan.h"
 
+/* vlan的接收处理函数 */
 bool vlan_do_receive(struct sk_buff **skbp)
 {
 	struct sk_buff *skb = *skbp;
@@ -14,6 +15,7 @@ bool vlan_do_receive(struct sk_buff **skbp)
 	struct net_device *vlan_dev;
 	struct vlan_pcpu_stats *rx_stats;
 
+	/* 根据vlan id查找到vlan device */
 	vlan_dev = vlan_find_dev(skb->dev, vlan_proto, vlan_id);
 	if (!vlan_dev)
 		return false;
@@ -28,6 +30,7 @@ bool vlan_do_receive(struct sk_buff **skbp)
 		return false;
 	}
 
+	/* 设置skb的dev为vlan网络设备，一般如eth0.10（vlan为10的设备） */
 	skb->dev = vlan_dev;
 	if (unlikely(skb->pkt_type == PACKET_OTHERHOST)) {
 		/* Our lower layer thinks this is not local, let's make sure.
@@ -56,9 +59,11 @@ bool vlan_do_receive(struct sk_buff **skbp)
 		skb_reset_mac_len(skb);
 	}
 
+	/* 根据vlan_tci中的优先级信息设置skb的优先级 */
 	skb->priority = vlan_get_ingress_priority(vlan_dev, skb->vlan_tci);
 	__vlan_hwaccel_clear_tag(skb);
 
+	/* 更新vlan设备的统计信息 */
 	rx_stats = this_cpu_ptr(vlan_dev_priv(vlan_dev)->vlan_pcpu_stats);
 
 	u64_stats_update_begin(&rx_stats->syncp);

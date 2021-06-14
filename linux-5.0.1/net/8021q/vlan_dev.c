@@ -102,6 +102,8 @@ static inline netdev_tx_t vlan_netpoll_send_skb(struct vlan_dev_priv *vlan, stru
 	return NETDEV_TX_OK;
 }
 
+/* L3协议栈通过dev_queue_xmit()调用dev->ndo_start_xmit，关联到具体的网络设备处理函数。
+从而，调用到 本函数。*/
 static netdev_tx_t vlan_dev_hard_start_xmit(struct sk_buff *skb,
 					    struct net_device *dev)
 {
@@ -120,9 +122,11 @@ static netdev_tx_t vlan_dev_hard_start_xmit(struct sk_buff *skb,
 		u16 vlan_tci;
 		vlan_tci = vlan->vlan_id;
 		vlan_tci |= vlan_dev_get_egress_qos_mask(dev, skb->priority);
+		/* 添加vlan加速的信息，即将vlan信息放到skb带外data中。 */
 		__vlan_hwaccel_put_tag(skb, vlan->vlan_proto, vlan_tci);
 	}
 
+	/* 转到vlan设备对应的root设备上，调用root 设备的ndo_start_xmit()函数进行发送。 */
 	skb->dev = vlan->real_dev;
 	len = skb->len;
 	if (unlikely(netpoll_tx_running(dev)))

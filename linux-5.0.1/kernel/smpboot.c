@@ -111,6 +111,8 @@ static int smpboot_thread_fn(void *data)
 	while (1) {
 		set_current_state(TASK_INTERRUPTIBLE);
 		preempt_disable();
+
+		/* kthread_stop()的支持 */
 		if (kthread_should_stop()) {
 			__set_current_state(TASK_RUNNING);
 			preempt_enable();
@@ -121,6 +123,7 @@ static int smpboot_thread_fn(void *data)
 			return 0;
 		}
 
+		/* kthread_park()的支持 */
 		if (kthread_should_park()) {
 			__set_current_state(TASK_RUNNING);
 			preempt_enable();
@@ -138,6 +141,7 @@ static int smpboot_thread_fn(void *data)
 
 		/* Check for state change setup */
 		switch (td->status) {
+		/* 进程从NONE状态被唤醒 */
 		case HP_THREAD_NONE:
 			__set_current_state(TASK_RUNNING);
 			preempt_enable();
@@ -146,6 +150,7 @@ static int smpboot_thread_fn(void *data)
 			td->status = HP_THREAD_ACTIVE;
 			continue;
 
+		/* 进程从PARKED状态被唤醒 */
 		case HP_THREAD_PARKED:
 			__set_current_state(TASK_RUNNING);
 			preempt_enable();
@@ -155,12 +160,16 @@ static int smpboot_thread_fn(void *data)
 			continue;
 		}
 
+		/* 如果不能run，进入阻塞休眠。 */
 		if (!ht->thread_should_run(td->cpu)) {
 			preempt_enable_no_resched();
+			/* 休眠 */
 			schedule();
 		} else {
 			__set_current_state(TASK_RUNNING);
 			preempt_enable();
+
+			/* 用户实现的进程函数 */
 			ht->thread_fn(td->cpu);
 		}
 	}
@@ -181,13 +190,17 @@ __smpboot_create_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
 	td->cpu = cpu;
 	td->ht = ht;
 
-	/*用kthreadd创建一个task。 其中 smpboot_thread_fn是一个大的while循环。*/
+	/* 用 kthreadd进程去 创建一个task。
+	 *  smpboot_thread_fn 是一个大的while循环，是用户进程函数的封装。用于支持stop，park等。
+	*/
 	tsk = kthread_create_on_cpu(smpboot_thread_fn, td, cpu,
 				    ht->thread_comm);
 	if (IS_ERR(tsk)) {
 		kfree(td);
 		return PTR_ERR(tsk);
 	}
+
+	/* part新创建的进程 */
 	/*
 	 * Park the thread so that it could start right on the CPU
 	 * when it is available.
@@ -286,6 +299,16 @@ static void smpboot_destroy_threads(struct smp_hotplug_thread *ht)
  *
  * Creates and starts the threads on all online cpus.
  */
+
+/* 用来创建 per_cpu 内核进程，所谓的 per_cpu 进程是指需要在每个 online cpu 上创建线程。
+比如执行 stop_machine() 中 cpu 同步操作的 migration 进程. 
+
+既然 per_cpu 进程是和 cpu 绑定的，那么在 cpu hotplug 的时候，进程需要相应的 disable 和 enable。实现的方法可以有多种：
+	1. 动态的销毁和创建线程。缺点是开销比较大。
+	2. 设置进程的 cpu 亲和力 set_cpus_allowed_ptr()。缺点是进程绑定的 cpu 如果被 down 掉，进程会迁移到其他 cpu 继续执行。
+	3. 为了克服上述方案的缺点，适配 per_cpu 进程的 cpu hotplug 操作，设计了 kthread_park()/kthread_unpark() 机制。
+
+*/
 int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread)
 {
 	unsigned int cpu;
@@ -294,13 +317,16 @@ int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread)
 	get_online_cpus();
 	mutex_lock(&smpboot_threads_lock);
 	
-	/*为每个在线cpu创建 thread*/
+	/* 为每个在线cpu创建 thread */
 	for_each_online_cpu(cpu) {
+		/* 创建thread */
 		ret = __smpboot_create_thread(plug_thread, cpu);
 		if (ret) {
 			smpboot_destroy_threads(plug_thread);
 			goto out;
 		}
+
+		/* unpark并绑定进程到cpu */
 		smpboot_unpark_thread(plug_thread, cpu);
 	}
 	list_add(&plug_thread->list, &hotplug_threads);

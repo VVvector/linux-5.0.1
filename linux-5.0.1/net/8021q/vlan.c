@@ -250,6 +250,7 @@ static int register_vlan_device(struct net_device *real_dev, u16 vlan_id)
 		snprintf(name, IFNAMSIZ, "vlan%.4i", vlan_id);
 	}
 
+	/* tx/rx qdisc都是1。*/
 	new_dev = alloc_netdev(sizeof(struct vlan_dev_priv), name,
 			       NET_NAME_UNKNOWN, vlan_setup);
 

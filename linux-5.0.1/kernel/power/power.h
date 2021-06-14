@@ -253,6 +253,7 @@ static inline int suspend_freeze_processes(void)
 {
 	int error;
 
+	/* 冻结用户进程 */
 	error = freeze_processes();
 	/*
 	 * freeze_processes() automatically thaws every task if freezing
@@ -261,6 +262,7 @@ static inline int suspend_freeze_processes(void)
 	if (error)
 		return error;
 
+	/* 冻结内核进程 */
 	error = freeze_kernel_threads();
 	/*
 	 * freeze_kernel_threads() thaws only kernel threads upon freezing

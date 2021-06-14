@@ -34,8 +34,10 @@ extern bool freezing_slow_path(struct task_struct *p);
  */
 static inline bool freezing(struct task_struct *p)
 {
+	/* 如果 system_freezing_cnt 为 0，说明全局 freeze 还没有开始 */
 	if (likely(!atomic_read(&system_freezing_cnt)))
 		return false;
+	/* 检查是否可以freeze该进程 */
 	return freezing_slow_path(p);
 }
 
@@ -55,11 +57,20 @@ extern void thaw_kernel_threads(void);
 static inline bool try_to_freeze_unsafe(void)
 {
 	might_sleep();
+
+	/* 当前进程是否可以被 freeze */
 	if (likely(!freezing(current)))
 		return false;
+
+	/* freezz当前进程 */
 	return __refrigerator(false);
 }
 
+/*
+ * 1. freeze 用户态的进程利用了 signal 机制，系统 suspend 使能了 suspend 以后，
+ * 调用 fake_signal_wake_up() 伪造一个信号唤醒进程，进程在
+ * ret_to_user() -> do_notify_resume() -> do_signal() -> get_signal() -> try_to_freeze() 中 freeze 自己。
+ */
 static inline bool try_to_freeze(void)
 {
 	if (!(current->flags & PF_NOFREEZE))

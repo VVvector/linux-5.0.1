@@ -350,17 +350,24 @@ static int suspend_prepare(suspend_state_t state)
 {
 	int error, nr_calls = 0;
 
+	/* 检查suspend_ops是否提供了.enter回调，没有的话，返回错误。 */
 	if (!sleep_state_supported(state))
 		return -EPERM;
 
+	/* 将当前console切换到一个虚拟console并重定向内核的kmsg（需要的话）。该功能称作VT switch。 */
 	pm_prepare_console();
 
+	/* 发送suspend开始的消息（PM_SUSPEND_PREPARE） */
 	error = __pm_notifier_call_chain(PM_SUSPEND_PREPARE, -1, &nr_calls);
 	if (error) {
 		nr_calls--;
 		goto Finish;
 	}
 
+	/* freeze用户空间进程和一些内核线程。该功能称作freezing-of-tasks。
+	 * 如果freezing-of-tasks失败，调用pm_restore_console，
+	 * 将console切换回原来的console，并返回错误，以便能终止suspend。
+	 */
 	trace_suspend_resume(TPS("freeze_processes"), 0, true);
 	error = suspend_freeze_processes();
 	trace_suspend_resume(TPS("freeze_processes"), 0, false);
@@ -398,15 +405,30 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 {
 	int error;
 
+	/* 调用suspend_ops的prepare回调（有的话），通知平台代码，以便让其在即将进行状态切换之时，
+	 * 再做一些处理（需要的话）。该回调可能失败（平台代码出现意外），失败的话，
+	 * 需要跳至Platform_finish处，调用suspend_ops的finish回调，执行恢复操作。
+	 */
 	error = platform_suspend_prepare(state);
 	if (error)
 		goto Platform_finish;
 
+	/* 调用dpm_suspend_end，调用所有设备的->suspend_late和->suspend_noirq回调函数，
+	 * suspend late suspend设备和需要在关中断下suspend的设备。需要说明的是，这里的noirq，
+	 * 是通过禁止所有的中断线的形式，而不是通过关全局中断的方式。同样，该操作可能会失败，
+	 * 失败的话，跳至Platform_finish处，执行恢复动作。
+	 */
 	error = dpm_suspend_late(PMSG_SUSPEND);
 	if (error) {
 		pr_err("late suspend of devices failed\n");
 		goto Platform_finish;
 	}
+
+	/* 调用suspend_ops的prepare_late回调（有的话），通知平台代码，以便让其在最后关头，
+	 * 再做一些处理（需要的话）。该回调可能失败（平台代码出现意外），失败的话，
+	 * 需要跳至Platform_wake处，调用suspend_ops的wake回调，执行device的resume、
+	 * 调用suspend_ops的finish回调，执行恢复操作。
+	 */
 	error = platform_suspend_prepare_late(state);
 	if (error)
 		goto Devices_early_resume;
@@ -428,27 +450,38 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (suspend_test(TEST_PLATFORM))
 		goto Platform_wake;
 
+	/* 禁止所有的非boot cpu。也会失败，执行恢复操作即可。 */
 	error = disable_nonboot_cpus();
 	if (error || suspend_test(TEST_CPUS))
 		goto Enable_cpus;
 
+	/* 关全局中断。如果无法关闭，则为bug。 */
 	arch_suspend_disable_irqs();
 	BUG_ON(!irqs_disabled());
 
 	system_state = SYSTEM_SUSPEND;
 
+	/* 调用syscore_suspend，suspend system core。同样会失败，执行恢复操作即可。 */
 	error = syscore_suspend();
 	if (!error) {
+		/* 如果很幸运，以上操作都成功了，那么，切换吧。不过，别高兴太早，还得调用pm_wakeup_pending检查一下，
+		这段时间内，是否有唤醒事件发生，如果有就要终止suspend。 */
 		*wakeup = pm_wakeup_pending();
 		if (!(suspend_test(TEST_CORE) || *wakeup)) {
 			trace_suspend_resume(TPS("machine_suspend"),
 				state, true);
+			/* 如果一切顺利，调用suspend_ops的enter回调，进行状态切换。这时，系统应该已经suspend了……
+			即到这里， 系统应该就不会再运行了，就进入休眠状态了。*/
 			error = suspend_ops->enter(state);
 			trace_suspend_resume(TPS("machine_suspend"),
 				state, false);
 		} else if (*wakeup) {
 			error = -EBUSY;
 		}
+
+		/* 系统被唤醒或者suspend失败：
+		 * 继续resume操作，resume device、start ftrace、resume console、suspend_ops->end等等。
+		 */
 		syscore_resume();
 	}
 
@@ -484,17 +517,27 @@ int suspend_devices_and_enter(suspend_state_t state)
 	int error;
 	bool wakeup = false;
 
+	/* 再次检查平台代码是否需要提供以及是否提供了suspend_ops。 */
 	if (!sleep_state_supported(state))
 		return -ENOSYS;
 
 	pm_suspend_target_state = state;
 
+	/* 调用suspend_ops的begin回调（有的话），通知平台代码，以便让其作相应的处理（需要的话）。
+	 * 可能失败，需要跳至Close处执行恢复操作（suspend_ops->end）。
+	 */
 	error = platform_suspend_begin(state);
 	if (error)
 		goto Close;
 
+	/* 挂起console。该接口由"kernel\printk.c"实现，主要是hold住一个lock，该lock会阻止其它代码访问console.*/
 	suspend_console();
+	
 	suspend_test_start();
+
+	/* 调用所有设备的->prepare和->suspend回调函数，suspend需要正常suspend的设备。
+	 * suspend device可能失败，需要跳至 Recover_platform，执行recover操作（suspend_ops->recover）。
+	 */
 	error = dpm_suspend_start(PMSG_SUSPEND);
 	if (error) {
 		pr_err("Some devices failed to suspend, or early wake event detected\n");
@@ -504,6 +547,7 @@ int suspend_devices_and_enter(suspend_state_t state)
 	if (suspend_test(TEST_DEVICES))
 		goto Recover_platform;
 
+	/* 以上都是suspend前的准备工作，此时，调用suspend_enter接口，使系统进入指定的电源状态。 */
 	do {
 		error = suspend_enter(state, &wakeup);
 	} while (!error && !wakeup && platform_suspend_again(state));
@@ -534,8 +578,13 @@ int suspend_devices_and_enter(suspend_state_t state)
  */
 static void suspend_finish(void)
 {
+	/* 恢复所有的用户空间进程和内核线程。 */
 	suspend_thaw_processes();
+
+	/* 发送suspend结束的通知。*/
 	pm_notifier_call_chain(PM_POST_SUSPEND);
+
+	/* 将console切换回原来的。 */
 	pm_restore_console();
 }
 
@@ -559,15 +608,22 @@ static int enter_state(suspend_state_t state)
 			return -EAGAIN;
 		}
 #endif
+	/* 判断该平台是否支持该电源状态。
+	 * 如果是freeze，无需平台代码参与即可支持，直接返回true。
+	 * 对于standby和mem，则需要调用suspend_ops的valid回调，由底层平台代码判断是否支持。
+	 */
 	} else if (!valid_state(state)) {
 		return -EINVAL;
 	}
+
+	/* mutex锁，即只允许一个实例处理suspend */
 	if (!mutex_trylock(&system_transition_mutex))
 		return -EBUSY;
 
 	if (state == PM_SUSPEND_TO_IDLE)
 		s2idle_begin();
 
+	/* 打印提示信息，同步文件系统。 */
 #ifndef CONFIG_SUSPEND_SKIP_SYNC
 	trace_suspend_resume(TPS("sync_filesystems"), 0, true);
 	pr_info("Syncing filesystems ... ");
@@ -578,6 +634,10 @@ static int enter_state(suspend_state_t state)
 
 	pm_pr_dbg("Preparing system for sleep (%s)\n", mem_sleep_labels[state]);
 	pm_suspend_clear_flags();
+
+	/* 调用suspend_prepare()，进行suspend前的准备，主要包括switch console，process和thread freezing。
+	 * 如果失败，则终止suspend过程。
+	 */
 	error = suspend_prepare(state);
 	if (error)
 		goto Unlock;
@@ -587,14 +647,22 @@ static int enter_state(suspend_state_t state)
 
 	trace_suspend_resume(TPS("suspend_enter"), state, false);
 	pm_pr_dbg("Suspending system (%s)\n", mem_sleep_labels[state]);
+
+	/* 该接口负责suspend和resume的所有实际动作。
+	 * 1. 前半部分，suspend console、suspend device、关中断、调用平台相关的suspend_ops使系统进入低功耗状态。
+	 * 2. 后半部分，在系统被事件唤醒后，处理相关动作，调用平台相关的suspend_ops恢复系统、
+	 *    开中断、resume device、resume console。
+	 */
 	pm_restrict_gfp_mask();
 	error = suspend_devices_and_enter(state);
 	pm_restore_gfp_mask();
 
+	/* 调用suspend_finish，恢复（或等待恢复）process&thread，还原console。 */
  Finish:
 	events_check_enabled = false;
 	pm_pr_dbg("Finishing wakeup.\n");
 	suspend_finish();
+	
  Unlock:
 	mutex_unlock(&system_transition_mutex);
 	return error;
@@ -607,6 +675,10 @@ static int enter_state(suspend_state_t state)
  * Check if the value of @state represents one of the supported states,
  * execute enter_state() and update system suspend statistics.
  */
+ /* 当系统进入suspend的时候，会调用该函数，进行suspend的处理。 
+  * 例如当用户 执行 echo "freeze", "standby","mem" > /sys/power/state时，系统就会调用state_store函数。
+  * 然后，就会调用到本函数。
+  */
 int pm_suspend(suspend_state_t state)
 {
 	int error;
@@ -614,6 +686,7 @@ int pm_suspend(suspend_state_t state)
 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
 		return -EINVAL;
 
+	/* 进入相应的suspend state */
 	pr_info("suspend entry (%s)\n", mem_sleep_labels[state]);
 	error = enter_state(state);
 	if (error) {

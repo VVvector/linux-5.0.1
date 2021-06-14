@@ -41,15 +41,22 @@ static DEFINE_SPINLOCK(freezer_lock);
  */
 bool freezing_slow_path(struct task_struct *p)
 {
+	/* (PF_NOFREEZE | PF_SUSPEND_TASK) 当前进程不能被 freeze */
 	if (p->flags & (PF_NOFREEZE | PF_SUSPEND_TASK))
 		return false;
 
 	if (test_tsk_thread_flag(p, TIF_MEMDIE))
 		return false;
 
+	/* 如果 pm_nosig_freezing 为 true，内核进程 freeze 已经开始，
+	 * 当前进程可以被 freeze 
+	 */
 	if (pm_nosig_freezing || cgroup_freezing(p))
 		return true;
 
+	/* 如果 pm_freezing 为 true，且当前进程为用户进程
+	 * 当前进程可以被 freeze
+	 */
 	if (pm_freezing && !(p->flags & PF_KTHREAD))
 		return true;
 
@@ -68,10 +75,14 @@ bool __refrigerator(bool check_kthr_stop)
 	pr_debug("%s entered refrigerator\n", current->comm);
 
 	for (;;) {
+		/* 设置当前进程进入 TASK_UNINTERRUPTIBLE阻塞状态 */
 		set_current_state(TASK_UNINTERRUPTIBLE);
 
 		spin_lock_irq(&freezer_lock);
+		/* 设置已freeze的标志 */
 		current->flags |= PF_FROZEN;
+
+		/* 检查是否可以对当前进程进行freeze，如果不可以，则还原。 */
 		if (!freezing(current) ||
 		    (check_kthr_stop && kthread_should_stop()))
 			current->flags &= ~PF_FROZEN;
@@ -80,6 +91,8 @@ bool __refrigerator(bool check_kthr_stop)
 		if (!(current->flags & PF_FROZEN))
 			break;
 		was_frozen = true;
+
+		/* 将本进程切换出去，即调度不再调度该进程，即休眠了。 */
 		schedule();
 	}
 
@@ -134,15 +147,38 @@ bool freeze_task(struct task_struct *p)
 		return false;
 
 	spin_lock_irqsave(&freezer_lock, flags);
+	/* 检查当前进程是否可以被freeze，或者是否已经被freeze。 */
 	if (!freezing(p) || frozen(p)) {
 		spin_unlock_irqrestore(&freezer_lock, flags);
 		return false;
 	}
 
+	/* 如果是用户进程，伪造一个signal发送给进程。 */
 	if (!(p->flags & PF_KTHREAD))
 		fake_signal_wake_up(p);
 	else
-		wake_up_state(p, TASK_INTERRUPTIBLE);
+		wake_up_state(p, TASK_INTERRUPTIBLE); //内核进程，则wake up内核进程。
+
+	/* 注：
+	 * 如果进程阻塞在信号量、mutex 等内核同步机制上，wake_up_state 并不能解除阻塞。
+	 * 因为这些机制都有 while(1) 循环来判断条件，是否成立，不成立只是简单的唤醒随即又会进入阻塞睡眠状态
+	 * 它只能唤醒类似下面这种简单的阻塞内核进程。
+	 	while (1) {
+	 		set_current_state(TASK_UNINTERRUPTIBLE);
+			schedule();
+	 	}
+	 * 而内核进程响应freeze操作，也必须显式调用 try_to_freeze()或者kthread_freezable_should_stop()
+	 * 来freeze自己。类似：
+	 	void user_thread() {
+			while (!kthread_should_stop()) {
+				try_to_freeze();
+			}	
+	 	}
+
+	 * 即 从代码逻辑上看 内核进程freeze，并不会freeze所有内核进程，只freeze了两部分：
+	 * 1. 设置了WQ_FREEZABLE标志的workqueue。
+	 * 2. 内核进程主动调用了try_to_freeze()并在架构上设计了可以响应freeze。
+	 */
 
 	spin_unlock_irqrestore(&freezer_lock, flags);
 	return true;

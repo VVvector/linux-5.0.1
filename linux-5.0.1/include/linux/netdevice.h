@@ -4424,6 +4424,7 @@ static inline netdev_tx_t netdev_start_xmit(struct sk_buff *skb, struct net_devi
 
 	rc = __netdev_start_xmit(ops, skb, dev, more);
 	if (rc == NETDEV_TX_OK)
+		/* 更新发送成功的时间戳，在dev_watchdog timer中会用到。 */
 		txq_trans_update(txq);
 
 	return rc;

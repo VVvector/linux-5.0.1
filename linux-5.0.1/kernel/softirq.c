@@ -157,6 +157,7 @@ static void __local_bh_enable(unsigned int cnt)
  * Special-case - softirqs can safely be enabled by __do_softirq(),
  * without processing still-pending softirqs:
  */
+ /* 可以用来disable和enablesoftirq和tasklet。 */
 void _local_bh_enable(void)
 {
 	WARN_ON_ONCE(in_irq());
@@ -286,15 +287,16 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 	 */
 	current->flags &= ~PF_MEMALLOC;
 
-	/*得到当前所有pending的软中断*/
+	/* 得到当前所有pending的软中断 */
 	pending = local_softirq_pending();
 	account_irq_enter_time(current);
 
-	/*禁止其他软中断，即每个cpu上同时只能运行一个softirq。*/
+	/*禁止其他软中断，即每个cpu上同时只能运行一个softirq。（关抢占，关softirq和tasklet）*/
 	__local_bh_disable_ip(_RET_IP_, SOFTIRQ_OFFSET);
 	in_hardirq = lockdep_softirq_start();
 
 restart:
+	/* 清除pending状态 */
 	/* Reset the pending bitmask before enabling irqs */
 	set_softirq_pending(0);
 
@@ -304,7 +306,8 @@ restart:
 	/*软中断向量表*/
 	h = softirq_vec;
 
-	/*一bit一bit的检查是否有softirq要执行， 一共32bit*/
+	/*一bit一bit的检查是否有softirq要执行， 一共32bit。
+		即一次执行要将所有pendign的softirq都执行完。*/
 	while ((softirq_bit = ffs(pending))) {
 		unsigned int vec_nr;
 		int prev_count;
@@ -317,8 +320,10 @@ restart:
 		kstat_incr_softirqs_this_cpu(vec_nr);
 
 		trace_softirq_entry(vec_nr);
+
 		/*执行对应softirq的handle*/
 		h->action(h);
+
 		trace_softirq_exit(vec_nr);
 		if (unlikely(prev_count != preempt_count())) {
 			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
@@ -336,7 +341,7 @@ restart:
 	/*关闭中断，即下面的代码又不能被硬中断抢占*/
 	local_irq_disable();
 
-	/*，因为上面执行过程中，可能由硬中断抢占，所以这里，再次检查是否还有有softirq没有被执行*/
+	/* 因为上面执行过程中，可能由硬中断抢占，所以这里，再次检查是否还有有softirq没有被执行*/
 	pending = local_softirq_pending();
 	if (pending) {
 
@@ -354,6 +359,7 @@ restart:
 
 	/*开启软中断，允许软中断执行。*/
 	__local_bh_enable(SOFTIRQ_OFFSET);
+
 	WARN_ON_ONCE(in_interrupt());
 	current_restore_flags(old_flags, PF_MEMALLOC);
 }
@@ -475,6 +481,9 @@ void irq_exit(void)
 	否则什么也不做。
 	
 	3. 软中断将会在中断的退出阶段被执行。
+
+	软中断（即使同一类型的软中断）可以并发运行在多个CPU上，因此软中断是可重入函数必须使用自旋锁保护其数据结构。
+	一个软中断不会去抢占另外一个软中断。
 */
 /*
 	软中断在linux内核中三个执行点：
@@ -761,6 +770,7 @@ static int ksoftirqd_should_run(unsigned int cpu)
 static void run_ksoftirqd(unsigned int cpu)
 {
 	local_irq_disable();
+	/* 当前cpu上有pending的softirq需要处理 */
 	if (local_softirq_pending()) {
 		/*
 		 * We can safely run softirq on inline stack, as we are not deep

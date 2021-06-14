@@ -43,11 +43,15 @@ static int try_to_freeze_tasks(bool user_only)
 
 	end_time = jiffies + msecs_to_jiffies(freeze_timeout_msecs);
 
+	/* 如果是 kthread freeze, freeze设置有WQ_FREEZABLE标志的workqueue，
+	 * 即将wq的pwq->max_active设置为0，即新的work不能被执行。
+	 */
 	if (!user_only)
 		freeze_workqueues_begin();
 
 	while (true) {
 		todo = 0;
+		/* 对每个进程执行 freeze_task(), 进行freeze操作。 */
 		read_lock(&tasklist_lock);
 		for_each_process_thread(g, p) {
 			if (p == current || !freeze_task(p))
@@ -58,6 +62,7 @@ static int try_to_freeze_tasks(bool user_only)
 		}
 		read_unlock(&tasklist_lock);
 
+		/* 如果是kthread freeze，判断停工的workqueue中残留的work有没有执行完。 */
 		if (!user_only) {
 			wq_busy = freeze_workqueues_busy();
 			todo += wq_busy;
@@ -128,15 +133,21 @@ int freeze_processes(void)
 	if (error)
 		return error;
 
+	/* 设置当前进程不被freeze */
 	/* Make sure this task doesn't get frozen */
 	current->flags |= PF_SUSPEND_TASK;
 
+	/* 表示系统全局的freeze开始 */
 	if (!pm_freezing)
 		atomic_inc(&system_freezing_cnt);
 
 	pm_wakeup_clear(true);
 	pr_info("Freezing user space processes ... ");
+
+	/* 表示用户进程freeze开始 */
 	pm_freezing = true;
+
+	/* freeze user_only 进程 */
 	error = try_to_freeze_tasks(true);
 	if (!error) {
 		__usermodehelper_set_disable_depth(UMH_DISABLED);
@@ -173,6 +184,7 @@ int freeze_kernel_threads(void)
 
 	pr_info("Freezing remaining freezable tasks ... ");
 
+	/* 表示内核进程freeze开始 */
 	pm_nosig_freezing = true;
 	error = try_to_freeze_tasks(false);
 	if (!error)

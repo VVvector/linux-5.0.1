@@ -97,6 +97,7 @@ void free_kthread_struct(struct task_struct *k)
  */
 bool kthread_should_stop(void)
 {
+	/* 判断进程所在 kthread 结构中的 KTHREAD_SHOULD_STOP 是否被置位。 */
 	return test_bit(KTHREAD_SHOULD_STOP, &to_kthread(current)->flags);
 }
 EXPORT_SYMBOL(kthread_should_stop);
@@ -112,6 +113,7 @@ EXPORT_SYMBOL(kthread_should_stop);
  * and in a park position. kthread_unpark() "restarts" the thread and
  * calls the thread function again.
  */
+ /* 检查本进程是否要进行park。 */
 bool kthread_should_park(void)
 {
 	return test_bit(KTHREAD_SHOULD_PARK, &to_kthread(current)->flags);
@@ -196,12 +198,14 @@ static void __kthread_parkme(struct kthread *self)
 	__set_current_state(TASK_RUNNING);
 }
 
+/* 当检查到需要park时，进程对自己进行park操作。 */
 void kthread_parkme(void)
 {
 	__kthread_parkme(to_kthread(current));
 }
 EXPORT_SYMBOL_GPL(kthread_parkme);
 
+/* 新创建的内核进程 */
 static int kthread(void *_create)
 {
 	/* Copy data: it's on kthread's stack */
@@ -233,6 +237,7 @@ static int kthread(void *_create)
 	init_completion(&self->parked);
 	current->vfork_done = &self->exited;
 
+	/* 进程首先进入阻塞状态，等待被wakeup唤醒 */
 	/* OK, tell user we're spawned, wait for stop or wakeup */
 	__set_current_state(TASK_UNINTERRUPTIBLE);
 	create->result = current;
@@ -242,7 +247,11 @@ static int kthread(void *_create)
 	ret = -EINTR;
 	if (!test_bit(KTHREAD_SHOULD_STOP, &self->flags)) {
 		cgroup_kthread_ready();
+
+		/* 如果是__smpboot_create_thread()创建的进程，还会进入park状态。 */
 		__kthread_parkme(self);
+
+		/* 开始执行user的kthread fn任务。 */
 		ret = threadfn(data);
 	}
 	do_exit(ret);
@@ -265,6 +274,8 @@ static void create_kthread(struct kthread_create_info *create)
 #ifdef CONFIG_NUMA
 	current->pref_node_fork = create->node;
 #endif
+
+	/* 调用kthread_thread()创建kthread()进程，实际的进程threadfn(), 被kthread()调用。 */
 	/* We want our own signal handler (we take no signals by default). */
 	pid = kernel_thread(kthread, create, CLONE_FS | CLONE_FILES | SIGCHLD);
 	if (pid < 0) {
@@ -298,11 +309,15 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 	create->node = node;
 	create->done = &done;
 
+	/* 将创建新进程任务加入list：kthread_create_list*/
 	spin_lock(&kthread_create_lock);
 	list_add_tail(&create->list, &kthread_create_list);
 	spin_unlock(&kthread_create_lock);
 
+	/* 唤醒kthread_task->kthreadd() 来创建新进程。*/
 	wake_up_process(kthreadd_task);
+
+	/* 等待创建任务完成 */
 	/*
 	 * Wait for completion in killable state, for I might be chosen by
 	 * the OOM killer while kthreadd is trying to allocate memory for
@@ -327,6 +342,7 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 		static const struct sched_param param = { .sched_priority = 0 };
 		char name[TASK_COMM_LEN];
 
+		/* 设置新进程的进程名 */
 		/*
 		 * task is already visible to other tasks, so updating
 		 * COMM must be protected.
@@ -376,6 +392,7 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
 	va_list args;
 
 	va_start(args, namefmt);
+	/* 实际提交任务给kthreadd， 然后唤醒kthreadd，来创建新进程。 */
 	task = __kthread_create_on_node(threadfn, data, node, namefmt, args);
 	va_end(args);
 
@@ -441,6 +458,7 @@ struct task_struct *kthread_create_on_cpu(int (*threadfn)(void *data),
 {
 	struct task_struct *p;
 
+	/* 实际的进程创建 */
 	p = kthread_create_on_node(threadfn, data, cpu_to_node(cpu), namefmt,
 				   cpu);
 	if (IS_ERR(p))
@@ -464,6 +482,7 @@ void kthread_unpark(struct task_struct *k)
 {
 	struct kthread *kthread = to_kthread(k);
 
+	/* 如果是per_cpu的进程，则需要重新绑定进程cpu。 */
 	/*
 	 * Newly created kthread was parked when the CPU was offline.
 	 * The binding was lost and we need to set it again.
@@ -471,7 +490,10 @@ void kthread_unpark(struct task_struct *k)
 	if (test_bit(KTHREAD_IS_PER_CPU, &kthread->flags))
 		__kthread_bind(k, kthread->cpu, TASK_PARKED);
 
+	/* 清除 KTHREAD_SHOULD_PARK 标记 */
 	clear_bit(KTHREAD_SHOULD_PARK, &kthread->flags);
+
+	/* 唤醒park的进程 */
 	/*
 	 * __kthread_parkme() will either see !SHOULD_PARK or get the wakeup.
 	 */
@@ -498,9 +520,15 @@ int kthread_park(struct task_struct *k)
 	if (WARN_ON(k->flags & PF_EXITING))
 		return -ENOSYS;
 
+	/* 如果当前进程的KTHREAD_SHOULD_PARK 标志被置位，则说明已经是park状态，则让要
+	 * park的进程继续park。
+	 */
 	if (WARN_ON_ONCE(test_bit(KTHREAD_SHOULD_PARK, &kthread->flags)))
 		return -EBUSY;
 
+	/* 设置KTHREAD_SHOULD_PARK，等待要park的进程park完成。
+	 * 注：不能自己park自己。
+	 */
 	set_bit(KTHREAD_SHOULD_PARK, &kthread->flags);
 	if (k != current) {
 		wake_up_process(k);
@@ -535,6 +563,8 @@ EXPORT_SYMBOL_GPL(kthread_park);
  * Returns the result of threadfn(), or %-EINTR if wake_up_process()
  * was never called.
  */
+ /* 如果内核进程需要支持 kthread_stop()，需要根据以下框架来写代码。
+ 用户在主循环中调用 kthread_should_stop() 来判断当前 kthread 是否需要 stop，如果被 stop 则退出循环。 */
 int kthread_stop(struct task_struct *k)
 {
 	struct kthread *kthread;
@@ -544,9 +574,14 @@ int kthread_stop(struct task_struct *k)
 
 	get_task_struct(k);
 	kthread = to_kthread(k);
+
+	/* 置位进程所在 kthread 结构中的 KTHREAD_SHOULD_STOP, 在kthread_should_stop()中会去check。 */
 	set_bit(KTHREAD_SHOULD_STOP, &kthread->flags);
+
+	/* unpark & wake_up 进程来响应 stop 信号 */
 	kthread_unpark(k);
 	wake_up_process(k);
+
 	wait_for_completion(&kthread->exited);
 	ret = k->exit_code;
 	put_task_struct(k);
@@ -556,6 +591,7 @@ int kthread_stop(struct task_struct *k)
 }
 EXPORT_SYMBOL(kthread_stop);
 
+/* 负责处理所有内核进程创建任务的进程， 在rest_init()中被创建。 */
 int kthreadd(void *unused)
 {
 	struct task_struct *tsk = current;
@@ -566,11 +602,12 @@ int kthreadd(void *unused)
 	set_cpus_allowed_ptr(tsk, cpu_all_mask);
 	set_mems_allowed(node_states[N_MEMORY]);
 
-	/* 这里表示该线程时可被冻结的。 */
+	/* 设置本进程为不可被冻结的。 */
 	current->flags |= PF_NOFREEZE;
 	cgroup_init_kthreadd();
 
 	for (;;) {
+		/* 如果创建进程队列中没有任务，进程进入阻塞休眠状态。 */
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (list_empty(&kthread_create_list))
 			schedule();
@@ -578,7 +615,7 @@ int kthreadd(void *unused)
 
 		spin_lock(&kthread_create_lock);
 
-		/*查看是否有kernel thread需要被创建*/
+		/* 如果被唤醒，轮询任务队列，逐个创建进程。 */
 		while (!list_empty(&kthread_create_list)) {
 			struct kthread_create_info *create;
 
@@ -587,7 +624,7 @@ int kthreadd(void *unused)
 			list_del_init(&create->list);
 			spin_unlock(&kthread_create_lock);
 
-			/*创建一个内核线程*/
+			/* 创建新进程 */
 			create_kthread(create);
 
 			spin_lock(&kthread_create_lock);

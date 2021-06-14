@@ -5119,6 +5119,11 @@ static struct sk_buff *skb_reorder_vlan_header(struct sk_buff *skb)
 	return skb;
 }
 
+/* |---2 bytes---|---|-|------------| 一共4字节vlan信息。
+	前两个字节为标签协议标识TPID（Tag Protocol Identifier）,值为0x8100，
+	后两个字节为标签控制信息TCI（Tag Control Information），前三位Priority表明帧的优先级，
+	接下来的一位cfi用于以太网与FDDI和令牌环网交换数据时的帧格式，最后12位VLAN ID，一共4096个
+*/
 struct sk_buff *skb_vlan_untag(struct sk_buff *skb)
 {
 	struct vlan_hdr *vhdr;
@@ -5129,6 +5134,7 @@ struct sk_buff *skb_vlan_untag(struct sk_buff *skb)
 		return skb;
 	}
 
+	/* 判断该skb是否为共享，如果是则需要克隆一份，因为后续会修改skb的network_header，transport_header，vlan等信息。 */
 	skb = skb_share_check(skb, GFP_ATOMIC);
 	if (unlikely(!skb))
 		goto err_free;
@@ -5138,15 +5144,21 @@ struct sk_buff *skb_vlan_untag(struct sk_buff *skb)
 
 	vhdr = (struct vlan_hdr *)skb->data;
 	vlan_tci = ntohs(vhdr->h_vlan_TCI);
+
+	/* 设置skb->vlan_proto，skb->vlan_tci = VLAN_TAG_PRESENT | vlan_tci; */
 	__vlan_hwaccel_put_tag(skb, skb->protocol, vlan_tci);
 
 	skb_pull_rcsum(skb, VLAN_HLEN);
+
+	/* 设置skb->protocol为真正的三层协议 */
 	vlan_set_encap_proto(skb, vhdr);
 
+	/* 将vlan信息从数据包中剥离，具体做法为从2层头部到vlan域的信息整体（目的mac+源mac）向后移4字节（vlan信息长度） */
 	skb = skb_reorder_vlan_header(skb);
 	if (unlikely(!skb))
 		goto err_free;
 
+	/* 重置skb各header信息 */
 	skb_reset_network_header(skb);
 	skb_reset_transport_header(skb);
 	skb_reset_mac_len(skb);

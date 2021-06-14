@@ -397,10 +397,14 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 
 void __qdisc_run(struct Qdisc *q)
 {
-	/* 这里为64 */
+	/* 这里为 64 */
 	int quota = dev_tx_weight;
 	int packets;
 
+	/*
+		1. 在userspce thread的上下文中，最多发送64个packet。
+		2. 一旦有更高的thread要抢占，则会退出，并切出去到net tx napi中进行发送。
+	*/
 	while (qdisc_restart(q, &packets)) {
 		/*
 		 * Ordered by possible occurrence: Postpone processing if
@@ -452,9 +456,11 @@ static void dev_watchdog(struct timer_list *t)
 				struct netdev_queue *txq;
 
 				txq = netdev_get_tx_queue(dev, i);
+
+				/* txq_trans_update()函数更新，在netdev_start_xmit()发送成功后。 */
 				trans_start = txq->trans_start;
 
-				/* 这里会检查 tx queue是否还在stop状态，如果超时后，则会调用dev的 ndo_tx_timeout()接口。 */
+				/* 这里会检查 tx queue处于stop状态，如果超时后，则会调用dev的 ndo_tx_timeout()接口。 */
 				if (netif_xmit_stopped(txq) &&
 				    time_after(jiffies, (trans_start +
 							 dev->watchdog_timeo))) {
@@ -673,7 +679,7 @@ static struct sk_buff *pfifo_fast_dequeue(struct Qdisc *qdisc)
 		if (__skb_array_empty(q))
 			continue;
 
-		skb = __skb_array   _consume(q);
+		skb = __skb_array_consume(q);
 	}
 	if (likely(skb)) {
 		qdisc_qstats_cpu_backlog_dec(qdisc, skb);

@@ -3489,6 +3489,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 				 struct net_device *dev,
 				 struct netdev_queue *txq)
 {
+	/* qdisc的lock */
 	spinlock_t *root_lock = qdisc_lock(q);
 	struct sk_buff *to_free = NULL;
 	bool contended;
@@ -3520,6 +3521,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 	if (unlikely(contended))
 		spin_lock(&q->busylock);
 
+	/* 保证多核之间的竞态 */
 	spin_lock(root_lock);
 	
 	if (unlikely(test_bit(__QDISC_STATE_DEACTIVATED, &q->state))) {
@@ -3557,6 +3559,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 				spin_unlock(&q->busylock);
 				contended = false;
 			}
+			/* 发送数据包 */
 			__qdisc_run(q);
 			qdisc_run_end(q);
 		}
@@ -4625,6 +4628,7 @@ static int netif_rx_internal(struct sk_buff *skb)
 	{
 		unsigned int qtail;
 
+		/* 将skb放入当前cpu的backlog中，并且出发sd->backlog napi。 */
 		ret = enqueue_to_backlog(skb, get_cpu(), &qtail);
 		put_cpu();
 	}
@@ -4947,9 +4951,12 @@ static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc,
 
 	orig_dev = skb->dev;
 
+	/* 此时skb->data应该是指向network header部分 */
 	skb_reset_network_header(skb);
+
 	if (!skb_transport_header_was_set(skb))
 		skb_reset_transport_header(skb);
+
 	skb_reset_mac_len(skb);
 
 	pt_prev = NULL;
@@ -4959,10 +4966,9 @@ another_round:
 
 	__this_cpu_inc(softnet_data.processed);
 
+	/* 去掉vlan header */
 	if (skb->protocol == cpu_to_be16(ETH_P_8021Q) ||
 	    skb->protocol == cpu_to_be16(ETH_P_8021AD)) {
-
-		/* 去掉vlan标签 */
 		skb = skb_vlan_untag(skb);
 		if (unlikely(!skb))
 			goto out;
@@ -4974,17 +4980,20 @@ another_round:
 	if (pfmemalloc)
 		goto skip_taps;
 
-	/* 1. 这里会将数据送入到 tap 抓包点。
+	/* 1. packet tap delivery
+	这里会将数据送入到 tap 抓包点。
 	如 packet tap （libpcap） net/core/dev.c; net/packet/af_packet.c
 	if a packet tap is installed(usually via libpcap)
-
+		例如：raw socket 和 tcpdump实现
 	*/
+	/* 如抓包程序未指定设备，遍历ptype_all链表，输入一份报文到ptype_all链表中的协议族，处理ETH_P_ALL类型的数据包 */
 	list_for_each_entry_rcu(ptype, &ptype_all, list) {
 		if (pt_prev)
 			ret = deliver_skb(skb, pt_prev, orig_dev);
 		pt_prev = ptype;
 	}
 
+	/* 遍历skb收包网络设备的ptype_all链表，处理与具体dev绑定的ETH_P_ALL协议处理例程 */
 	list_for_each_entry_rcu(ptype, &skb->dev->ptype_all, list) {
 		if (pt_prev)
 			ret = deliver_skb(skb, pt_prev, orig_dev);
@@ -5003,21 +5012,31 @@ skip_taps:
 	}
 #endif
 	skb_reset_tc(skb);
+
 skip_classify:
 	if (pfmemalloc && !skb_pfmemalloc_protocol(skb))
 		goto drop;
 
+	/* vlan packet的处理 */
 	if (skb_vlan_tag_present(skb)) {
 		if (pt_prev) {
 			ret = deliver_skb(skb, pt_prev, orig_dev);
 			pt_prev = NULL;
 		}
+		
+		/* 根据实际的vlan设备调整信息，再走一遍。 */
 		if (vlan_do_receive(&skb))
 			goto another_round;
 		else if (unlikely(!skb))
 			goto out;
 	}
 
+	/* 如果一个dev被添加到一个bridge(作为bridge的一个接口)，
+	这个接口设备的rx_handler将被设置为br_handler_frame函数。
+	这是在br_add_if函数中设置的，而br_add_if (net/bridge/br_if.c)是在向网桥设备上添加接口时设置的。
+	进入br_handle_frame()也就进入了bridge的逻辑代码。
+
+	例如 OVS(open vswitch),  linux bridge */
 	rx_handler = rcu_dereference(skb->dev->rx_handler);
 	if (rx_handler) {
 		if (pt_prev) {
@@ -5039,6 +5058,7 @@ skip_classify:
 		}
 	}
 
+	/*还有vlan标记，说明找不到vlan id对应的设备。 */
 	if (unlikely(skb_vlan_tag_present(skb))) {
 		if (skb_vlan_tag_get_id(skb))
 			skb->pkt_type = PACKET_OTHERHOST;
@@ -5050,29 +5070,31 @@ skip_classify:
 	}
 
 
-	/* 2. 把skb 数据上传到 协议层 ip layer。 
+	/* 2. protocol layer dilivery  -- ip, arp, rarp
+
+		把skb 数据上传到 协议层 tcp/ip 的网络层。 
 		ptype_base是一个hash table (net/core/dev.c)
-		
 		struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
-
+	
 		每一种协议在上面的 hash table的一个slot里，添加一个过滤器到列表里。
-
 		用 dev_add_pack() 这个函数进行添加。
-		
-		dev_add_pack(&ip_packet_type); 这就是协议层如何注册自身，用于处理相应协议的 网络数据的。
-			处理函数 ip_rcv()
+		例如， ip protocol layer用dev_add_pack(&ip_packet_type)注册; net/ipv4/af_inet.c
+		这就是协议层如何注册自身，用于处理相应协议的网络数据的, 处理函数为ip_rcv()
 	*/
 	type = skb->protocol;
 	/* deliver only exact match when indicated */
+	/* 若未设置精确传送，则向未指定设备的协议处理例程传送一份数据 */
 	if (likely(!deliver_exact)) {
 		deliver_ptype_list_skb(skb, &pt_prev, orig_dev, type,
 				       &ptype_base[ntohs(type) &
 						   PTYPE_HASH_MASK]);
 	}
 
+	/* 交给与原设备的绑定的具体处理协议例程处理 */
 	deliver_ptype_list_skb(skb, &pt_prev, orig_dev, type,
 			       &orig_dev->ptype_specific);
 
+	/* 如果skb的当前设备与原设备不同（进行过vlan处理或桥处理），则交给绑定当前设备的具体处理协议函数处理 */
 	if (unlikely(skb->dev != orig_dev)) {
 		deliver_ptype_list_skb(skb, &pt_prev, orig_dev, type,
 				       &skb->dev->ptype_specific);
@@ -5290,6 +5312,7 @@ static int generic_xdp_install(struct net_device *dev, struct netdev_bpf *xdp)
 	return ret;
 }
 
+/* 默认没有开启RPS */
 static int netif_receive_skb_internal(struct sk_buff *skb)
 {
 	int ret;
@@ -5318,7 +5341,8 @@ static int netif_receive_skb_internal(struct sk_buff *skb)
 		struct rps_dev_flow voidflow, *rflow = &voidflow;
 		int cpu = get_rps_cpu(skb->dev, skb, &rflow);
 
-		/* 将skb放入 对应的cpu的backlog buffer中 */
+		/* 将skb放入 对应的cpu的backlog buffer中, 如果backlog满了，就会drop data。
+		可通过 /proc/net/softnet_stat查看信息*/
 		if (cpu >= 0) {
 			ret = enqueue_to_backlog(skb, cpu, &rflow->last_qtail);
 			rcu_read_unlock();
@@ -5327,6 +5351,7 @@ static int netif_receive_skb_internal(struct sk_buff *skb)
 	}
 #endif
 
+	/* 直接送入tcp/ip stack */
 	ret = __netif_receive_skb(skb);
 	rcu_read_unlock();
 	return ret;
@@ -5396,7 +5421,14 @@ static void netif_receive_skb_list_internal(struct list_head *head)
  *	NET_RX_SUCCESS: no congestion
  *	NET_RX_DROP: packet was dropped
  */
- /*接收skb，然后把skb直接上传到stack上*/
+ /* 接收skb，然后把skb直接上传到stack上 
+	none NAPI:
+		1. netif_rx, netif_rx_ni等函数是将skb放入cpu的backlog中，然后再出发backlog NAPI。
+		backlog napi被rx softirq执行后，会调用该函数将skb送入tcp/ip stack。
+
+	NAPI:
+		1. 如果没有gro，将直接再调用 __netif_receive_skb将skb融入tcp/ip stack.
+*/
 int netif_receive_skb(struct sk_buff *skb)
 {
 	int ret;
