@@ -1462,6 +1462,7 @@ static int copy_sighand(unsigned long clone_flags, struct task_struct *tsk)
 {
 	struct sighand_struct *sig;
 
+	/* 可以用CLONE_SIGHAND标志来控制是否共享tsk->sighand */
 	if (clone_flags & CLONE_SIGHAND) {
 		atomic_inc(&current->sighand->count);
 		return 0;
@@ -1517,6 +1518,7 @@ static int copy_signal(unsigned long clone_flags, struct task_struct *tsk)
 {
 	struct signal_struct *sig;
 
+	/* 如果是创建线程(CLONE_THREAD被置位)，不分配新的tsk->signal空间直接返回。*/
 	if (clone_flags & CLONE_THREAD)
 		return 0;
 
@@ -1750,6 +1752,10 @@ static __latent_entropy struct task_struct *copy_process(
 		goto fork_out;
 
 	retval = -ENOMEM;
+	/*
+	 * 复制父进程current的task_struct结构体到新进程p；
+	 * 这里已经包含做了signal的复制动作:p->signal=current->signal
+	 */
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
@@ -1908,9 +1914,16 @@ static __latent_entropy struct task_struct *copy_process(
 	retval = copy_fs(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_files;
+
+	/* 是否copy signal handle */
 	retval = copy_sighand(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_fs;
+
+	/*
+	 * 如果是创建线程(CLONE_THREAD被置位)，那么新进程和父进程共享tsk->signal结构，
+	 * 不会分配新的tsk->signal结构空间
+	 */
 	retval = copy_signal(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_sighand;
@@ -2224,6 +2237,7 @@ long _do_fork(unsigned long clone_flags,
 			trace = 0;
 	}
 
+	/* 复制父进程相关信息 */
 	p = copy_process(clone_flags, stack_start, stack_size,
 			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
 	add_latent_entropy();

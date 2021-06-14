@@ -643,7 +643,12 @@ el1_preempt:
 #endif
 
 /*
- * EL0 mode handlers.
+ * (1) 在arm64架构中，kernel运行在el1，用户态运行在el0。
+ * el0_sync是用户态发生异常的入口，el0_irq是用户态发生中断的的入口。
+ * 异常包括几种：系统调用el0_svc、数据异常el0_da、指令异常el0_ia等等几种。
+ */
+/*
+ * EL0 mode handlers. 用户态异常el0_sync
  */
 	.align	6
 el0_sync:
@@ -736,7 +741,7 @@ el0_cp15:
 
 el0_da:
 	/*
-	 * Data abort handling
+	 * Data abort handling 用户态数据访问el0_da
 	 */
 	mrs	x26, far_el1
 	enable_daif
@@ -847,6 +852,9 @@ el0_inv:
 	b	ret_to_user
 ENDPROC(el0_sync)
 
+/*
+ *  用户态中断el0_irq
+ */
 	.align	6
 el0_irq:
 	kernel_entry 0
@@ -896,12 +904,45 @@ ENDPROC(el0_error)
  */
 work_pending:
 	mov	x0, sp				// 'regs'
+	/* 对具体信号进行处理 */
 	bl	do_notify_resume
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_on		// enabled while in userspace
 #endif
 	ldr	x1, [tsk, #TSK_TI_FLAGS]	// re-check for single-step
 	b	finish_ret_to_user
+
+/*
+ * http://kernel.meizu.com/linux-signal.html
+ * (4) 返回用户态的处理函数ret_to_user 
+ * 判断thread_info->flags与#_TIF_WORK_MASK，是否有置位，有则跳转到work_pending执行。
+ * _TIF_SIGPENDING置位即代表了进程有信号需要处理。
+ * #define _TIF_WORK_MASK (_TIF_NEED_RESCHED | _TIF_SIGPENDING | _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE)
+ */
+
+/*
+ * 理解信号异步机制的关键是信号的响应时机，我们对一个进程发送一个信号以后，其实并没有硬中断发生，
+ * 只是简单把信号挂载到目标进程的信号 pending 队列上去，
+ * 信号真正得到执行的时机是: 进程执行完异常/中断返回到用户态的时刻
+
+ * 让信号看起来是一个异步中断的关键就是，正常的用户进程是会频繁的在用户态和内核态之间切换的
+ *（这种切换包括：系统调用、缺页异常、系统中断…），所以信号能很快的能得到执行。
+ * 但这也带来了一点问题，内核进程是: 不响应信号的，除非它刻意的去查询。
+ * 所以通常情况下我们无法通过kill命令去杀死一个内核进程。
+
+ * 如果需要内核进程响应信号，可以在内核进程中加入，如下代码：
+ * if (signal_pending(current)) {
+ * 	//自定义信号处理函数
+ * }
+ * flush_signals(current);
+ *
+ * Linux 传统的信号 1~31 为常规信号（regular signal），POSIX 还引入了一种新的信号实时信号（real-time signal）
+ * 编号为 32~64。它们的不同在于：常规信号同一个编号在 pending 队列中只存在一份，如果有重复的则直接丢弃；
+ * 实时信号的多个相同信号不能丢弃，需要保证每个信号都能送达。
+ * 
+ * 所谓的缺省操作：是在用户没有注册用户态的信号处理函数的情况下，默认的信号内核处理方法。在第4节中会详细的讲解。
+ */
+
 /*
  * "slow" syscall return path.
  */

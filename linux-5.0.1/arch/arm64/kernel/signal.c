@@ -808,6 +808,7 @@ static void handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 	/*
 	 * Set up the stack frame
 	 */
+	 /* 构造返回堆栈，将用户态返回地址替换成用户注册的信号处理函数&ksig->ka */
 	if (is_compat_task()) {
 		if (ksig->ka.sa.sa_flags & SA_SIGINFO)
 			ret = compat_setup_rt_frame(usig, ksig, oldset, regs);
@@ -841,6 +842,24 @@ static void handle_signal(struct ksignal *ksig, struct pt_regs *regs)
  * the kernel can handle, and then we build all the user-level signal handling
  * stack-frames in one go after that.
  */
+ /*
+ * 系统对信号的处理有三种方式：
+ * 1. 忽略：ignore
+ * 2. 调用用户态注册的处理函数：如果用户有注册信号处理函数，调用 sighand->action[signr-1] 中对应的注册函数
+ * 3. 调用默认的内核态处理函数：如果用户没有注册对应的处理函数，调用默认的内核处理
+ *
+ * 内核默认的信号处理：
+ *
+ * Terminate    进程被中止(杀死)。
+ * Dump	       进程被中止(杀死)，并且输出 dump 文件。
+ * Ignore       信号被忽略。
+ * Stop	       进程被停止，把进程设置为 TASK_STOPPED 状态。
+ * Continue     如果进程被停止（TASK_STOPPED），把它设置成 TASK_RUNNING 状态。
+ *
+ * 信号处理的核心函数就是 do_signal()，下面我们来详细分析一下具体实现。
+ * arch/arm64/kernel/signal.c:
+ * -> ret_to_user() -> do_notify_resume() -> do_signal() -> get_signal()/handle_signal()
+ */
 static void do_signal(struct pt_regs *regs)
 {
 	unsigned long continue_addr = 0, restart_addr = 0;
@@ -851,6 +870,7 @@ static void do_signal(struct pt_regs *regs)
 	/*
 	 * If we were from a system call, check for system call restarting...
 	 */
+	 /* 如果是 system call 被信号中断，判断是否需要重启 system call */
 	if (syscall) {
 		continue_addr = regs->pc;
 		restart_addr = continue_addr - (compat_thumb_mode(regs) ? 2 : 4);
@@ -880,6 +900,10 @@ static void do_signal(struct pt_regs *regs)
 	 * Get the signal to deliver. When running under ptrace, at this point
 	 * the debugger may change all of our registers.
 	 */
+	 /*
+	  * 从线程的信号 pending 队列中取出信号，
+	  *如果没有对应的用户自定义处理函数，则执行默认的内核态处理函数
+	  */
 	if (get_signal(&ksig)) {
 		/*
 		 * Depending on the signal settings, we may need to revert the
@@ -895,6 +919,7 @@ static void do_signal(struct pt_regs *regs)
 			regs->pc = continue_addr;
 		}
 
+		/* 如果有对应的用户自定义处理函数，则执行用户态处理函数 */
 		handle_signal(&ksig, regs);
 		return;
 	}
@@ -903,6 +928,7 @@ static void do_signal(struct pt_regs *regs)
 	 * Handle restarting a different system call. As above, if a debugger
 	 * has chosen to restart at a different PC, ignore the restart.
 	 */
+	 /* 重启被中断的system call */
 	if (syscall && regs->pc == restart_addr) {
 		if (retval == -ERESTART_RESTARTBLOCK)
 			setup_restart_syscall(regs);
@@ -912,6 +938,20 @@ static void do_signal(struct pt_regs *regs)
 	restore_saved_sigmask();
 }
 
+/* 对具体信号进行处理。
+ * 主要描述运行状态（TASK_RUNNING）进程对信号的响应时机：
+ * 信号发送后挂到目标进程的信号队列，进程返回用户态的时候在 do_notify_resume() 中处理信号。
+ * 
+ * 那么对于阻塞状态的进程又怎么样来响应信号呢？
+ * 让一个进程进入阻塞状态，我们可以选择让其进入可中断（TASK_INTERRUPTIBLE）或者
+ * 不可中断（TASK_UNINTERRUPTIBLE）状态，比如 mutex 操作分为 mutex_lock() 和 mutex_lock_interruptible()。
+ * 所谓的可中断和不可中断就是说是否可以被中断信号打断：如果进程处于可中断（TASK_INTERRUPTIBLE）状态，
+ * 信号发送函数会直接唤醒进程，让进程处理完内核态操作去返回用户态，让进程迅速去执行信号处理函数；
+ * 如果进程处于不可中断（TASK_UNINTERRUPTIBLE）状态俗称为 D 进程，信号只会挂到信号队列，但是没有机会去立即执行。
+ * 
+ * kernel/signal.c:
+ * __send_signal() -> complete_signal() -> signal_wake_up() -> signal_wake_up_state()
+ */
 asmlinkage void do_notify_resume(struct pt_regs *regs,
 				 unsigned long thread_flags)
 {
@@ -937,6 +977,7 @@ asmlinkage void do_notify_resume(struct pt_regs *regs,
 			if (thread_flags & _TIF_UPROBE)
 				uprobe_notify_resume(regs);
 
+			/* 具体的信号处理过程 */
 			if (thread_flags & _TIF_SIGPENDING)
 				do_signal(regs);
 
