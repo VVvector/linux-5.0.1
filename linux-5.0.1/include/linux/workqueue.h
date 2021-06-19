@@ -15,6 +15,15 @@
 #include <linux/cpumask.h>
 #include <linux/rcupdate.h>
 
+
+/*
+ * work ：工作。
+ * workqueue ：工作的集合。workqueue 和 work 是一对多的关系。
+ * worker ：工人。在代码中 worker 对应一个 work_thread() 内核线程。
+ * worker_pool：工人的集合。worker_pool 和 worker 是一对多的关系。
+ * pwq(pool_workqueue)：中间人 / 中介，负责建立起 workqueue 和 worker_pool 之间的关系。
+ 	workqueue 和 pwq 是一对多的关系，pwq 和 worker_pool 是一对一的关系。
+ */
 struct workqueue_struct;
 
 struct work_struct;
@@ -99,8 +108,19 @@ enum {
 	WORKER_DESC_LEN		= 24,
 };
 
+/*
+ * 描述一份待执行的工作。
+ * queue_work(): 将 work 压入到 workqueue 当中。
+ *		queue_work() -> queue_work_on() -> __queue_work()
+ * flush_work(): flush 某个 work，确保 work 执行完成。
+ *	怎么判断异步的 work 已经执行完成？这里面使用了一个技巧：
+ *	在目标 work 的后面插入一个新的 work wq_barrier，如果 wq_barrier 执行完成，那么目标 work 肯定已经执行完成。
+ *	flush_work() -> start_flush_work() -> insert_wq_barrier() -> wq_barrier_func()
+ * schedule_delayed_work(): 启动一个 timer，在 timer 定时到了以后调用 delayed_work_timer_fn() 
+ *	把 work 压入系统默认 wq system_wq。
+ */
 struct work_struct {
-	atomic_long_t data;
+	atomic_long_t data;/* 会根据不同的flags来确定data的高位意义为pool_workqueue指针还是pool ID号。WORK_STRUCT_PWQ */
 	struct list_head entry;
 	work_func_t func;
 #ifdef CONFIG_LOCKDEP
