@@ -843,7 +843,12 @@ EXPORT_SYMBOL(tcp_check_req);
  * locked is obtained, other packets cause the same connection to
  * be created.
  */
-
+/* 子传输控制块开始处理 TCP 段 
+ * 首先，如果此时刚刚创建的新的子传输控制块没有被用户进程占用，则根据第三次
+ * 握手的 ACK 段，调用tcp_rcv_state_process继续对子传输控制块做初始化。否则的
+ * 话，只能将其加入后备队列中，等空闲时再进行处理。虽然这种情况出现的概率小，但
+ * 是也是有可能发生的
+ */
 int tcp_child_process(struct sock *parent, struct sock *child,
 		      struct sk_buff *skb)
 {
@@ -855,6 +860,7 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 
 	tcp_segs_in(tcp_sk(child), skb);
 	if (!sock_owned_by_user(child)) {
+		/* 该函数用来处理 ESTABLISHED 和TIME_WAIT状态以外的 TCP 段，这里处理SYN_RECV状态 */
 		ret = tcp_rcv_state_process(child, skb);
 		/* Wakeup parent, send SIGIO */
 		if (state == TCP_SYN_RECV && child->sk_state != state)

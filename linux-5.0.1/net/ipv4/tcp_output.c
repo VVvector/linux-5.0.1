@@ -3415,6 +3415,11 @@ int tcp_send_synack(struct sock *sk)
  * Allocate one skb and build a SYNACK packet.
  * @dst is consumed : Caller should not use it again.
  */
+/*
+ * 该函数用来构造一个 SYN+ACK 段，
+ * 并初始化 TCP 首部及 SKB 中的各字段项，
+ * 填入相应的选项，如 MSS， SACK，窗口扩大因子，时间戳等。
+ */
 struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 				struct request_sock *req,
 				struct tcp_fastopen_cookie *foc,
@@ -3429,14 +3434,18 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 	struct tcphdr *th;
 	int mss;
 
+	/* 首先为将要发送的数据申请发送缓存，如果没有申请到，那就会返回 NULL。 */
 	skb = alloc_skb(MAX_TCP_HEADER, GFP_ATOMIC);
 	if (unlikely(!skb)) {
 		dst_release(dst);
 		return NULL;
 	}
+
+	/* 为 MAC 层， IP 层， TCP 层首部预留必要的空间。 */
 	/* Reserve space for headers. */
 	skb_reserve(skb, MAX_TCP_HEADER);
 
+	/* 根据attach_req来判断该执行如何执行相关操作。然后设置发送缓存的目的路由。 */
 	switch (synack_type) {
 	case TCP_SYNACK_NORMAL:
 		skb_set_owner_w(skb, req_to_sk(req));
@@ -3456,8 +3465,10 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 	}
 	skb_dst_set(skb, dst);
 
+	/* 根据每一个路由器上的 mss 以及自身的 mss 来得到最大的 mss。*/
 	mss = tcp_mss_clamp(tp, dst_metric_advmss(dst));
 
+	/* 清除选项，并且设置相关时间戳。 */
 	memset(&opts, 0, sizeof(opts));
 #ifdef CONFIG_SYN_COOKIES
 	if (unlikely(req->cookie_ts))
@@ -3466,6 +3477,7 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 #endif
 		skb->skb_mstamp_ns = tcp_clock_ns();
 
+	/* 查看是否有 MD5 选项，有的话构造出相应的 md5 */
 #ifdef CONFIG_TCP_MD5SIG
 	rcu_read_lock();
 	md5 = tcp_rsk(req)->af_specific->req_md5_lookup(sk, req_to_sk(req));
@@ -3474,9 +3486,11 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 	tcp_header_size = tcp_synack_options(sk, req, mss, skb, &opts, md5,
 					     foc) + sizeof(*th);
 
+	/* 得到 tcp 的头部大小，然后进行大小设置，并且重置传输层的头部。 */
 	skb_push(skb, tcp_header_size);
 	skb_reset_transport_header(skb);
 
+	/* 清空 tcp 头部，并设置 tcp 头部的各个字段 */
 	th = (struct tcphdr *)skb->data;
 	memset(th, 0, sizeof(struct tcphdr));
 	th->syn = 1;
@@ -3485,6 +3499,11 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 	th->source = htons(ireq->ir_num);
 	th->dest = ireq->ir_rmt_port;
 	skb->mark = ireq->ir_mark;
+
+	/* 首先初始化不含数据的 tcp 报文，然后设置相关的序列号，确认序列号，窗口大小，
+	 * 选项字段，以及 TCP 数据偏移，之所以除以 4，是 doff 的单位是 32 位字，即以四个字
+	 * 节长的字为计算单位。
+	 */
 	skb->ip_summed = CHECKSUM_PARTIAL;
 	th->seq = htonl(tcp_rsk(req)->snt_isn);
 	/* XXX data is queued and acked as is. No buffer/window check */
@@ -3496,6 +3515,9 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
 	th->doff = (tcp_header_size >> 2);
 	__TCP_INC_STATS(sock_net(sk), TCP_MIB_OUTSEGS);
 
+	/* 最后判断是否需要 md5 哈希值，如果需要的话，就进行添加。最后返回生成包含
+	 * SYN+ACK 段的 skb。
+	 */
 #ifdef CONFIG_TCP_MD5SIG
 	/* Okay, we have all we need - do the md5 hash if needed */
 	if (md5)
@@ -3713,6 +3735,7 @@ done:
 }
 
 /* Build a SYN and send it off. */
+/* 真正构造 SYN 包并发送 */
 int tcp_connect(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -3726,24 +3749,36 @@ int tcp_connect(struct sock *sk)
 
 	tcp_connect_init(sk);
 
+	/* 如果 repair 位被置 1，那么结束 TCP 连接 */
 	if (unlikely(tp->repair)) {
 		tcp_finish_connect(sk, NULL);
 		return 0;
 	}
 
+	/* 分配一个 sk_buff */
 	buff = sk_stream_alloc_skb(sk, 0, sk->sk_allocation, true);
 	if (unlikely(!buff))
 		return -ENOBUFS;
 
+	/* 初始化 skb，并自增 write_seq 的值 */
 	tcp_init_nondata_skb(buff, tp->write_seq++, TCPHDR_SYN);
+
+	/* 设置时间戳 */
 	tcp_mstamp_refresh(tp);
 	tp->retrans_stamp = tcp_time_stamp(tp);
+
+	/* 将当前的 sk_buff 添加到发送队列中 */
 	tcp_connect_queue_skb(sk, buff);
+
+	/* 支持显式拥塞控制 */
 	tcp_ecn_send_syn(sk, buff);
 	tcp_rbtree_insert(&sk->tcp_rtx_queue, buff);
 
 
-	/*  发送SYN 数据包 */
+	/*
+	 * 发送 SYN 包，这里同时还考虑了 Fast Open 的情况，意思就是
+	 * 可以在连接建立的时候同时发数据。
+	 */
 	/* Send off SYN; include data in Fast Open. */
 	err = tp->fastopen_req ? tcp_send_syn_data(sk, buff) :
 	      tcp_transmit_skb(sk, buff, 1, sk->sk_allocation);
@@ -3753,6 +3788,7 @@ int tcp_connect(struct sock *sk)
 	/* We change tp->snd_nxt after the tcp_transmit_skb() call
 	 * in order to make this packet get counted in tcpOutSegs.
 	 */
+	/* send next 下一个待发送字节的序列号 */
 	tp->snd_nxt = tp->write_seq;
 	tp->pushed_seq = tp->write_seq;
 	buff = tcp_send_head(sk);
@@ -3763,7 +3799,7 @@ int tcp_connect(struct sock *sk)
 	TCP_INC_STATS(sock_net(sk), TCP_MIB_ACTIVEOPENS);
 
 
-	/* 复位重传定时器 */
+	/* 设定超时重传定时器 */
 	/* Timer for repeating the SYN until an answer. */
 	inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
 				  inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
@@ -3833,6 +3869,7 @@ void __tcp_send_ack(struct sock *sk, u32 rcv_nxt)
 {
 	struct sk_buff *buff;
 
+	/* 如果当前的套接字已经被关闭了，那么直接返回。 */
 	/* If we have been reset, we may not send again. */
 	if (sk->sk_state == TCP_CLOSE)
 		return;
@@ -3841,6 +3878,7 @@ void __tcp_send_ack(struct sock *sk, u32 rcv_nxt)
 	 * tcp_transmit_skb() will set the ownership to this
 	 * sock.
 	 */
+	/* 为数据包分配空间 */
 	buff = alloc_skb(MAX_TCP_HEADER,
 			 sk_gfp_mask(sk, GFP_ATOMIC | __GFP_NOWARN));
 	if (unlikely(!buff)) {
@@ -3851,6 +3889,7 @@ void __tcp_send_ack(struct sock *sk, u32 rcv_nxt)
 		return;
 	}
 
+	/* 初始化 ACK 包 */
 	/* Reserve space for headers and prepare control bits. */
 	skb_reserve(buff, MAX_TCP_HEADER);
 	tcp_init_nondata_skb(buff, tcp_acceptable_seq(sk), TCPHDR_ACK);
@@ -3866,6 +3905,9 @@ void __tcp_send_ack(struct sock *sk, u32 rcv_nxt)
 }
 EXPORT_SYMBOL_GPL(__tcp_send_ack);
 
+/* 第三次握手：发送ACK包
+ * 该函数用于发送 ACK，并更新窗口的大小
+ */
 void tcp_send_ack(struct sock *sk)
 {
 	__tcp_send_ack(sk, tcp_sk(sk)->rcv_nxt);

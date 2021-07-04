@@ -199,11 +199,22 @@ static int tcp_v4_pre_connect(struct sock *sk, struct sockaddr *uaddr,
 }
 
 /* This will initiate an outgoing connection. */
+/* 第一次握手：构造并发送SYN包。
+ * tcp_v4_connect的主要作用是进行一系列的判断，根据用户提供的目的地址初始化传输控制块，并调用相关函
+ * 数发送 SYN 包。
+ */
 int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
+	/* sockaddr_in结构体用于描述一个Internet(IP)套接字的地址 */
 	struct sockaddr_in *usin = (struct sockaddr_in *)uaddr;
 	struct inet_sock *inet = inet_sk(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
+
+	/*
+	 * 网络协议主要使用大端存储，
+	 * be16 means 16 bits stored with big-endian
+	 * be32,the same.
+	 */
 	__be16 orig_sport, orig_dport;
 	__be32 daddr, nexthop;
 	struct flowi4 *fl4;
@@ -212,15 +223,24 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	struct ip_options_rcu *inet_opt;
 	struct inet_timewait_death_row *tcp_death_row = &sock_net(sk)->ipv4.tcp_death_row;
 
+	/* 检验目的地址长度是否有效 */
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
 
-	if (usin->sin_family != AF_INET)
+	/* 检验协议族是否正确 */
+	if (usin->sin_family != AF_INET) //IPv4地址域
 		return -EAFNOSUPPORT;
 
+	/* 将下一跳地址和目的地址暂时设置为用户传入的 IP 地址 */
 	nexthop = daddr = usin->sin_addr.s_addr;
 	inet_opt = rcu_dereference_protected(inet->inet_opt,
 					     lockdep_sock_is_held(sk));
+
+	/* 如果选择源地址路由，则将下一跳地址设置为 IP 选项中的 faddr-first hop address。
+	 * 源地址路由是一种特殊的路由策略。一般路由都是通过目的地址来进行的。而有时
+	 * 也需要通过源地址来进行路由，例如在有多个网卡等情况下，可以根据源地址来决定走
+	 * 哪个网卡等等。
+	 */
 	if (inet_opt && inet_opt->opt.srr) {
 		if (!daddr)
 			return -EINVAL;
@@ -230,9 +250,12 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	/* 源端口，目的端口 */
 	orig_sport = inet->inet_sport;
 	orig_dport = usin->sin_port;
-	fl4 = &inet->cork.fl.u.ip4;
+	fl4 = &inet->cork.fl.u.ip4; /* 对应于 ipv4 的流 */
 
-	/* 查找路由表  */
+	/* 获取目标的路由缓存项，如果路由查找命中，则生成一个相应的路由缓存项，
+	 * 这个缓存项不但可以用于当前待发送的 SYN 段，而且对后续的所有数据包都
+	 * 可以起到一个加速路由查找的作用。
+	 */
 	rt = ip_route_connect(fl4, nexthop, inet->inet_saddr,
 			      RT_CONN_FLAGS(sk), sk->sk_bound_dev_if,
 			      IPPROTO_TCP,
@@ -244,26 +267,38 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		return err;
 	}
 
+	/*TCP 不能使用类型为组播或多播的路由缓存项 */
 	if (rt->rt_flags & (RTCF_MULTICAST | RTCF_BROADCAST)) {
 		ip_rt_put(rt);
 		return -ENETUNREACH;
 	}
 
+	/* 如果 IP 选项为空或者没有开启源路由功能，则采用查找到的缓存项 */
 	if (!inet_opt || !inet_opt->opt.srr)
 		daddr = fl4->daddr;
 
+	/* 如果没有设置源地址，则设置为缓存项中的源地址 */
 	if (!inet->inet_saddr)
 		inet->inet_saddr = fl4->saddr;
 	sk_rcv_saddr_set(sk, inet->inet_saddr);
 
+	/*
+	 * 如果该传输控制块的时间戳已被使用过，则重置各状态
+	 * rx_opt: tcp_options_received
+	 */
+
 	if (tp->rx_opt.ts_recent_stamp && inet->inet_daddr != daddr) {
 		/* Reset inherited state */
+		/* 下一个待发送的 TCP 段中的时间戳回显值 */
 		tp->rx_opt.ts_recent	   = 0;
+
+		/* 从接收到的段中取出时间戳 */
 		tp->rx_opt.ts_recent_stamp = 0;
 		if (likely(!tp->repair))
 			tp->write_seq	   = 0;
 	}
 
+	/* 设置传输控制块 */
 	inet->inet_dport = usin->sin_port;
 	sk_daddr_set(sk, daddr);
 
@@ -271,7 +306,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (inet_opt)
 		inet_csk(sk)->icsk_ext_hdr_len = inet_opt->opt.optlen;
 
-	/* 设置MSS */
+	/* 设置MSS大小 */
 	tp->rx_opt.mss_clamp = TCP_MSS_DEFAULT;
 
 	/* Socket identity is still unknown (sport may be zero).
@@ -279,7 +314,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	 * lock select source port, enter ourselves into the hash tables and
 	 * complete initialization after this.
 	 */
-	 /* 建立连接的数据包 SYN packet */
+	 /* 将 TCP 的状态设置为 SYN_SENT */
 	tcp_set_state(sk, TCP_SYN_SENT);
 
 	/* 为这个连接绑定一个port */
@@ -289,6 +324,10 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 	sk_set_txhash(sk);
 
+	/*
+	 * 如果源端口或者目的端口发生改变，则需要重新查找路由，
+	 * 并用新的路由缓存项更新 sk 中保存的路由缓存项。
+	 */
 	rt = ip_route_newports(fl4, rt, orig_sport, orig_dport,
 			       inet->inet_sport, inet->inet_dport, sk);
 	if (IS_ERR(rt)) {
@@ -296,11 +335,17 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		rt = NULL;
 		goto failure;
 	}
+
+	/* 将目的地址提交到套接字 */
 	/* OK, now commit destination to socket.  */
 	sk->sk_gso_type = SKB_GSO_TCPV4;
 	sk_setup_caps(sk, &rt->dst);
 	rt = NULL;
 
+	/*
+	 * 如果没有设置序号，则计算初始序号
+	 * 序号与双方的地址与端口号有关系
+	 */
 	if (likely(!tp->repair)) {
 		if (!tp->write_seq)
 			tp->write_seq = secure_tcp_seq(inet->inet_saddr,
@@ -312,6 +357,10 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 						 inet->inet_daddr);
 	}
 
+	/*
+	 * 计算 IP 首部的 id 域的值
+	 * 全局变量 jiffies 用来记录自系统启动以来产生的节拍的总数
+	 */
 	inet->inet_id = tp->write_seq ^ jiffies;
 
 	if (tcp_fastopen_defer_connect(sk, &err))
@@ -319,7 +368,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (err)
 		goto failure;
 
-	/*  发送 SYN 数据包 */
+	/* 调用 tcp_connect 构造并发送 SYN 包 */
 	err = tcp_connect(sk);
 
 	if (err)
@@ -332,6 +381,7 @@ failure:
 	 * This unhashes the socket and releases the local port,
 	 * if necessary.
 	 */
+	 /* 将状态设定为 TCP_CLOSE，释放端口，并返回错误值 */
 	tcp_set_state(sk, TCP_CLOSE);
 	ip_rt_put(rt);
 	sk->sk_route_caps = 0;
@@ -962,12 +1012,20 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
 	int err = -1;
 	struct sk_buff *skb;
 
+	/* 首先，如果传进来的 dst 为空或者根据连接请求块中的信息查询路由表，如果没有
+	 * 查到，那么就直接退出。
+	 */
 	/* First, grab a route. */
 	if (!dst && (dst = inet_csk_route_req(sk, &fl4, req)) == NULL)
 		return -1;
 
+	/* 根据当前的传输控制块，路由信息，请求等信息构建 syn+ack 段 */
 	skb = tcp_make_synack(sk, dst, req, foc, synack_type);
 
+	/*
+	 * 如果构建成功的话，就生成 TCP 校验码，然后调用
+	 * ip_build_and_send_pkt 生成 IP 数据报并且发送出去。
+	 */
 	if (skb) {
 		__tcp_v4_send_check(skb, ireq->ir_loc_addr, ireq->ir_rmt_addr);
 
@@ -976,6 +1034,11 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
 					    ireq->ir_rmt_addr,
 					    rcu_dereference(ireq->ireq_opt));
 		rcu_read_unlock();
+
+		/* 
+		 * net_xmit_eval用于过滤错误码中的拥塞提示错误，换句话说，就是如果错误是由于拥
+		 * 塞造成的，那么就忽略掉，否则就返回错误码。
+		 */
 		err = net_xmit_eval(err);
 	}
 
@@ -1403,11 +1466,17 @@ static const struct tcp_request_sock_ops tcp_request_sock_ipv4_ops = {
 	.route_req	=	tcp_v4_route_req,
 	.init_seq	=	tcp_v4_init_seq,
 	.init_ts_off	=	tcp_v4_init_ts_off,
+
+	/* 第二次握手：发送SYN + ACK段 */
 	.send_synack	=	tcp_v4_send_synack,
 };
 
 int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 {
+	/* 
+	 * 如果一个 SYN 段是要被发送到广播地址和组播地址，则直接 drop 掉，然后返回 0。
+	 * 否则的话，就继续调用 tcp_conn_request() 进行连接处理。
+	 */
 	/* Never answer to SYNs send to broadcast or multicast */
 	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
 		goto drop;
@@ -1527,11 +1596,25 @@ put_and_exit:
 }
 EXPORT_SYMBOL(tcp_v4_syn_recv_sock);
 
+/*
+ * TCP 的 SYN Cookie 机制是为了防范 SYN Flood 攻击而产生的。其思想是在收到
+ * TCP SYN 包后，根据 SYN 包的信息计算一个 cookie 值作为 SYN+ACK 报的初始序
+ * 列号。当客户端返回 ACK 包时，根据返回的确认序号来判断该连接是否为一个正常的
+ * 连接。 tcp_v4_cookie_check函数正是用于检查该 cookie 值的。
+ */
 static struct sock *tcp_v4_cookie_check(struct sock *sk, struct sk_buff *skb)
 {
 #ifdef CONFIG_SYN_COOKIES
 	const struct tcphdr *th = tcp_hdr(skb);
 
+	/* 1. 显然对于第一次握手的时候，接收到的是 syn 包。此时还没有 cookie 值，故而直接返回了 sk。
+	 * 2. 在第三次握手阶段，并不是
+	 *	syn 包, 内核就会执行cookie_v4_check。在这个函数中，服务器会将客户端的 ACK 序
+		列号减去 1, 得到 cookie 比较值，然后将客户端的 IP 地址，客户端端口，服务器 IP 地
+		址和服务器端口，接收到的 TCP 序列好以及其它一些安全数值等要素进行 hash 运算
+		后，与该 cookie 比较值比较，如果相等，则直接完成三次握手，此时不必查看该连接是
+		否属于请求连接队列。
+	 */
 	if (!th->syn)
 		sk = cookie_v4_check(sk, skb);
 #endif
@@ -1545,6 +1628,20 @@ static struct sock *tcp_v4_cookie_check(struct sock *sk, struct sk_buff *skb)
  * doing backlog processing we use the BH locking scheme.
  * This is because we cannot sleep with the original spinlock
  * held.
+ */
+/*
+ * TCP被动打开-服务器：
+ * tcp 想要被动打开，就必须得先进行 listen 调用。而对于一台主机，它如果想要作
+ * 为服务器，它会在什么时候进行 listen 调用呢？不难想到，它在启动某个需要 TCP 连
+ * 接的高级应用程序的时候，就会执行 listen 调用。经过 listen 调用之后，系统内部其实
+ * 创建了一个监听套接字，专门负责监听是否有数据发来，而不会负责传输数据。
+ * 接着客户端就开始等待接收 SYN 段，然后回复 SYN+ACK 段，最后接收 ACK 段，
+ * 三次握手建立连接。
+ */
+
+/* 第一次握手：客户端-接受 SYN 段；服务端-接收ACK包
+ * 在进行第一次握手的时候， TCP 必然处于 LISTEN 状态。传输控制块接收处理的
+ * 段都由tcp_v4_do_rcv来处理。
  */
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
@@ -1569,15 +1666,27 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 		return 0;
 	}
 
-	/* 检查数据包的正确性*/
+	/* 基于伪首部累加和进行全包的校验和，判断包是否传输正确 */
 	/*数据包校验和 */
 	if (tcp_checksum_complete(skb))
 		goto csum_err;
 
-	/* 套接字状态切换与数据包处理 - 侦听状态 - LISTEN*/
+	/* 套接字状态切换与数据包处理 - 侦听状态 - LISTEN */
+	/*
+	 * 在服务器最后一次握手的时候，其实传输控制块仍然处于 LISTEN 状态，但是这时候
+	 * cookie 检查得到的传输控制块已经不是侦听传输控制块了，故而会执行tcp_child_process来
+	 * 初始化子传输控制块。如果初始化失败的话（返回值非零），就会给客户端发送 RST 段
+	 * 进行复位。
+	*/
 	if (sk->sk_state == TCP_LISTEN) {
+		/* 进行相应的 cookie 检查 */
 		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
 
+		/*
+		 * NULL，错误
+		 * nsk == sk，接收到 SYN
+		 * nsk != sk，接收到 ACK
+		 */
 		if (!nsk)
 			goto discard;
 
@@ -1591,6 +1700,11 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 		}
 	} else
 		sock_rps_save_rxhash(sk, skb);
+
+	/* 接下来处理收到的数据包，在 Linux 的 TCP 实现中， tcp_rcv_state_process 负责根
+	 * 据接收到的包维护 TCP 的状态机。不止是 SYN 段，其他收到的段大多也会交给该函数
+	 * 处理。
+	 */
 
 	/* 当前套接字不处于侦听状态 - LISTEN */
 	if (tcp_rcv_state_process(sk, skb)) {
@@ -2114,6 +2228,8 @@ const struct inet_connection_sock_af_ops ipv4_specific = {
 
 	.rebuild_header	   = inet_sk_rebuild_header,
 	.sk_rx_dst_set	   = inet_sk_rx_dst_set,
+
+	/* listen状态下，处理ack包。即服务端用来处理客户端连接请求的函数。*/
 	.conn_request	   = tcp_v4_conn_request,
 	.syn_recv_sock	   = tcp_v4_syn_recv_sock,
 	.net_header_len	   = sizeof(struct iphdr),
@@ -2640,6 +2756,12 @@ struct proto tcp_prot = {
 	/* 从tcp_close到tcp_shutdow的函数，用于管理TCP连接的函数实例。 */
 	.close			= tcp_close,
 	.pre_connect		= tcp_v4_pre_connect,
+
+	/*
+	 * 客户端的主动打开是通过 connect 系统调用等一系列操作来完成的，这一系统调用
+	 * 最终会调用传输层的tcp_v4_connect函数。基本就是客户端发送 SYN 段，接收 SYN+ACK
+	 * 段，最后再次发送 ACK 段给服务器。
+	 */
 	.connect		= tcp_v4_connect,
 	.disconnect		= tcp_disconnect,
 	.accept			= inet_csk_accept,
