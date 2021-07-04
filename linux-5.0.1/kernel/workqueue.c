@@ -780,10 +780,12 @@ static struct worker_pool *get_work_pool(struct work_struct *work)
 
 	assert_rcu_or_pool_mutex();
 
+	/* 表示存的worker_pool的指针 */
 	if (data & WORK_STRUCT_PWQ)
 		return ((struct pool_workqueue *)
 			(data & WORK_STRUCT_WQ_DATA_MASK))->pool;
 
+	/* 表示存的worker_pool的id */
 	pool_id = data >> WORK_OFFQ_POOL_SHIFT;
 	if (pool_id == WORK_OFFQ_POOL_NONE)
 		return NULL;
@@ -1524,20 +1526,23 @@ retry:
 	 * pool to guarantee non-reentrancy.
 	 */
 	 /* 
-	  * 2. get_work_pool获取上一次执行work的worker_pool，如果本次执行的worker_pool与上次执行的worker_pool不一致，
-	  * 且通过find_worker_executing_work判断work是否正在某个worker_pool中的worker中执行，考虑到缓存热度，
-	  * 放到该worker执行是更合理的选择，进而根据该worker获取到pool_workqueue；
-	  */
+	  * 2. get_work_pool获取上一次执行work的worker_pool。*/
 	last_pool = get_work_pool(work);
 
-	/* 判断给work上一次被执行的worker_pool与当前执行的worker_pool是否是同一个 */
+	/* 判断给work上一次被执行的worker_pool与当前执行的worker_pool是否是同一个。
+	 * 如果本次执行的worker_pool与上次执行的worker_pool不一致，
+	 * 且通过find_worker_executing_work判断work是否正在某个worker_pool中的worker中执行，考虑到缓存热度，
+	 * 放到该worker执行是更合理的选择，进而根据该worker获取到pool_workqueue； 
+	 */
 	if (last_pool && last_pool != pwq->pool) {
 		struct worker *worker;
 
 		spin_lock(&last_pool->lock);
 
+		/* 判断本work是否正在被执行，且返回正在执行work的worker。 */
 		worker = find_worker_executing_work(last_pool, work);
 
+		/* 正在执行本work的worker的current wq和本次要enqueue的wq一样，则用该pwq。 */
 		if (worker && worker->current_pwq->wq == wq) {
 			pwq = worker->current_pwq;
 		} else {
@@ -2205,8 +2210,8 @@ static bool manage_workers(struct worker *worker)
  * spin_lock_irq(pool->lock) which is released and regrabbed.
  */
 /*
- * work可能在同一个CPU上不同的worker中运行，直接退出；
- * 调用worker->current_func()，完成最终work的回调函数执行；
+ * 1. 如果work正在同一个CPU上不同的worker中运行，直接退出；
+ * 2. 调用worker->current_func()，完成最终work的回调函数执行；
  */
 static void process_one_work(struct worker *worker, struct work_struct *work)
 __releases(&pool->lock)
@@ -2251,7 +2256,7 @@ __acquires(&pool->lock)
 	}
 
 	/* claim and dequeue */
-	/* 将 worker 加入 busy 队列 pool->busy_hash */
+	/* 将 worker 加入 busy 队列 pool->busy_hash，即表明本worker正在执行work。 */
 	debug_work_deactivate(work);
 	hash_add(pool->busy_hash, &worker->hentry, (unsigned long)work);
 	worker->current_work = work;
@@ -2290,7 +2295,7 @@ __acquires(&pool->lock)
 	 */
 	/*
 	 * 在 UNBOUND 或者 CPU_INTENSIVE work 中判断是否需要唤醒 idle worker
-	 * 普通 work 不会执行这个操作
+	 * 普通work不会执行这个操作
 	 */
 	if (need_more_worker(pool))
 		wake_up_worker(pool);
@@ -2301,7 +2306,9 @@ __acquires(&pool->lock)
 	 * PENDING and queued state changes happen together while IRQ is
 	 * disabled.
 	 */
-	 /* 记录本次pool id，以及清除work的pending bit。到这里 就可以再次enqueue 该work了。 */
+	 /* 记录本次pool id，以及清除work的pending bit。
+	  * 到这里 就可以再次enqueue 该work了。
+	  */
 	set_work_pool_and_clear_pending(work, pool->id);
 
 	spin_unlock_irq(&pool->lock);
@@ -2403,6 +2410,7 @@ static void process_scheduled_works(struct worker *worker)
 	}
 }
 
+/* 表示该kthread是workqueue worker */
 static void set_pf_worker(bool val)
 {
 	mutex_lock(&wq_pool_attach_mutex);
@@ -2452,6 +2460,7 @@ static int worker_thread(void *__worker)
 	struct worker *worker = __worker;
 	struct worker_pool *pool = worker->pool;
 
+	/* 设置本kthread是worker thread类型。 */
 	/* tell the scheduler that this is a workqueue worker */
 	set_pf_worker(true);
 
@@ -2509,6 +2518,7 @@ recheck:
 	 */
 	worker_clr_flags(worker, WORKER_PREP | WORKER_REBOUND);
 
+	/* 会一直执行work，直到pool->worklist为空，且pool中只有一个worker在执行。 */
 	do {
 		/* 如果 pool->worklist 不为空，从其中取出一个 work 进行处理。 */
 		struct work_struct *work =
@@ -2525,9 +2535,9 @@ recheck:
 				process_scheduled_works(worker);
 		} else {
 			/*
-			 * 执行系统特意scheduled给某个 worker 的 work。
-			 * 普通的 work 是放在池子的公共 list 中的 pool->worklist，
-			 * 只有一些特殊的 work 被特意派送给某个 worker 的 worker->scheduled。
+			 * 执行系统特意scheduled给某个worker的work。
+			 * 普通的work是放在池子的公共list中的，即pool->worklist，
+			 * 只有一些特殊的work被特意派送给某个worker的worker->scheduled。
 			 * 包括：
 			 * 	1、执行 flush_work 时插入的 barrier work；
 			 * 	2、collision 时, 从其他 worker 推送到本 worker 的 work。
@@ -2628,6 +2638,7 @@ repeat:
 		 */
 		WARN_ON_ONCE(!list_empty(scheduled));
 		list_for_each_entry_safe(work, n, &pool->worklist, entry) {
+			/* 将该wq对应worker_pool->worklist的work转移到pool->scheduled中，便于后续帮忙执行work。*/
 			if (get_work_pwq(work) == pwq) {
 				if (first)
 					pool->watchdog_ts = jiffies;
@@ -2636,6 +2647,7 @@ repeat:
 			first = false;
 		}
 
+		/* 会帮忙执行scheduled中的work。 */
 		if (!list_empty(scheduled)) {
 			process_scheduled_works(rescuer);
 
@@ -3687,6 +3699,7 @@ static struct worker_pool *get_unbound_pool(const struct workqueue_attrs *attrs)
 
 	lockdep_assert_held(&wq_pool_mutex);
 
+	/* 查找是否已经有对应的worker_pool了，如果有，则直接退出，否则，需要重新创建 worker_pool。 */
 	/* do we already have a matching pool? */
 	hash_for_each_possible(unbound_pool_hash, pool, hash_node, hash) {
 		if (wqattrs_equal(pool->attrs, attrs)) {
@@ -4346,7 +4359,7 @@ static int init_rescuer(struct workqueue_struct *wq)
 	return 0;
 }
 
-/* 创建一个workqueue, 用宏 alloc_workqueue() 调用。*/
+/* 用alloc_workqueue() 去创建一个新的workqueue */
 struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 					       unsigned int flags,
 					       int max_active,
@@ -4365,6 +4378,7 @@ struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 	 * workqueue, keep the previous behavior to avoid subtle breakages
 	 * on NUMA.
 	 */
+	 /* 如果是下面情况，则表示 该workqueue是ordered unbount workqueue。 */
 	if ((flags & WQ_UNBOUND) && max_active == 1)
 		flags |= __WQ_ORDERED;
 
@@ -4415,7 +4429,7 @@ struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 		goto err_free_wq;
 
 	/* 如果有WQ_MEM_RECLAIM, 则需要提前创建对应的rescuer_thread()内核进程。
-	 * 当内存紧张时，会用该进程执行work。
+	 * 当内存紧张时，会用代理执行workqueue中的work。
 	 */
 	if (wq_online && init_rescuer(wq) < 0)
 		goto err_destroy;

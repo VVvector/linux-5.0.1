@@ -451,9 +451,9 @@ static int ip_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 	calling dst_input(skb) which in turn calls the input function pointer on the packet’s dst_entry
 	structure that was affixed by the routing system.
 	*/
-	/*  */
+	/* 继续调用 ip_local_deliver()或者ip_forward() 下一步发送 */
 	if (ret != NET_RX_DROP)
-		ret = dst_input(skb); //ip_local_deliver()
+		ret = dst_input(skb);
 	return ret;
 }
 

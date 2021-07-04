@@ -47,6 +47,8 @@ int inet_rtx_syn_ack(const struct sock *parent, struct request_sock *req);
 
 /* struct request_sock - mini sock to represent a connection request
  */
+
+/*  该结构用于表示一个简单的 TCP 连接请求。 */
 struct request_sock {
 	struct sock_common		__req_common;
 #define rsk_refcnt			__req_common.skc_refcnt

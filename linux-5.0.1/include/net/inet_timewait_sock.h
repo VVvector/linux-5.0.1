@@ -34,6 +34,10 @@ struct inet_bind_bucket;
  * problems of sockets in such a state on heavily loaded servers, but
  * without violating the protocol specification.
  */
+ /*
+  * 在进入到等待关闭的状态时，已经不需要完整的传输控制块了。 Linux 为了减轻在
+  * 重负载情况下的内存消耗，定义了这个简化的结构体。
+  */
 struct inet_timewait_sock {
 	/*
 	 * Now struct sock also uses sock_common, so please just
@@ -62,11 +66,16 @@ struct inet_timewait_sock {
 #define tw_dr			__tw_common.skc_tw_dr
 
 	__u32			tw_mark;
+
+	/* 子状态，用于区分 FIN_WAIT2 和 TIMEWAIT */
 	volatile unsigned char	tw_substate;
+
+	/* 窗口缩放 */
 	unsigned char		tw_rcv_wscale;
 
 	/* Socket demultiplex comparisons on incoming packets. */
 	/* these three are in inet_sock */
+	/* 下面的部分都和 inet_sock 中的成员相对应的。 */
 	__be16			tw_sport;
 	/* And these are ours. */
 	unsigned int		tw_kill		: 1,
@@ -74,6 +83,8 @@ struct inet_timewait_sock {
 				tw_flowlabel	: 20,
 				tw_pad		: 2,	/* 2 bits hole */
 				tw_tos		: 8;
+
+	/* 超时计时器 */
 	struct timer_list	tw_timer;
 	struct inet_bind_bucket	*tw_tb;
 };

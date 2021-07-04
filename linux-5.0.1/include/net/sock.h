@@ -97,9 +97,15 @@ void SOCK_DEBUG(const struct sock *sk, const char *msg, ...)
  * between user contexts and software interrupt processing, whereas the
  * mini-semaphore synchronizes multiple users amongst themselves.
  */
+ /* 保护socket的锁结构 */
 typedef struct {
+	/* 同步进程和下半部的自旋锁 */
 	spinlock_t		slock;
+
+	/* 实际只有两个值，0：表示未被用户进程锁定，1：表示被用户进程锁定。 */
 	int			owned;
+
+	/* 当软中断锁定socket时，用户进程不能获取锁，进入此等待队列。 */
 	wait_queue_head_t	wq;
 	/*
 	 * We express the mutex-alike socket_lock semantics
@@ -149,6 +155,7 @@ typedef __u64 __bitwise __addrpair;
  *	This is the minimal network layer representation of sockets, the header
  *	for struct sock and struct inet_timewait_sock.
  */
+ /* socket的最小公共组成部分。由sock和inet_timewait_sock结构前面相同部分构成。 */
 struct sock_common {
 	/* skc_daddr and skc_rcv_saddr must be grouped on a 8 bytes aligned
 	 * address on 64bit arches : cf INET_MATCH()
@@ -173,10 +180,10 @@ struct sock_common {
 		};
 	};
 
-	unsigned short		skc_family;
-	volatile unsigned char	skc_state;
-	unsigned char		skc_reuse:4;
-	unsigned char		skc_reuseport:1;
+	unsigned short		skc_family; /* 所属协议族 */
+	volatile unsigned char	skc_state; /* 连接状态 */
+	unsigned char		skc_reuse:4; /* 是否可以重用地址和端口 */
+	unsigned char		skc_reuseport:1; /* 是否可以重用端口，例如tcp和udp同时使用一个端口。 */
 	unsigned char		skc_ipv6only:1;
 	unsigned char		skc_net_refcnt:1;
 	int			skc_bound_dev_if;
@@ -324,11 +331,19 @@ struct sock_common {
   *	@sk_txtime_deadline_mode: set deadline mode for SO_TXTIME
   *	@sk_txtime_unused: unused txtime flags
   */
+
+/*
+ * sock 结构是比较通用的网络层描述块，构成传输控制块的基础，与具体的协议族无关。
+ * 它描述了各协议族的公共信息，因此不能直接作为传输层控制块来使用。不同协议族的
+ * 传输层在使用该结构的时候都会对其进行拓展，来适合各自的传输特性。例如， inet_sock
+ * 结构由 sock 结构及其它特性组成，构成了 IPV4 协议族传输控制块的基础。
+ */
 struct sock {
 	/*
 	 * Now struct inet_timewait_sock also uses sock_common, so please just
 	 * don't add nothing before this first member (__sk_common) --acme
 	 */
+	 /* 公共信息，必须放在最前面。 */
 	struct sock_common	__sk_common;
 #define sk_node			__sk_common.skc_node
 #define sk_nulls_node		__sk_common.skc_nulls_node
@@ -364,10 +379,17 @@ struct sock {
 #define sk_flags		__sk_common.skc_flags
 #define sk_rxhash		__sk_common.skc_rxhash
 
+	/* 同步锁，一是用于用户进程读取数据与网络层向传输层传递数据之间的同步。二是用于软中断之间同步访问传输块。 */
 	socket_lock_t		sk_lock;
 	atomic_t		sk_drops;
-	int			sk_rcvlowat;
+	int			sk_rcvlowat; /* 接收缓存下限值 */
+
+	/* 错误链表。存放详细的出错信息。参见IP_RECVERR选项。 */
 	struct sk_buff_head	sk_error_queue;
+
+	/* 接收队列，等待用户进程读取。
+	 * 对TCP来说，只有接收到的数据不能直接复制到用户空间时才缓存到此。
+	 */
 	struct sk_buff_head	sk_receive_queue;
 	/*
 	 * The backlog queue is special, it is always used with
@@ -377,6 +399,9 @@ struct sock {
 	 * on 64bit arches, not because its logically part of
 	 * backlog.
 	 */
+	 /* 当接收数据时，锁被用户进程占用，就把数据先存放到该备用队列中。
+	  * 等释放时，用户进程再使用该队列数据。 只用于tcp。
+	  */
 	struct {
 		atomic_t	rmem_alloc;
 		int		len;
@@ -393,7 +418,7 @@ struct sock {
 #endif
 	int			sk_rcvbuf;
 
-	struct sk_filter __rcu	*sk_filter;
+	struct sk_filter __rcu	*sk_filter; /* 套接口过滤器。*/
 	union {
 		struct socket_wq __rcu	*sk_wq;
 		struct socket_wq	*sk_wq_raw;
@@ -402,29 +427,41 @@ struct sock {
 	struct xfrm_policy __rcu *sk_policy[2];
 #endif
 	struct dst_entry	*sk_rx_dst;
-	struct dst_entry __rcu	*sk_dst_cache;
+	struct dst_entry __rcu	*sk_dst_cache; /* 路由项缓存 */
 	atomic_t		sk_omem_alloc;
-	int			sk_sndbuf;
+	int			sk_sndbuf; /* 发送缓冲区长度上限。发送队列中报文数据总长度不能超过此值 */
 
 	/* ===== cache line for TX ===== */
-	int			sk_wmem_queued;
+	int			sk_wmem_queued; /* 发送队列中所有报文数据的总长度，目前仅用于TCP. */
+	
+	/* 为发送而分配的所有SKB数据区的总长度 */
 	refcount_t		sk_wmem_alloc;
 	unsigned long		sk_tsq_flags;
 	union {
 		struct sk_buff	*sk_send_head;
 		struct rb_root	tcp_rtx_queue;
 	};
+
+	/**
+	 * 向内核添加数据时，被缓冲的数据可能会在内核中形成多个待发送的IP分片。
+	 * 通过该指针将这些分片缓冲区连接起来。
+	 * 这是ip_append_data函数的输出结果。
+	 * 发送队列，对TCP来说，是重传队列和发送队列。sk_send_head之前是重传队列，之后是发送队列。
+	 */
 	struct sk_buff_head	sk_write_queue;
 	__s32			sk_peek_off;
 	int			sk_write_pending;
 	__u32			sk_dst_pending_confirm;
 	u32			sk_pacing_status; /* see enum sk_pacing */
-	long			sk_sndtimeo;
-	struct timer_list	sk_timer; //tcp用到的定时器
-	__u32			sk_priority;
+	long			sk_sndtimeo; /* 套接口层发送超时时间。参见SO_SNDTIMEO选项。*/
+	struct timer_list	sk_timer;   /* 根据TCP的不同状态，来实现连接定时器、FIN_WAIT_2定时器和TCP保活定时器。*/
+	__u32			sk_priority; /* 用于设置数据报的QoS类别。参见SO_PRIORITY和IP_TOS选项。*/
 	__u32			sk_mark;
+
+	/* pacing速率 */
 	unsigned long		sk_pacing_rate; /* bytes per second */
 	unsigned long		sk_max_pacing_rate;
+
 	struct page_frag	sk_frag;
 	netdev_features_t	sk_route_caps;
 	netdev_features_t	sk_route_nocaps;
@@ -455,25 +492,30 @@ struct sock {
 
 	unsigned int		sk_padding : 1,
 				sk_kern_sock : 1,
-				sk_no_check_tx : 1,
+				sk_no_check_tx : 1, /* 是否对UDP和RAWSOCK进行校验和，参见SO_NO_CHECK选项 */
 				sk_no_check_rx : 1,
 				sk_userlocks : 4,
-				sk_protocol  : 8, //在某个网络协议族中，该套接字属于哪个协议使用。
-				sk_type      : 16; //套接字类型，其值为SOCK_XXX形式。eg: SOCK_STREAM
+				sk_protocol  : 8, /* 在某个网络协议族中，该套接字属于哪个协议使用。*/
+				sk_type      : 16; /* 套接字类型，其值为SOCK_XXX形式。eg: SOCK_STREAM */
 #define SK_PROTOCOL_MAX U8_MAX
 	u16			sk_gso_max_segs;
 	u8			sk_pacing_shift;
-	unsigned long	        sk_lingertime;
-	struct proto		*sk_prot_creator;
+	unsigned long	        sk_lingertime; /* 关闭套接口前发送剩余数据的时间。参见SO_LINGER选项 */
+	struct proto		*sk_prot_creator; /* 传输层接口 */
 	rwlock_t		sk_callback_lock;
-	int			sk_err,
-				sk_err_soft;
-	u32			sk_ack_backlog;
-	u32			sk_max_ack_backlog;
+	int			sk_err, /* 记录当前传输层最后一次致命错误的错误码。应用层读取后恢复。 */
+				sk_err_soft; /* 非致命性错误，或者用作在socket被锁定时记录错误的后备成员。 */
+	u32			sk_ack_backlog; /* 当前已经建立的连接数。等待用户调用accept。 */
+	u32			sk_max_ack_backlog; /* 连接队列长度的上限。 */
 	kuid_t			sk_uid;
 	struct pid		*sk_peer_pid;
 	const struct cred	*sk_peer_cred;
-	long			sk_rcvtimeo;
+	long			sk_rcvtimeo; /* 套接口层接收超时时间。参见SO_RCVTIMEO选项。 */
+
+	/**
+	 * 在未启用SOCK_RCVTSTAMP选项时，记录报文接收数据到应用层的时间戳。
+	 * 当启用SOCK_RCVTSTAMP选项时，接收数据的时间戳记录在SKB的tstamp中。
+	 */
 	ktime_t			sk_stamp;
 #if BITS_PER_LONG==32
 	seqlock_t		sk_stamp_seq;
@@ -488,17 +530,33 @@ struct sock {
 				sk_txtime_report_errors : 1,
 				sk_txtime_unused : 6;
 
-	struct socket		*sk_socket;
-	void			*sk_user_data;
+	struct socket		*sk_socket; /* 指向相关套接口的指针 */
+	void			*sk_user_data; /* RPC层存放私有数据的指针，IPV4中未使用。 */
 #ifdef CONFIG_SECURITY
 	void			*sk_security;
 #endif
 	struct sock_cgroup_data	sk_cgrp_data;
 	struct mem_cgroup	*sk_memcg;
+
+	/* 当socket状态发生变化时，唤醒那些等待本套接口的进程。在创建套接口时初始化。 */
 	void			(*sk_state_change)(struct sock *sk);
 	void			(*sk_data_ready)(struct sock *sk);
+
+	/**
+	 * 在发送缓存大小发生变化时，或者套接口被释放时，唤醒等待本套接口的进程。
+	 * ipv4默认为sock_def_write_space，TCP中默认为sk_stream_write_space。
+	 */
 	void			(*sk_write_space)(struct sock *sk);
+
+	/**
+	 * 报告错误的回调函数。如果等待该套接口的进程正在睡眠，则将其唤醒。
+	 * ipv4中为sock_def_error_report。
+	 */
 	void			(*sk_error_report)(struct sock *sk);
+
+	/**
+	 * 后备队列接收函数。用于ipv4和PPPoE。
+	 */
 	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);
 #ifdef CONFIG_SOCK_VALIDATE_XMIT
@@ -506,6 +564,11 @@ struct sock {
 							struct net_device *dev,
 							struct sk_buff *skb);
 #endif
+
+	/**
+	 * 在释放传输控制块时，回调此函数释放相关资源。
+	 * ipv4中为inet_sock_destruct。
+	 */
 	void                    (*sk_destruct)(struct sock *sk);
 	struct sock_reuseport __rcu	*sk_reuseport_cb;
 	struct rcu_head		sk_rcu;
@@ -775,14 +838,14 @@ static inline struct user_namespace *sk_user_ns(struct sock *sk)
 
 /* Sock flags */
 enum sock_flags {
-	SOCK_DEAD,
-	SOCK_DONE,
-	SOCK_URGINLINE,
-	SOCK_KEEPOPEN,
-	SOCK_LINGER,
-	SOCK_DESTROY,
-	SOCK_BROADCAST,
-	SOCK_TIMESTAMP,
+	SOCK_DEAD, /* 连接已经断开，套接口即将关闭 */
+	SOCK_DONE, /* 标志TCP会话即将结束，在接收到FIN报文时设置 */
+	SOCK_URGINLINE, /* 将带外数据放入正常数据流 */
+	SOCK_KEEPOPEN, /* 启动了保活选项 */
+	SOCK_LINGER, /* 关闭套接口前发送剩余数据的时间 */
+	SOCK_DESTROY, /* 控制块已经释放，IPV4未使用 */
+	SOCK_BROADCAST, /* 套接口支持收发广播报文 */
+	SOCK_TIMESTAMP, /* 是否将段的接收时间作为时间戳 */
 	SOCK_ZAPPED,
 	SOCK_USE_WRITE_QUEUE, /* whether to call sk->sk_write_space in sock_wfree */
 	SOCK_DBG, /* %SO_DEBUG setting */
@@ -1050,7 +1113,12 @@ static inline void sk_prot_clear_nulls(struct sock *sk, int size)
 /* Networking protocol blocks we attach to sockets.
  * socket layer -> transport layer interface
  */
+/**
+ * 传输层接口 
+ * 实现传输层的操作和从传输层到网络层调用的跳转。
+ */
 struct proto {
+	/* 在关闭socket时使用。*/
 	void			(*close)(struct sock *sk,
 					long timeout);
 	int			(*pre_connect)(struct sock *sk,
@@ -1066,6 +1134,8 @@ struct proto {
 
 	int			(*ioctl)(struct sock *sk, int cmd,
 					 unsigned long arg);
+
+	/* 传输层初始化接口。在创建socket时。在inet_create中调用。 */
 	int			(*init)(struct sock *sk);
 	void			(*destroy)(struct sock *sk);
 	void			(*shutdown)(struct sock *sk, int how);
@@ -1098,15 +1168,19 @@ struct proto {
 	int			(*bind)(struct sock *sk,
 					struct sockaddr *uaddr, int addr_len);
 
+	/* 用于接收预备队列和后备队列中的TCP段。*/
 	int			(*backlog_rcv) (struct sock *sk,
 						struct sk_buff *skb);
 
 	void		(*release_cb)(struct sock *sk);
 
 	/* Keeping track of sk's, looking them up, and port selection methods. */
+	/* 将socket添加到散列表的接口。如tcp_v4_hash */
 	int			(*hash)(struct sock *sk);
+	/* 将socket从散列表中移除。如tcp_unhash */
 	void			(*unhash)(struct sock *sk);
 	void			(*rehash)(struct sock *sk);
+	/* 将套接口与端口进行绑定。如果snum为0，表示可以选择任意端口。 */
 	int			(*get_port)(struct sock *sk, unsigned short snum);
 
 	/* Keeping track of sockets in use */
@@ -1117,9 +1191,15 @@ struct proto {
 	bool			(*stream_memory_free)(const struct sock *sk, int wake);
 	bool			(*stream_memory_read)(const struct sock *sk);
 	/* Memory pressure */
+	/**
+	 * 只有TCP使用。当缓存区分配的内存超过tcp_mem[1]时，调用此函数进入告警状态。
+	 * TCP中回调是tcp_enter_memory_pressure
+	 */
 	void			(*enter_memory_pressure)(struct sock *sk);
 	void			(*leave_memory_pressure)(struct sock *sk);
+	/* 只有TCP使用。表示整个TCP层为缓存区分配的内存(包括输入队列)。指向变量tcp_memory_allocated。*/
 	atomic_long_t		*memory_allocated;	/* Current allocated memory. */
+	/* 只有TCP使用，表示整个TCP层创建的套接口数目。指向tcp_sockets_allocated。 */
 	struct percpu_counter	*sockets_allocated;	/* Current number of sockets. */
 	/*
 	 * Pressure flag: try to collapse.
@@ -1127,18 +1207,19 @@ struct proto {
 	 * All the __sk_mem_schedule() is of this nature: accounting
 	 * is strict, actions are advisory and have some latency.
 	 */
+	 /* 指向标志tcp_memory_pressure，表示是否进入缓冲区警告状态。 */
 	unsigned long		*memory_pressure;
-	long			*sysctl_mem;
+	long			*sysctl_mem; /* 指向sysctl_tcp_mem */
 
-	int			*sysctl_wmem;
-	int			*sysctl_rmem;
+	int			*sysctl_wmem; /* 指向sysctl_tcp_wmem */
+	int			*sysctl_rmem; /* 指向sysctl_tcp_rmem */
 	u32			sysctl_wmem_offset;
 	u32			sysctl_rmem_offset;
 
-	int			max_header;
+	int			max_header; /* 只有TCP使用，表示TCP首部的最大长度，包括所有选项。 */
 	bool			no_autobind;
 
-	struct kmem_cache	*slab;
+	struct kmem_cache	*slab; /* 分配socket的slab高速缓存。 */
 	unsigned int		obj_size;
 	slab_flags_t		slab_flags;
 	unsigned int		useroffset;	/* Usercopy region offset */
@@ -1158,7 +1239,7 @@ struct proto {
 
 	struct module		*owner;
 
-	char			name[32];
+	char			name[32]; /* 协议名称，如"TCP" */
 
 	struct list_head	node;
 #ifdef SOCK_REFCNT_DEBUG
@@ -1954,7 +2035,7 @@ static inline int skb_do_copy_data_nocache(struct sock *sk, struct sk_buff *skb,
 					   struct iov_iter *from, char *to,
 					   int copy, int offset)
 {
-	/* 需要TCP自己计算校验和 */
+	/* 需要TCP自己计算校验和，即NIC driver是否有HW checksum offload */
 	if (skb->ip_summed == CHECKSUM_NONE) {
 		__wsum csum = 0;
 
@@ -1977,11 +2058,11 @@ static inline int skb_add_data_nocache(struct sock *sk, struct sk_buff *skb,
 	int err, offset = skb->len;
 
 	
-    /* 拷贝用户空间的数据到内核空间，同时计算校验和 */
+	/* 拷贝用户空间的数据到内核空间，同时计算校验和 */
 	err = skb_do_copy_data_nocache(sk, skb, from, skb_put(skb, copy),
 				       copy, offset);
 					   
-    /* 如果拷贝失败，恢复skb->len和data room的大小 */
+	/* 如果拷贝失败，恢复skb->len和data room的大小 */
 	if (err)
 		__skb_trim(skb, offset);
 
@@ -2194,6 +2275,13 @@ static inline void sk_clear_bit(int nr, struct sock *sk)
 	clear_bit(nr, &sk->sk_wq_raw->flags);
 }
 
+/**
+ * 将SIGIO或SIGURG信号发送给socket上等待的线程
+ *		sk:		该socket上有事件
+ *		how:	0-检查是否有rcv调用的进程，1-检查发送队列是否已经达到了上限，
+ *			2-不做任何检查，直接发送SIGIO信号，3-向等待进程发送SIGURG信号。
+ *		band:	通知进程的IO读写类型，如POLL_IN
+ */
 static inline void sk_wake_async(const struct sock *sk, int how, int band)
 {
 	if (sock_flag(sk, SOCK_FASYNC)) {

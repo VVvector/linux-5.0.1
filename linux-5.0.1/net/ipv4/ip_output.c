@@ -540,7 +540,7 @@ packet_routed:
 	if (inet_opt && inet_opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto no_route;
 
-	/* 开始构建IP packet。 */
+	/* 填充ip header。 */
 	/* OK, we know where to send it, allocate and build IP header. */
 	skb_push(skb, sizeof(struct iphdr) + (inet_opt ? inet_opt->opt.optlen : 0));
 	skb_reset_network_header(skb);
@@ -1037,6 +1037,7 @@ static int __ip_append_data(struct sock *sk,
 	if (!skb)
 		goto alloc_new_skb;
 
+	/* 开始循环拷贝用户数据到skb中。 */
 	while (length > 0) {
 		/* Check if the remaining data fits into current packet. */
 		copy = mtu - skb->len;
@@ -1067,6 +1068,7 @@ alloc_new_skb:
 			fraglen = datalen + fragheaderlen;
 			pagedlen = 0;
 
+			/* 如果对应的net dev不支持SG */
 			if ((flags & MSG_MORE) &&
 			    !(rt->dst.dev->features&NETIF_F_SG))
 				alloclen = mtu;
@@ -1160,6 +1162,8 @@ alloc_new_skb:
 				skb->sk = sk;
 				wmem_alloc_delta += skb->truesize;
 			}
+
+			/* 将本skb加入到该skb list中。*/
 			__skb_queue_tail(queue, skb);
 			continue;
 		}
@@ -1476,11 +1480,17 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 	skb = __skb_dequeue(queue);
 	if (!skb)
 		goto out;
+
+	/* 下面是将多个skb，采用frag_list的方式来合成一个大的skb。
+	 * 该skb只有一个udp, ip header。
+	 * 所以，要将其余的skb的header部分去掉。
+	 */
 	tail_skb = &(skb_shinfo(skb)->frag_list);
 
 	/* move skb->data to ip header from ext header */
 	if (skb->data < skb_network_header(skb))
 		__skb_pull(skb, skb_network_offset(skb));
+
 	while ((tmp_skb = __skb_dequeue(queue)) != NULL) {
 		__skb_pull(tmp_skb, skb_network_header_len(skb));
 		*tail_skb = tmp_skb;
@@ -1517,6 +1527,7 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 	else
 		ttl = ip_select_ttl(inet, &rt->dst);
 
+	/* 填充ip header部分。 */
 	iph = ip_hdr(skb);
 	iph->version = 4;
 	iph->ihl = 5;
@@ -1532,6 +1543,7 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 		ip_options_build(skb, opt, cork->addr, rt, 0);
 	}
 
+	/* 设定skb带外信息，如priority, mark, tstamp等。*/
 	skb->priority = (cork->tos != -1) ? cork->priority: sk->sk_priority;
 	skb->mark = sk->sk_mark;
 	skb->tstamp = cork->transmit_time;
@@ -1631,6 +1643,7 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 		return ERR_PTR(err);
 	}
 
+	/* 将多个skb用frag_list的方式合成一个大的ip skb。 */
 	return __ip_make_skb(sk, fl4, &queue, cork);
 }
 

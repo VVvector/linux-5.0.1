@@ -48,7 +48,14 @@
 struct fib_nh;
 struct fib_info;
 struct uncached_list;
+/*
+ * 这是 ipv4 路由缓存相关结构体，包括了该路由缓存查找的匹配条件，即struct flowi类
+ * 型的变量、目的 ip、源 ip、下一跳网关地址、路由类型等。当然了，还有最重要的，
+ * 保护了一个协议无关的dst_entry变量，能够很好地实现dst_entry与 rtable 的转换，
+ * 而dst_entry中又包含邻居项相关的信息，实现了路由缓存与邻居子系统的关联
+ */
 struct rtable {
+	/* 实现了dst_entry与rtable的转换，即路由缓存与邻居子系统的关联。*/
 	struct dst_entry	dst;
 
 	int			rt_genid;

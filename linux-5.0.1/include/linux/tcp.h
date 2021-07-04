@@ -87,16 +87,41 @@ struct tcp_sack_block {
 #define TCP_SACK_SEEN     (1 << 0)   /*1 = peer is SACK capable, */
 #define TCP_DSACK_SEEN    (1 << 2)   /*1 = DSACK was received from peer*/
 
+/* 其主要表述 TCP 头部的选项字段。*/
 struct tcp_options_received {
 /*	PAWS/RTTM data	*/
+	/* 记录从接收到的段中取出时间戳设置到 ts_recent 的时间
+	 * 用于检测 ts_recent 的有效性：如果自从该事件之后已经
+	 * 经过了超过 24 天的时间，则认为 ts_recent 已无效。
+	 */
 	int	ts_recent_stamp;/* Time we stored ts_recent (for aging) */
+
+	/*
+	 * 下一个待发送的 TCP 段中的时间戳回显值。当一个含有最后
+	 * 发送 ACK 中确认序号的段到达时，该段中的时间戳被保存在
+	 * ts_recent 中。而下一个待发送的 TCP 段的时间戳值是由
+	 * SKB 中 TCP 控制块的成员 when 填入的， when 字段值是由协议
+	 * 栈取系统时间变量 jiffies 的低 32 位。
+	 */
 	u32	ts_recent;	/* Time stamp to echo next		*/
+
+	/* 保存最近一次接收到对端的 TCP 段的时间戳选项中的时间戳值。*/
 	u32	rcv_tsval;	/* Time stamp value             	*/
+
+	/* 保存最近一次接收到对端的 TCP 段的时间戳选项中的时间戳回显应答。*/
 	u32	rcv_tsecr;	/* Time stamp echo reply        	*/
+
+	/* 标识最近一次接收到的 TCP 段是否存在 TCP 时间戳选项， 1 为有，0 为无。*/
 	u16 	saw_tstamp : 1,	/* Saw TIMESTAMP on last packet		*/
+
+		/* 标识 TCP 连接是否启动时间戳选项 */
 		tstamp_ok : 1,	/* TIMESTAMP seen on SYN packet		*/
 		dsack : 1,	/* D-SACK is scheduled			*/
+
+		/* 标志接收方是否支持窗口扩大因子，只出现在 SYN 段中。 */
 		wscale_ok : 1,	/* Wscale seen on SYN packet		*/
+
+		/* 标记是否对方提供 SACK 服务 */
 		sack_ok : 3,	/* SACK seen on SYN packet		*/
 		smc_ok : 1,	/* SMC seen on SYN packet		*/
 		snd_wscale : 4,	/* Window scaling received from sender	*/
@@ -145,7 +170,9 @@ static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
 }
 
 
-/* TCP套接字的数据结构，包含了管理TCP协议各方面的信息。 */
+/* 该数据结构是 TCP 协议的控制块，它在inet_connection_sock结构的基础上扩展
+ * 了滑动窗口协议、 拥塞控制算法等一些 TCP 的专有属性。
+ */
 struct tcp_sock {
 	/* INET协议族面向连接的套接字结构 include/net/inet_connection_sock,
 		其中包含的 struct inet_connection_sock_af_ops *icsk_af_ops数据结构，
@@ -154,7 +181,7 @@ struct tcp_sock {
 	/* inet_connection_sock has to be the first member of tcp_sock */
 	struct inet_connection_sock	inet_conn;
 
-	/* 传送数据段TCP协议头的长度 */
+	/* 数据段TCP协议头的长度 */
 	u16	tcp_header_len;	/* Bytes of tcp header to send		*/
 	
 	u16	gso_segs;	/* Max number of segs per GSO packet	*/
@@ -180,12 +207,18 @@ struct tcp_sock {
 	u32	data_segs_in;	/* RFC4898 tcpEStatsPerfDataSegsIn
 				 * total number of data segments in.
 				 */
-	/* 下一个输入数据段的序列号 */
+	/* 等待接收的下一个TCP段的序号，每接收到一个段后设置该值 */
  	u32	rcv_nxt;	/* What we want to receive next 	*/
+
+	/* 代表还没有读取的数据 */
 	u32	copied_seq;	/* Head of yet unread data		*/
+
+	/* 意思就是在上一个窗口更新的时候，所接收到的确认号也就是上一个窗口更新之后，将要发送的第一个字节的
+	 * 序列号。 
+	 */
 	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
 
-	/* 下一个发送数据段的序列号 */
+	/* 下一个等待发送的TCP段的序号 */
  	u32	snd_nxt;	/* Next sequence we send		*/
 	u32	segs_out;	/* RFC4898 tcpEStatsPerfSegsOut
 				 * The total number of segments sent.
@@ -205,9 +238,18 @@ struct tcp_sock {
 				 */
 
 	/* 滑动窗口左边界， snd_una + snd_wnd滑动窗口右边界 */
+	/* 在输出的段中，最早一个未确认段的序号 */
  	u32	snd_una;	/* First byte we want an ack for	*/
+	/**
+	 * 最近发送的小包(小于MSS段)的最后一个字节序号，在成功发送段后，如果报文小于MSS，即更新该字段。 
+	 * 主要用来更新是否启用Nagle算法。
+	 */
  	u32	snd_sml;	/* Last byte of the most recently transmitted small packet */
+
+	/* 最后一次收到ACK段的时间，用于TCP保活。 */
 	u32	rcv_tstamp;	/* timestamp of last received ACK (for keepalives) */
+
+	/* 最近一次发送数据包的时间，主要用于拥塞窗口的设置 */
 	u32	lsndtime;	/* timestamp of last sent data packet (for restart window) */
 	u32	last_oow_ack_time;  /* timestamp of last out-of-window ACK */
 	u32	compressed_ack_rcv_nxt;
@@ -217,15 +259,20 @@ struct tcp_sock {
 	struct list_head tsq_node; /* anchor in tsq_tasklet.head list */
 	struct list_head tsorted_sent_queue; /* time-sorted sent but un-SACKed skbs */
 
+	/* 更新发送窗口的那个ACK段的序号，用来判断是否需要更新窗口。如果后续收到的ACK段大于此值，则需要更新。 */
 	u32	snd_wl1;	/* Sequence for window update		*/
+
+	/* 接收方提供的接收窗口大小，即发送方发送窗口大小 */
 	u32	snd_wnd;	/* The window we expect to receive	*/
+
+	/* 接收方通告过的最大接收窗口值。 */
 	u32	max_window;	/* Maximal window ever seen from peer	*/
 	u32	mss_cache;	/* Cached effective mss, not including SACKS */
 
-	/* 接收端的通知窗口值最大值给发送端 */
+	/* 滑动窗口的最大值，在TCP建立连接时，进行初始化。太大会导致滑动窗口不能在TCP首部中表示。 */
 	u32	window_clamp;	/* Maximal window to advertise		*/
 
-	/* 当前窗口阈值 */
+	/* 当前接收窗口大小的阀值，用于控制滑动窗口的缓慢增长 */
 	u32	rcv_ssthresh;	/* Current window clamp			*/
 
 	/* Information of the most recently (s)acked skb */
@@ -278,12 +325,17 @@ struct tcp_sock {
 	u32	rtt_seq;	/* sequence number to update rttvar	*/
 	struct  minmax rtt_min;
 
+	/* 发送方发送出去但是还未得到确认的 TCP 段的数目, packets_out=SND.NXT-SND.UNA */
 	u32	packets_out;	/* Packets which are "in flight"	*/
+
+	/* 重传并且还未得到确认的 TCP 段的数目 */
 	u32	retrans_out;	/* Retransmitted packets out		*/
 	u32	max_packets_out;  /* max packets_out in last window */
 	u32	max_packets_seq;  /* right edge of max_packets_out flight */
 
 	u16	urg_data;	/* Saved octet of OOB data and control flags */
+
+	/* 显式拥塞通知状态位，如TCP_ECN_OK */
 	u8	ecn_flags;	/* ECN status bits.			*/
 
 	/* TCP_KEEPCNT - SO_KEEPALIVE 设置在断开连接之前通过套接字发送多少个保存连接活动的探测数据段。 */
@@ -300,15 +352,42 @@ struct tcp_sock {
 /*
  *	Slow start and congestion control (see also Nagle, and Karn & Partridge)
  */
+ 	/* 拥塞控制时，慢启动的阀值 */
  	u32	snd_ssthresh;	/* Slow start size threshold		*/
+
+	/* 发送的拥塞窗口大小 */
  	u32	snd_cwnd;	/* Sending congestion window		*/
+	
+	/* 
+	 * 自从上次调整拥塞窗口到目前为止接收到的总 ACK 段数。
+	 * 如果该字段为零，则说明已经调整了拥塞窗口，且到目前
+	 * 为止还没有接收到 ACK 段。调整拥塞窗口之后，每接收到
+	 * 一个 ACK， ACK 段就会使 snd_cwnd_cnt 加 1。 
+	 */
 	u32	snd_cwnd_cnt;	/* Linear increase counter		*/
+
+	/* 允许的最大拥塞窗口值，初始值为65535 */
 	u32	snd_cwnd_clamp; /* Do not allow snd_cwnd to grow above this */
+
+	/* 从发送队列发出而未得到确认的段数，用于在检验拥塞窗口时调节拥塞窗口 */
 	u32	snd_cwnd_used;
+
+	/* 记录最近一次检验拥塞窗口的时间
+	 * 在拥塞期间，接收到 ACK 后会进行
+	 * 拥塞窗口的检验。而在非拥塞期间，为了防止由于应用
+	 * 程序限制而造成拥塞窗口失效，因此在成功发送段后，
+	 * 如果有必要也会检验拥塞窗口。 
+	 */
 	u32	snd_cwnd_stamp;
+
+	/* 在进入 Recovery 状态时的拥塞窗口 */
 	u32	prior_cwnd;	/* cwnd right before starting loss recovery */
+
+	/* 在恢复阶段给接收者新发送包的数量 */
 	u32	prr_delivered;	/* Number of newly delivered packets to
 				 * receiver in Recovery. */
+
+	/* 在恢复阶段一共发送的包的数量 */
 	u32	prr_out;	/* Total number of pkts sent during Recovery. */
 	u32	delivered;	/* Total data packets delivered incl. rexmits */
 	u32	delivered_ce;	/* Like the above but only ECE marked packets */
@@ -321,10 +400,21 @@ struct tcp_sock {
 
 	/* 当前接收窗口大小 */
  	u32	rcv_wnd;	/* Current receiver window		*/
+
+	/* 已经加入接收队列中的最后一个字节的序号 */
 	u32	write_seq;	/* Tail(+1) of data held in tcp send buffer */
 	u32	notsent_lowat;	/* TCP_NOTSENT_LOWAT */
+
+	/* 一般表示已经真正发送出去的最后一个字节序号，有时也表示期望发出去的最后一个字节的序号 */
 	u32	pushed_seq;	/* Last pushed seq, required to talk to windows */
+
+	/* 丢失的数据报 */
 	u32	lost_out;	/* Lost packets			*/
+
+	/*
+	 * 启用 SACK 时，通过 SACK 的 TCP 选项标识已接收到的段的数量。
+	 * 不启用 SACK 时，标识接收到的重复确认的次数，该值在接收到确认新数据段时被清除
+	 */
 	u32	sacked_out;	/* SACK'd packets			*/
 
 	struct hrtimer	pacing_timer;
@@ -352,19 +442,37 @@ struct tcp_sock {
 
 	int     lost_cnt_hint;
 
+	/* 在启用RTO算法的情况下，路径MTU探测成功，进入拥塞控制状态时保存的ssthresh值。
+	主要用于撤销拥塞窗口时，恢复慢启动阀值 */
 	u32	prior_ssthresh; /* ssthresh saved at recovery start	*/
+
+	/* 记录发生拥塞时的snd_nxt，标识重传队列的尾部 */
 	u32	high_seq;	/* snd_nxt at onset of congestion	*/
 
+	/**
+	 * 主动连接时，记录第一个SYN段的发送时间，用来检测ACK序号是否回绕。 
+	 * 在数据传输阶段，当发送超时重传时，记录上次重传阶段第一个重传段的发送时间，用于判断是否可以进行拥塞撤销。
+	 */
 	u32	retrans_stamp;	/* Timestamp of the last retransmit,
 				 * also used in SYN-SENT to remember stamp of
 				 * the first SYN. */
+	/* 在使用 F-RTO 算法进行发送超时处理，或进入 Recovery 进行重传，
+	 * 或进入 Loss 开始慢启动时，记录当时 SND.UNA, 标记重传起始点。
+	 * 它是检测是否可以进行拥塞控制撤销的条件之一，一般在完成
+	 * 拥塞撤销操作或进入拥塞控制 Loss 状态后会清零。 
+	 */
 	u32	undo_marker;	/* snd_una upon a new recovery episode. */
+
+	/* 在恢复拥塞控制之前可进行撤销的重传段数。在进入 FTRO 算法或
+	 * 拥塞状态 Loss 时，清零，在重传时计数，是检测是否可以进行拥塞
+	 * 撤销的条件之一。 */
 	int	undo_retrans;	/* number of undoable retransmissions. */
 	u64	bytes_retrans;	/* RFC4898 tcpEStatsPerfOctetsRetrans
 				 * Total data bytes retransmitted
 				 */
 	u32	total_retrans;	/* Total retransmits for entire connection */
 
+	/* 紧急数据的序号，由所在段的序号和紧急指针相加而得到 */
 	u32	urg_seq;	/* Seq of received urgent pointer */
 
 	/* 在TCP开始传送连接是否保存活动的探测数据段之前，连接处于空闲状态的时间值(秒)，默认为2小时。需设置SO_KEEPLIVE才有效 */
@@ -389,6 +497,7 @@ struct tcp_sock {
 #define BPF_SOCK_OPS_TEST_FLAG(TP, ARG) 0
 #endif
 
+/* 存储接收方的RTT估算值，用于限制调整TCP接收缓冲区空间的间隔时间不能小于RTT */
 /* Receiver side RTT estimation */
 	u32 rcv_rtt_last_tsecr;
 	struct {
@@ -397,6 +506,8 @@ struct tcp_sock {
 		u64	time;
 	} rcv_rtt_est;
 
+/* 用来调整TCP接收缓冲空间和接收窗口大小，也用于实现通过调节接收窗口来进行流量控制的功能。
+每次将数据复制到用户空间，都计算新的TCP接收缓冲空间大小。 */
 /* Receiver queue space */
 	struct {
 		u32	space;
@@ -422,6 +533,7 @@ struct tcp_sock {
 #endif
 
 /* TCP fastopen related information */
+	/* 与 TCP Fast Open 相关的信息 */
 	struct tcp_fastopen_request *fastopen_req;
 	/* fastopen_rsk points to request_sock that resulted in this big
 	 * socket. Used to retransmit SYNACKs etc.

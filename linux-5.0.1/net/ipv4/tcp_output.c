@@ -65,24 +65,27 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 
 /* Account for new data that has been sent to the network. */
 
-/*调用tcp_event_new_data_sent()-->tcp_advance_send_head()更新sk_send_head，即取发送队列中的下一个SKB。
-同时更新snd_nxt，即等待发送的下一个TCP段的序号，然后统计发出但未得到确认的数据报个数。
-最后如果发送该报文前没有需要确认的报文，则复位重传定时器，对本次发送的报文做重传超时计时。
-*/
+/* 调用tcp_event_new_data_sent()-->tcp_advance_send_head()更新sk_send_head，即取发送队列中的下一个SKB。
+ * 同时更新snd_nxt，即等待发送的下一个TCP段的序号，然后统计发出但未得到确认的数据报个数。
+ * 最后如果发送该报文前没有需要确认的报文，则复位重传定时器，对本次发送的报文做重传超时计时。
+ */
 static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int prior_packets = tp->packets_out;
 
+	/* 更新下一个要发生的tcp sequence */
 	tp->snd_nxt = TCP_SKB_CB(skb)->end_seq;
 
+	/* 将本skb从sk_wirte_queue中删除 */
 	__skb_unlink(skb, &sk->sk_write_queue);
 	tcp_rbtree_insert(&sk->tcp_rtx_queue, skb);
 
+	/* 增加待确认的data长度 */
 	tp->packets_out += tcp_skb_pcount(skb);
 	if (!prior_packets || icsk->icsk_pending == ICSK_TIME_LOSS_PROBE)
-		tcp_rearm_rto(sk);
+		tcp_rearm_rto(sk); //复位重传定时器
 
 	NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPORIGDATASENT,
 		      tcp_skb_pcount(skb));
@@ -257,6 +260,10 @@ EXPORT_SYMBOL(tcp_select_initial_window);
  * value can be stuffed directly into th->window for an outgoing
  * frame.
  */
+/*
+ * 这个函数的作用是选择一个新的窗口大小以用于更新tcp_sock。返回的结果根据
+ * RFC1323（详见1.3.2）进行了缩放。
+ */
 static u16 tcp_select_window(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -264,6 +271,14 @@ static u16 tcp_select_window(struct sock *sk)
 	u32 cur_win = tcp_receive_window(tp);
 	u32 new_win = __tcp_select_window(sk);
 
+	/* old_win 是接收方窗口的大小。
+	 * cur_win 当前的接收窗口大小。
+	 * new_win 是新选择出来的窗口大小。
+	 */
+
+	/* 当新窗口的大小小于当前窗口的大小时，不能缩减窗口大小。
+	 * 这是 IEEE 强烈不建议的一种行为。
+	 */
 	/* Never shrink the offered window */
 	if (new_win < cur_win) {
 		/* Danger Will Robinson!
@@ -276,11 +291,18 @@ static u16 tcp_select_window(struct sock *sk)
 		if (new_win == 0)
 			NET_INC_STATS(sock_net(sk),
 				      LINUX_MIB_TCPWANTZEROWINDOWADV);
+
+		/* 当计算出来的新窗口小于当前窗口时，将新窗口设置为大于 cur_win
+		 * 的 1<<tp->rx_opt.rcv_wscale 的整数倍。
+		 */
 		new_win = ALIGN(cur_win, 1 << tp->rx_opt.rcv_wscale);
 	}
+
+	/* 将当前的接收窗口设置为新的窗口大小。 */
 	tp->rcv_wnd = new_win;
 	tp->rcv_wup = tp->rcv_nxt;
 
+	/* 判断当前窗口未越界。 */
 	/* Make sure we do not exceed the maximum possible
 	 * scaled window.
 	 */
@@ -290,6 +312,10 @@ static u16 tcp_select_window(struct sock *sk)
 	else
 		new_win = min(new_win, (65535U << tp->rx_opt.rcv_wscale));
 
+	/* RFC1323 缩放窗口大小。这里之所以是右移，是因为此时的 new_win 是
+	 * 窗口的真正大小。所以返回时需要返回正常的可以放在 16 位整型中的窗口大小。
+	 * 所以需要右移。
+	 */
 	/* RFC1323 scaling applied */
 	new_win >>= tp->rx_opt.rcv_wscale;
 
@@ -432,6 +458,7 @@ static void smc_options_write(__be32 *ptr, u16 *options)
 #endif
 }
 
+/* 用于存放发送 TCP 包时， TCP 包所含的选项。*/
 struct tcp_out_options {
 	u16 options;		/* bit field of OPTION_* */
 	u16 mss;		/* 0 to disable */
@@ -1044,6 +1071,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		oskb = skb;
 
 		tcp_skb_tsorted_save(oskb) {
+			/* 这里收到的skb可能是原始skb的克隆，也可能是来自重传引擎的一份拷贝。*/
 			if (unlikely(skb_cloned(oskb)))
 				skb = pskb_copy(oskb, gfp_mask);
 			else
@@ -1059,10 +1087,11 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	skb->skb_mstamp_ns = tp->tcp_wstamp_ns;
 
-	/* 构建TCP协议选项：
-		查看数据包是否是一个SYN包（TCPCB_FLAG_SYN），如果是就调用tcp_syn_options构建SYN数据段的选项数据，
-		包括时间戳、窗口大小、选择回答(SACK）,否则调用tcp_establishe_options构架常规TCP选项，并返回TCP选项长度。
-		TCP协议头总的长度等于TCP选项长度+TCP协议头长度。
+	/* 开始构建TCP的头部：
+		查看数据包是否是一个SYN包（TCPCB_FLAG_SYN），如果是，就调用tcp_syn_options构建SYN数据段的选项数据，
+		包括时间戳、窗口大小、选择回答(SACK）, 否则调用tcp_establishe_options构架常规TCP选项，
+		并返回TCP选项长度。注意：这里仅仅是计算出来具体的选项及其大小，并没有形成最终tcp包
+		中选项的格式。
 	*/
 	inet = inet_sk(sk);
 	tcb = TCP_SKB_CB(skb);
@@ -1070,20 +1099,23 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	/* 确定TCP协议选项，不同类型的packet */
 	if (unlikely(tcb->tcp_flags & TCPHDR_SYN))
-		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5); //构建SYN包，包括时间戳，窗口大小，选择回答SACK等。
+		/* 构建SYN包，包括时间戳，窗口大小，选择回答SACK等。*/
+		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5); 
 	else
+		/* 构建非SYNC TCP segment header选项 */
 		tcp_options_size = tcp_established_options(sk, skb, &opts,
-							   &md5); //构建常规TCP选项
-	//TCP头部长度包括options长度 + TCP头部
+							   &md5);
+
+	/* TCP头部长度包括options长度 + TCP头部，之后，调用相关函数在skb头部为TCP头部留出空间。*/
 	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
 
 	
 	/* 拥塞控制：
-	确定网络上有多少数据包最好，大多数情况下是按照保守情况处理，
-	网络上有多少数据包做好的详细信息是用收到的SACK的信息来确认，
-	tp->pachets_out确定发送队列中是否为空，阻塞控制计算方法：
-	传送队列上的数据包+必须快速重传数据包-留在网络上的数据包，
-	如果等于0表示不会阻塞，这时发送时间标志。
+	 * 确定网络上有多少数据包，大多数情况下是按照保守情况处理，
+	 * 网络上有多少数据包做好的详细信息是用收到的SACK的信息来确认，
+	 * tp->pachets_out确定发送队列中是否为空，阻塞控制计算方法：
+	 * 传送队列上的数据包 + 必须快速重传数据包 - 留在网络上的数据包，
+	 * 如果等于0表示不会阻塞，这时发送时间标志。
 	*/
 	/* if no packet is in qdisc/device queue, then allow XPS to select
 	 * another queue. We can be called from tcp_tsq_handler()
@@ -1107,15 +1139,20 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	skb_orphan(skb);
 	skb->sk = sk;
 	skb->destructor = skb_is_tcp_pure_ack(skb) ? __sock_wfree : tcp_wfree;
+
+	/* 如果sock已经有计算好sk_txhash，则直接将sk->sk_txhash赋值给skb->l4_hash，并设置skb->l4_hash。
+	 * hash值可以在其他地方使用，比如 netdev driver中也可由使用该hash值，进行skb的分类。
+	 */
 	skb_set_hash_from_sk(skb, sk);
 	refcount_add(skb->truesize, &sk->sk_wmem_alloc);
 
 	skb_set_dst_pending_confirm(skb, sk->sk_dst_pending_confirm);
 
-	/* 构建TCP协议头：
-	构建TCP协议头主要的数据域：源端口、目的端口、数据段初始序列号，tcp_select_window计算窗口大小，
-	如果是SYN请求包就不需要计算窗口大小。
-	*/
+	/* 
+	 * 真正构建TCP header并计算校验和：
+	 * 构建TCP协议头主要的数据域：源端口、目的端口、数据段初始序列号，tcp_select_window计算窗口大小，
+	 * 如果是SYN请求包就不需要计算窗口大小。
+	 */
 	/* Build TCP header and checksum it. */
 	th = (struct tcphdr *)skb->data;
 	th->source		= inet->inet_sport;
@@ -1139,6 +1176,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		}
 	}
 
+	/* 写完首部后，开始写tcp选项。 */
 	tcp_options_write((__be32 *)(th + 1), tp, &opts);
 	skb_shinfo(skb)->gso_type = sk->sk_gso_type;
 	if (likely(!(tcb->tcp_flags & TCPHDR_SYN))) {
@@ -1159,10 +1197,13 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	}
 #endif
 
-	/* 发送数据包的处理， 发送数据到IP层。*/
-	//这里实际调用 tcp_v4_send_check() 会进行checksum的判断和计算。
+	/* 调用 tcp_v4_send_check() 会进行checksum的判断和计算。
+	 * 这里的checksum 计算, 只进行了伪头部的计算，剩余的推迟到
+	 * 最后sch_generic.c中sch_direct_xmit->validate_xmit_skb计算。
+	 */
 	icsk->icsk_af_ops->send_check(sk, skb);
 
+	/* 触发相关的 TCP 事件，这些会被用于拥塞控制算法。 */
 	if (likely(tcb->tcp_flags & TCPHDR_ACK))
 		tcp_event_ack_sent(sk, tcp_skb_pcount(skb), rcv_nxt);
 
@@ -1188,11 +1229,13 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 			       sizeof(struct inet6_skb_parm)));
 
 
-	/* 发送数据：实际会调用 ip_queue_xmit()函数 ， 把skb传入网络层。
-		tcp_ipv4.c中的  icsk: internet connect socket */
+	/* 实际会调用 ip_queue_xmit() 函数, 把skb传入网络层。
+	 * tcp_ipv4.c中的  icsk: internet connect socket。
+	 */
 	err = icsk->icsk_af_ops->queue_xmit(sk, skb, &inet->cork.fl);
 
 	if (unlikely(err > 0)) {
+		/* 如果发送了丢包（如被主动队列管理丢弃），那么进入到拥塞控制状态。 */
 		tcp_enter_cwr(sk);
 		err = net_xmit_eval(err);
 	}
@@ -1204,15 +1247,16 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 }
 
 
-/* TCP数据最终都是通过         tcp_transmit_skb() 函数传送给IP层的。
-	包括：
-		.来自用户空间的数据包
-		.重传数据包	- tcp_retransmit_skb
-		.探测路由最大传送单元数据包 - tcp_mtu_probe
-		.发送复位连接数据包 - tcp_send_active_reset
-		.发送连接请求数据包 - tcp_connect
-		.发送回答数据包 - tcp_send_ack
-		.0窗口探测数据包等 - tcp_xmit_probe_skb
+/* TCP数据最终都是通过         tcp_transmit_skb() 函数传送给IP层的。主要工作是构建TCP的首部，并将包交付给IP层。
+ * 由于数据段需要等到ACK后才能释放，所以 需要在发送队列中长期保留一份skb的备份。
+ * 使用场景包括：
+	.来自用户空间的数据包
+	.重传数据包	- tcp_retransmit_skb
+	.探测路由最大传送单元数据包 - tcp_mtu_probe
+	.发送复位连接数据包 - tcp_send_active_reset
+	.发送连接请求数据包 - tcp_connect
+	.发送回答数据包 - tcp_send_ack
+	.零窗口探测数据包等 - tcp_xmit_probe_skb
 */
 static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 			    gfp_t gfp_mask)
@@ -2274,6 +2318,15 @@ static bool tcp_pacing_check(struct sock *sk)
  * of queued bytes to ensure line rate.
  * One example is wifi aggregation (802.11 AMPDU)
  */
+
+/*
+ * TCP Small Queues :
+ * 控制进入到 qdisc/devices 中的包的数目。
+ * 该机制带来了以下的好处 :
+ * - 更好的 RTT 估算和 ACK 调度
+ * - 更快地恢复
+ * - 高数据速率
+ */
 static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 				  unsigned int factor)
 {
@@ -2388,14 +2441,14 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	bool is_cwnd_limited = false, is_rwnd_limited = false;
 	u32 max_segs;
 
-	//已发送数据的数量
+	/* 该变量用于统计发送的包的数量，初始化为 0 */
 	sent_pkts = 0;
 
 	tcp_mstamp_refresh(tp);
 
-	//发送多个数据段
+	/* 需要发送多个数据段 */
 	if (!push_one) {
-		//发送路径MTU探测
+		/* 进行MTU探测 */
 		/* Do MTU probing. */
 		result = tcp_mtu_probe(sk);
 		if (!result) {
@@ -2405,10 +2458,10 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		}
 	}
 
-	//获取最大tso分段
+	/* 获取最大tso分段 */
 	max_segs = tcp_tso_segs(sk, mss_now);
 
-	//有数据要发送 - sk_write_queue
+	/*不断循环发送队列数据 - sk_write_queue */
 	while ((skb = tcp_send_head(sk))) {
 		unsigned int limit;
 
@@ -2416,49 +2469,56 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			/* "skb_mstamp_ns" is used as a start point for the retransmit timer */
 			skb->skb_mstamp_ns = tp->tcp_wstamp_ns = tp->tcp_clock_cache;
 			list_move_tail(&skb->tcp_tsorted_anchor, &tp->tsorted_sent_queue);
+
+			/* 获取TSO的信息 */
 			tcp_init_tso_segs(skb, mss_now);
 			goto repair; /* Skip network transmission */
 		}
 
+		/* tcp的pacing 功能，有限速 */
 		if (tcp_pacing_check(sk))
 			break;
 
-		//初始化tso分段相关
+		/* 初始化tso分段相关 */
 		/* 设置TSO相关信息，包括GSO类型，GSO分段的大小等。这些信息是准备给软件TSO分段使用的。
-			如果网络设备不支持TSO，但又用了TSO功能，则报文在提交给网络设备前，需要进行软件分段，即由代码实现TSO功能。
+			如果网络设备不支持TSO，但又用了TSO功能，则报文在提交给网络设备前，
+			需要进行软件分段，即由代码实现TSO功能。
 		*/
 		tso_segs = tcp_init_tso_segs(skb, mss_now);
 		BUG_ON(!tso_segs);
 
-		//检查拥塞窗口大小
+		/* 获取和检查拥塞窗口大小 */
 		/*
 			如果为0，表示拥塞窗口已满，目前不能发生。
-			拿拥塞窗口和正在网络上传输的包数目相比，如果拥塞窗口还大，则返回拥塞窗口减掉正在网上传输的包数后，剩下的大小。
+			拿拥塞窗口和正在网络上传输的包数目相比，如果拥塞窗口还大，
+			则返回拥塞窗口减掉正在网上传输的包数后剩下的大小。
 			目的：判断正在传输的包数目是否超过了拥塞窗口，如果超过了，则不发送。
 		*/
 		cwnd_quota = tcp_cwnd_test(tp, skb);
 		if (!cwnd_quota) {
+			/* 强制发送一个包进行丢包探测 */
 			if (push_one == 2)
 				/* Force out a loss probe pkt. */
 				cwnd_quota = 1;
 			else
-				break;
+				break; /* 如果窗口大小为0，则无法发送任何东西。*/
 		}
 
-		//检查tcp的数据段是否在发送窗口之内，如果是，则可以发送，否则，不能发送。
+		/* 检查tcp的数据段是否在发送窗口之内，如果是，则可以发送，否则，不能发送。*/
 		if (unlikely(!tcp_snd_wnd_test(tp, skb, mss_now))) {
 			is_rwnd_limited = true;
 			break;
 		}
 
-		//不需要tso分段
+		/* 如果不需要tso分段，则坚持是否启用nagle算法。 */
 		if (tso_segs == 1) {
 			//检查nagle算法是否允许发送数据段
 			if (unlikely(!tcp_nagle_test(tp, skb, mss_now,
 						     (tcp_skb_is_last(sk, skb) ?
 						      nonagle : TCP_NAGLE_PUSH))))
 				break;
-		} else { //需要tso分段
+		} else { 
+			/* 如果需要tso分段, 则坚持是否需要延迟发送。 */
 			//检查是否可以延时发送，有很多条件判断。详细见函数。
 			//目的是为了减少软GSO分段的次数，以提高性能。
 			if (!push_one &&
@@ -2467,11 +2527,12 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 				break;
 		}
 
-		/*limit为再次分段的段长，初始化为当前MSS*/
+		/* limit为再次分段的段长，初始化为当前MSS。 */
 		limit = mss_now;
 
-		/*需要分段&&非紧急模式，重新确定分段长度限制。通过mss_now计算limit的值。
-        以发送窗口和拥塞窗口的最小值作为分段段长 */
+		/* 需要分段&&非紧急模式，重新确定分段长度限制。通过mss_now计算limit的值。
+        	 * 以发送窗口和拥塞窗口的最小值作为分段段长。
+        	 */
 		if (tso_segs > 1 && !tcp_urg_mode(tp))
 			limit = tcp_mss_split_point(sk, skb, mss_now,
 						    min_t(unsigned int,
@@ -2479,25 +2540,31 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 							  max_segs),
 						    nonagle);
 
-		/*如果SKB中的数据长度大于分段段长，则调用tso_fragment()根据该段长进行分段，如果分段失败，则暂不发送。
-		前面处理中： 根据条件，可能需要对SKB中的报文进行分段处理，分段的报文包括两种：
-		 1. 普通的用MSS分段的报文
-		 2. 是TSO分段的报文。
-	
-        能否发送报文主要取决于两个条件：
-        1. 是报文需完全在发送窗口中，而是拥塞窗口未满。第一种报文，应该不会再分段了，
-        	因为在tcp_sendmsg()中创建报文的SKB时已经根据MSS处理了。
-        2. 一般情况下都会大于MSS，因为通过TSO分段的段有可能大于拥塞窗口的剩余空间，
-        	如果是这样，就需要以发送窗口和拥塞窗口的最小值作为段长对报文再次分段。*/
+		/* 如果SKB中的数据长度大于分段段长，则调用tso_fragment()根据该段长进行分段，如果分段失败，则暂不发送。
+		 * 前面处理中： 根据条件，可能需要对SKB中的报文进行分段处理，分段的报文包括两种：
+		 * 1. 普通的用MSS分段的报文
+		 * 2. 是TSO分段的报文。
+
+		 * 能否发送报文主要取决于两个条件：
+	         * 1. 1是报文需完全在发送窗口中，2是拥塞窗口未满。第一种报文，应该不会再分段了，
+	        	因为在tcp_sendmsg()中创建报文的SKB时已经根据MSS处理了。
+	         * 2. 一般情况下都会大于MSS，因为通过TSO分段的段有可能大于拥塞窗口的剩余空间，
+	        	如果是这样，就需要以发送窗口和拥塞窗口的最小值作为段长对报文再次分段。
+	         */
 		if (skb->len > limit &&
 		    unlikely(tso_fragment(sk, TCP_FRAG_IN_WRITE_QUEUE,
 					  skb, limit, mss_now, gfp)))
 			break;
 
+		/*
+		 * Linux3.6 引入的新机制。在之前的 Linux 实现中，如果 TCP 的窗口很大，那么，
+		 * 可能导致驱动队列中待发送的包的的数目超过队列缓存的大小，因而导致丢包。为了解
+		 * 决该问题， Linux 引入了 TCP 小队列机制。
+		*/
 		if (tcp_small_queue_check(sk, skb, 0))
 			break;
 
-		// 发送分段数据
+		/* 继续发送数据到network layer中去，实际是调用 ip_queue_xmit() */
 		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
 			break;
 
@@ -2505,18 +2572,19 @@ repair:
 		/* Advance the send_head.  This one is sent out.
 		 * This call will increment packets_out.
 		 */
-		//进行发送之后的数据更新，包括统计计数和复位重传定时器等。
+		/* 进行发送之后的数据更新，包括统计计数和复位重传定时器等。*/
 		tcp_event_new_data_sent(sk, skb);
 
 		
-      /*更新struct tcp_sock中的snd_sml字段。snd_sml表示最近发送的小包(小于MSS的段)的最后一个字节序号，
-        在发送成功后，如果报文小于MSS，即更新该字段，主要用来判断是否启动nagle算法*/
+      		/* 更新struct tcp_sock中的snd_sml字段。snd_sml表示最近发送的小包(小于MSS的段)的最后一个字节序号，
+        	 * 在发送成功后，如果报文小于MSS，即更新该字段，主要用来判断是否启动nagle算法
+        	 */
 		tcp_minshall_update(tp, mss_now, skb);
 
-		//更新发送数据段数量
+		/* 更新发送数据段数量 */
 		sent_pkts += tcp_skb_pcount(skb);
 
-		//只发送一段，则跳出
+		/* 只发送sk_write_queue中的一个skb，则跳出 */
 		if (push_one)
 			break;
 	}
@@ -2526,7 +2594,7 @@ repair:
 	else
 		tcp_chrono_stop(sk, TCP_CHRONO_RWND_LIMITED);
 
-	//本次有数据发送，拥塞相关数据更新
+	/* 本次有数据发送，拥塞相关数据更新 */
 	if (likely(sent_pkts)) {
 		if (tcp_in_cwnd_reduction(sk))
 			tp->prr_out += sent_pkts;
@@ -2535,13 +2603,13 @@ repair:
 		if (push_one != 2)
 			tcp_schedule_loss_probe(sk, false);
 
-		//拥塞窗口校验
+		/* 拥塞窗口校验 */
 		is_cwnd_limited |= (tcp_packets_in_flight(tp) >= tp->snd_cwnd);
 		tcp_cwnd_validate(sk, is_cwnd_limited);
 		return false;
 	}
 
-	//本次无数据发送，已发出未确认的数据段不为0或者发送队列为空，认为成功。
+	/* 本次无数据发送，已发出未确认的数据段不为0，或者发送队列为空，认为成功。*/
 	return !tp->packets_out && !tcp_write_queue_empty(sk);
 }
 
@@ -2684,17 +2752,20 @@ void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
 	 * In time closedown will finish, we empty the write queue and
 	 * all will be happy.
 	 */
+	 /* 如果此时连接已经关闭了，那么直接返回。 */
 	if (unlikely(sk->sk_state == TCP_CLOSE))
 		return;
 
+	/* 将剩余的部分发送出去。 */
 	if (tcp_write_xmit(sk, cur_mss, nonagle, 0,
 			   sk_gfp_mask(sk, GFP_ATOMIC)))
-		tcp_check_probe_timer(sk); //如果发送失败，检查是否需要启动零窗口探测定时器。
+		tcp_check_probe_timer(sk); // 如果发送失败，检查是否需要启动零窗口探测定时器。
 }
 
 /* Send _single_ skb sitting at the send head. This function requires
  * true push pending frames to setup probe timer etc.
  */
+ /* 用于将发送队列首部的单个包发送出去。 */
 void tcp_push_one(struct sock *sk, unsigned int mss_now)
 {
 	struct sk_buff *skb = tcp_send_head(sk);
@@ -2757,6 +2828,11 @@ void tcp_push_one(struct sock *sk, unsigned int mss_now)
  * Note, we don't "adjust" for TIMESTAMP or SACK option bytes.
  * Regular options like TIMESTAMP are taken into account.
  */
+/*
+ * __tcp_select_window(sk)来计算新的窗口大小。该函数会尝试增加窗口的大小，但是有两个限制条件：
+ * 1. 窗口不能收缩 (RFC793)
+ * 2. 每个 socket 所能使用的内存是有限制的
+ */
 u32 __tcp_select_window(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -2773,22 +2849,33 @@ u32 __tcp_select_window(struct sock *sk)
 	int full_space = min_t(int, tp->window_clamp, allowed_space);
 	int window;
 
+	/* 如果 mss 超过了总共的空间大小，那么把 mss 限制在允许的空间范围内。 */
 	if (unlikely(mss > full_space)) {
 		mss = full_space;
 		if (mss <= 0)
 			return 0;
 	}
 	if (free_space < (full_space >> 1)) {
+		/* 当空闲空间小于允许空间的一半时。 */
 		icsk->icsk_ack.quick = 0;
 
 		if (tcp_under_memory_pressure(sk))
 			tp->rcv_ssthresh = min(tp->rcv_ssthresh,
 					       4U * tp->advmss);
 
+		/* free_space 有可能成为新的窗口的大小，因此，需要考虑
+		 * 窗口扩展的影响。
+		 */
 		/* free_space might become our new window, make sure we don't
 		 * increase it due to wscale.
 		 */
 		free_space = round_down(free_space, 1 << tp->rx_opt.rcv_wscale);
+
+		/* 如果空闲空间小于 mss 的大小，或者低于最大允许空间的的 1/16，那么，
+		 * 返回 0 窗口。否则， tcp_clamp_window() 会增长接收缓存到 tcp_rmem[2]。
+		 * 新进入的数据会由于内醋限制而被丢弃。对于较大的窗口，单纯地探测 mss 的
+		 * 大小以宣告 0 窗口有些太晚了（可能会超过限制）。
+		 */
 
 		/* if free space is less than mss estimate, or is below 1/16th
 		 * of the maximum allowed, try to move to zero-window, else
@@ -2804,6 +2891,9 @@ u32 __tcp_select_window(struct sock *sk)
 	if (free_space > tp->rcv_ssthresh)
 		free_space = tp->rcv_ssthresh;
 
+	/* 这里处理一个例外情况，就是如果开启了窗口缩放，那么就没法对齐 mss 了。
+	 * 所以就保持窗口是对齐 2 的幂的。
+	 */
 	/* Don't do rounding if we are using window scaling, since the
 	 * scaled window will not line up with the MSS boundary anyway.
 	 */
@@ -2817,6 +2907,11 @@ u32 __tcp_select_window(struct sock *sk)
 		window = ALIGN(window, (1 << tp->rx_opt.rcv_wscale));
 	} else {
 		window = tp->rcv_wnd;
+
+		/* 如果内存条件允许，那么就把窗口设置为 mss 的整倍数。
+		 * 或者如果 free_space > 当前窗口大小加上全部允许的空间的一半，
+		 * 那么，就将窗口大小设置为 free_space
+		 */
 		/* Get the largest window that is a nice multiple of mss.
 		 * Window clamp already applied above.
 		 * If our current window offering is within 1 mss of the

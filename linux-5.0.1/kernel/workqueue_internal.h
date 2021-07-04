@@ -60,7 +60,7 @@ struct worker {
 	struct work_struct	*current_work;	/* L: work being processed */
 	/* 当前正在执行的work回调函数 */
 	work_func_t		current_func;	/* L: current_work's fn */
-	/* 执行当前work所属的pool_workqueue */
+	/* 当前执行work所属的pool_workqueue */
 	struct pool_workqueue	*current_pwq; /* L: current_work's pwq */
 
 	/* 所有被调度执行的work都将被添加到该链表中 */

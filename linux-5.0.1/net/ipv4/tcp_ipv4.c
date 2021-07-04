@@ -641,7 +641,8 @@ void __tcp_v4_send_check(struct sk_buff *skb, __be32 saddr, __be32 daddr)
 	struct tcphdr *th = tcp_hdr(skb);
 
 	/* 只计算了伪首部 pseude header，计算了源和目的ip addr，protocol号， TCP报文长度（报文头+数据）。
-		伪首部作用：为了增加TCP校验和的检错能力：如检查TCP报文是否收错(目的IP地址)，传输层协议是否选对了(协议号）等。
+		伪首部作用：为了增加TCP校验和的检错能力：
+		如检查TCP报文是否收错(目的IP地址)，传输层协议是否选对了(协议号）等。
 
 		csum_start和csum_offset是给硬件用，如果硬件有tx checksum offload或gso等功能。
 	*/
@@ -1811,7 +1812,9 @@ static void tcp_v4_fill_cb(struct sk_buff *skb, const struct iphdr *iph,
  *	From tcp_input.c
  */
 
-/*传输层TCP的接收函数*/
+/*
+ * 当 IP 层接收到报文，或将多个分片组装成一个完整的 IP 数据报之后，会调用传输层的接收函数，传递给传输层处理。
+ */
 int tcp_v4_rcv(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb->dev);
@@ -1823,8 +1826,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	int ret;
 
 	/* 1. 数据包合法性检查 */
-	
-	/* 指明数据包的目标地址不是本机地址时，扔掉数据包 */
+	/* 如果数据包的目标地址不是本机地址时，则扔掉数据包 */
 	if (skb->pkt_type != PACKET_HOST)
 		goto discard_it;
 
@@ -1832,14 +1834,25 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	__TCP_INC_STATS(net, TCP_MIB_INSEGS);
 
 	/* 查看TCP协议头的正确性 */
+	/*
+	 * 如果 TCP 段在传输过程中被分片了，则到达本地后会在 IP 层重新组装。
+	 * 组装完成后，报文分片都存储在链表中。在此，需把存储在分片中的报文
+	 * 复制到 SKB 的线性存储区域中。如果发生异常，则丢弃该报文。
+	 */
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		goto discard_it;
 
+	/* 拿到tcp的头部 */
 	th = (const struct tcphdr *)skb->data;
 
-	/* 读取TCP协议头信息，查看协议头中doff数据域的正确性 */
+	 /*
+	  * 如果 TCP 的首部长度小于不带数据的 TCP 的首部长度，则说明 TCP 数据异常。
+	  * 统计相关信息后，丢弃。
+	  */
 	if (unlikely(th->doff < sizeof(struct tcphdr) / 4))
 		goto bad_packet;
+
+	/* 检测整个 TCP 首部长度是否正常，如有异常，则丢弃。 */
 	if (!pskb_may_pull(skb, th->doff * 4))
 		goto discard_it;
 
@@ -1847,25 +1860,31 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * Packet length and doff are validated by header prediction,
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
-	/* 查看数据包校验和的正确性 */
+	/* 验证 TCP 首部中的校验和，如校验和有误，则说明报文已损坏，统计相关信息后丢弃。 */
 	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo))
 		goto csum_error;
 
-	/* 2.保存协议头信息 */
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
 
-	/* 3. 查看数据段是否属于某个套接字
-		查看依据：接收数据包的网络接口，源端口号，目的端口号。
-	*/
+	/* 2. 查看数据段是否属于某个套接字。即在ehash或bhash散列表中根据地址和端口来查找传输控制块。
+	 * 查看依据：接收数据包的网络接口，源端口号，目的端口号。
+
+	 * 如果在 ehash 中找到，则表示已经经历了三次握手并且已建立了连接，可以
+	 * 进行正常的通信。如果在 bhash 中找到，则表示已经绑定已经绑定了端口，处于侦听
+	 * 状态。如果在两个散列表中都查找不到，说明此时对应的传输控制块还没有创建，跳转
+	 * 到no_tcp_socket 处处理
+	 */
 lookup:
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
 			       th->dest, sdif, &refcounted);
 	if (!sk)
 		goto no_tcp_socket;
 
-	/* 4. 数据段的处理 */
+
+	/* 3. 数据段的处理 */
 process:
+	/* TIME_WAIT 状态，主要处理释放连接 */
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
 
@@ -1925,27 +1944,39 @@ process:
 			return 0;
 		}
 	}
+
+	/*ttl 小于给定的最小的 ttl*/
 	if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
 		__NET_INC_STATS(net, LINUX_MIB_TCPMINTTLDROP);
 		goto discard_and_relse;
 	}
 
+	/* 查找 IPsec 数据库，如果查找失败，进行相应处理. */
 	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
 		goto discard_and_relse;
 
 	if (tcp_v4_inbound_md5_hash(sk, skb))
 		goto discard_and_relse;
 
+	/* connect track */
 	nf_reset(skb);
 
+	/* 过滤器 */
 	if (tcp_filter(sk, skb))
 		goto discard_and_relse;
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
+
+	/* 根据 TCP 首部中的信息来设置 TCP 控制块中的值，因为 TCP 首部中的
+	 * 值都是网络字节序的，为了便于后续处理直接访问 TCP 首部字段，在此将这些值转换
+	 * 为本机字节序后存储在 TCP 的私有控制块中。 
+	 */
 	tcp_v4_fill_cb(skb, iph, th);
 
+	/* 设置 SKB 的 dev 为 NULL，这是因为现在已经到了传输层，此时 dev 已经不再具有意义。 */
 	skb->dev = NULL;
 
+	/* LISTEN状态 */
 	if (sk->sk_state == TCP_LISTEN) {
 		ret = tcp_v4_do_rcv(sk, skb);
 		goto put_and_return;
@@ -1953,26 +1984,33 @@ process:
 
 	sk_incoming_cpu_update(sk);
 
-	/* 获取套接字锁并开始处理数据 */
+	/*
+	 * 在接收 TCP 段之前，需要对传输控制块加锁，以同步对传输控制块接收队列的访问。
+	 */
 	bh_lock_sock_nested(sk);
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
+
+	/* 进程此时没有访问传输控制块 */
 	if (!sock_owned_by_user(sk)) {
-		/*继续往上传skb*/
-		ret = tcp_v4_do_rcv(sk, skb); //放入sk->sk_receive_queue中
-	} else if (tcp_add_backlog(sk, skb)) { //放入sk->sk_backlog中
+		/* 继续往上传skb，放入sk->sk_receive_queue中 */
+		ret = tcp_v4_do_rcv(sk, skb);
+	} else if (tcp_add_backlog(sk, skb)) {
+		/* 添加到后备队列成功 sk->sk_backlog */
 		goto discard_and_relse;
 	}
 	bh_unlock_sock(sk);
 
+/* 递减引用计数，当计数为 0 的时候，使用 sk\_free 释放传输控制块 */
 put_and_return:
 	if (refcounted)
 		sock_put(sk);
 
 	return ret;
 
-	/* 收到一包为打开socket的数据，会向外发送一个复位请求来关闭连接。 */
+	/* 处理没有创建传输控制块收到报文，校验错误，坏包的情况，给对端发送 RST 报文。 */
 no_tcp_socket:
+	/* 查找 IPsec 数据库，如果查找失败，进行相应处理.*/
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 		goto discard_it;
 
@@ -1988,6 +2026,7 @@ bad_packet:
 		tcp_v4_send_reset(NULL, skb);
 	}
 
+/* 丢弃数据包 */
 discard_it:
 	/* Discard frame. */
 	kfree_skb(skb);
@@ -1999,8 +2038,10 @@ discard_and_relse:
 		sock_put(sk);
 	goto discard_it;
 
+/* 处理 TIME_WAIT 状态 */
 do_time_wait:
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+		/*inet_timewait_sock 减少引用计数 */
 		inet_twsk_put(inet_twsk(sk));
 		goto discard_it;
 	}
@@ -2011,6 +2052,7 @@ do_time_wait:
 		inet_twsk_put(inet_twsk(sk));
 		goto csum_error;
 	}
+
 	/*根据数据包的类型进行处理 -SYN, FIN 等*/
 	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
 	case TCP_TW_SYN: {
@@ -2061,9 +2103,13 @@ void inet_sk_rx_dst_set(struct sock *sk, const struct sk_buff *skb)
 EXPORT_SYMBOL(inet_sk_rx_dst_set);
 
 const struct inet_connection_sock_af_ops ipv4_specific = {
+
+	/* 将数据段从传输层送入到ip层。*/
 	.queue_xmit	   = ip_queue_xmit,
 
-	/* checksum 计算, 只进行了伪头部的计算，剩余的推迟到 最后 sch_generic.c中sch_direct_xmit->validate_xmit_skb */
+	/* checksum 计算, 只进行了伪头部的计算，剩余的推迟到 最后 
+	 * sch_generic.c中sch_direct_xmit->validate_xmit_skb
+	 */
 	.send_check	   = tcp_v4_send_check,
 
 	.rebuild_header	   = inet_sk_rebuild_header,

@@ -790,6 +790,12 @@ static inline u64 tcp_skb_timestamp_us(const struct sk_buff *skb)
  * This is 44 bytes if IPV6 is enabled.
  * If this grows please adjust skbuff.h:skbuff->cb[xxx] size appropriately.
  */
+
+/*
+ * 该结构是 TCP 层在 SKB 区的私有信息控制块。对这个
+ * 私有信息控制块的赋值一般在本层接收到段或发送段之前进行。
+ * tcp_skb_cb结构体用于将每个 TCP 包中的控制信息传递给发送封包的代码。
+ */
 struct tcp_skb_cb {
 
 	/* 输出数据段的起始序列号 */
@@ -811,7 +817,7 @@ struct tcp_skb_cb {
 		};
 	};
 
-	/* 与TCP协议头中的flags数据域定义相同 */
+	/* 与TCP协议头中的flags数据域定义相同。*/
 	__u8		tcp_flags;	/* TCP header flags. (tcp[13])	*/
 
 	/* 保存了选择回答(SACK: selective acknowledge)和前送回答(FACK: forward acknowledge)的状态标志 */

@@ -229,6 +229,11 @@ struct in_pktinfo {
 /* Structure describing an Internet (IP) socket address. */
 #if  __UAPI_DEF_SOCKADDR_IN
 #define __SOCK_SIZE__	16		/* sizeof(struct sockaddr)	*/
+
+/* 该结构体用于描述一个 Internet (IP) 套接字的地址。
+ * sockaddr的使用方法是在需要的地方直接强制转型成相应网络的结构体。因此，需
+ * 要让二者一样大。这就是为何sockaddr_in要加填充位的原因。
+ */
 struct sockaddr_in {
   __kernel_sa_family_t	sin_family;	/* Address family		*/
   __be16		sin_port;	/* Port number			*/

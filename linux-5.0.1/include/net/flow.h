@@ -168,6 +168,7 @@ struct flowidn {
 #define fld_dport		uli.ports.dport
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
 
+/* 它是与路由查找相关的数据结构。*/
 struct flowi {
 	union {
 		struct flowi_common	__fl_common;

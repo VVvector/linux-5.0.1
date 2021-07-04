@@ -64,10 +64,10 @@ enum sock_type {
 	SOCK_STREAM	= 1,
 	SOCK_DGRAM	= 2,
 	SOCK_RAW	= 3,
-	SOCK_RDM	= 4,
-	SOCK_SEQPACKET	= 5,
+	SOCK_RDM	= 4, /* 可靠传输报文套接字 */
+	SOCK_SEQPACKET	= 5, /* 顺序分组套接字 */
 	SOCK_DCCP	= 6,
-	SOCK_PACKET	= 10,
+	SOCK_PACKET	= 10, /* 混杂模式套接字 */
 };
 
 #define SOCK_MAX (SOCK_PACKET + 1)
@@ -108,17 +108,17 @@ struct socket_wq {
  *  @wq: wait queue for several uses
  */
 struct socket {
-	socket_state		state;
+	socket_state		state; /* socket的状态，如 SS_FREE */
 
-	short			type;
+	short			type; /* socket类型，如 SOCK_STREAM */
 
-	unsigned long		flags;
+	unsigned long		flags; /* socket的标志位，如     SOCK_ASYNC_NOSPACE */
 
-	struct socket_wq	*wq;
+	struct socket_wq	*wq; /* socket的等待队列 */
 
-	struct file		*file;
-	struct sock		*sk;
-	const struct proto_ops	*ops;
+	struct file		*file; /* 与套接字相关联的文件指针 */
+	struct sock		*sk; /* 与套接字相关联的传输控制块 */
+	const struct proto_ops	*ops; /* socket的函数操作ops，如 inet_stream_ops, inet_dgram_ops, inet_sockraw_ops */
 };
 
 struct vm_area_struct;
@@ -130,8 +130,12 @@ struct sk_buff;
 typedef int (*sk_read_actor_t)(read_descriptor_t *, struct sk_buff *,
 			       unsigned int, size_t);
 
+/* 传输层向套接字层提供的接口， 如 af_inet.c中提供的。*/
 struct proto_ops {
+	/* 所属协议族 */
 	int		family;
+
+	/* 所属模块 */
 	struct module	*owner;
 	int		(*release)   (struct socket *sock);
 	int		(*bind)	     (struct socket *sock,

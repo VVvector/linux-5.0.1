@@ -2010,9 +2010,11 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	if (res->type != RTN_UNICAST)
 		goto martian_destination;
 
+	/* 这里表示要进行转发 即 skb->input 赋值为 ip_forward() */
 make_route:
 	err = ip_mkroute_input(skb, res, in_dev, daddr, saddr, tos, flkeys);
 out:	return err;
+
 
 brd_input:
 	if (skb->protocol != htons(ETH_P_IP))
@@ -2028,6 +2030,7 @@ brd_input:
 	res->type = RTN_BROADCAST;
 	RT_CACHE_STAT_INC(in_brd);
 
+	/* 表示为本机的packet，即skb->input赋值为 ip_local_deliver() */
 local_input:
 	do_cache = false;
 	if (res->fi) {

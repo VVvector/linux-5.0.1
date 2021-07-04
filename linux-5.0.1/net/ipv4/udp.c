@@ -856,7 +856,7 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
 	__wsum csum = 0;
 
 	/*
-	 * Create a UDP header
+	 * 填充udp header
 	 */
 	uh = udp_hdr(skb);
 	uh->source = inet->inet_sport;
@@ -909,11 +909,12 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
 csum_partial:
 
 		/* 该函数 并不一定能够利用硬件的校验和计算功能。
-		对于存在skb分片的数据包，就需要 软件进行计算。*/
+		 * 对于存在skb分片的数据包，就需要软件进行计算。
+		 */
 		udp4_hwcsum(skb, fl4->saddr, fl4->daddr);
 		goto send;
 
-	/* 软件 计算checksum */
+	/* 软件计算checksum */
 	} else
 		csum = udp_csum(skb);
 
@@ -925,7 +926,8 @@ csum_partial:
 		uh->check = CSUM_MANGLED_0;
 
 send:
-	err = ip_send_skb(sock_net(sk), skb); /*往IP层传数据。。。。*/
+	/* 调用network layer的API，将数据传入netwrok layer。 */
+	err = ip_send_skb(sock_net(sk), skb); 
 	if (err) {
 		if (err == -ENOBUFS && !inet->recverr) {
 			UDP_INC_STATS(sock_net(sk),
@@ -1041,12 +1043,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		2. Pass MSG_MORE as one of the flags when calling send, sendto, or sendmsg from your program.
 		These options are documented in the UDP man page and the send / sendto / sendmsg man page, respectively.
 	*/
-	/*croked feature： kernel会把用户层多次传下来的数据进行一个打包，然后在call send()接口一次性往下传
-		需要用户设定
-	*/
+	/* croked feature： kernel会把用户层多次传下来的数据进行一个打包，
+	 * 然后再调用send()接口一次性往下传 （需要用户设定）。
+	 */
 	getfrag = is_udplite ? udplite_getfrag : ip_generic_getfrag;
 
-	/*###1. UDP corking*/
+	/* 1. UDP corking */
 	fl4 = &inet->cork.fl.u.ip4;
 	if (up->pending) {
 		/*
@@ -1066,16 +1068,17 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	ulen += sizeof(struct udphdr);
 
 
-	/* 获取UDP destination address和port。
-	  两种方法：
-		1. The socket itself has the destination address stored because the socket was connected at some point.
-		2. The address is passed in via an auxiliary structure, as we saw in the kernel code for sendto.
-	*/
+	/* 
+	 * 获取UDP destination address和port。
+	 * 两种方法：
+	 * 1. The socket itself has the destination address stored because the socket was connected at some point.
+	 * 2. The address is passed in via an auxiliary structure, as we saw in the kernel code for sendto.
+	 */
 	
 	/*
-	 *	Get and verify the address.
+	 * Get and verify the address.
 	 */
-	 /*###2. get the UDP destination address and port*/
+	 /* 2. get the UDP destination address and port */
 	if (usin) {
 		if (msg->msg_namelen < sizeof(*usin))
 			return -EINVAL;
@@ -1099,12 +1102,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 1;
 	}
 
-	/*###3. Socket transmit bookkeeping and timestamping*/
+	/* 3. Socket transmit bookkeeping and timestamping */
 	ipcm_init_sk(&ipc, inet);
 	ipc.gso_size = up->gso_size;
 
-	/*处理一些辅助信息， 例如 IP_PKTINFO, IP_TTL, IP_TOS， 通过setsockopt()*/
-	/*###4. ancillary messages, via sendmsg*/
+	/* 处理一些辅助信息， 例如 IP_PKTINFO, IP_TTL, IP_TOS， 通过setsockopt()*/
+	/* 4. ancillary messages, via sendmsg */
 	if (msg->msg_controllen) {
 		err = udp_cmsg_send(sk, msg, &ipc.gso_size);
 		if (err > 0)
@@ -1119,8 +1122,8 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/*检查是否有设置辅助信息，如果有，则进行 settting custom IP options。*/
-	/*###5. setting custom IP options*/
+	/* 检查是否有设置辅助信息，如果有，则进行 settting custom IP options。*/
+	/* 5. setting custom IP options*/
 	if (!ipc.opt) {
 		struct ip_options_rcu *inet_opt;
 
@@ -1153,7 +1156,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	saddr = ipc.addr;
 	ipc.addr = faddr = daddr;
 
-	/*查看是否有设定 SRR IP option*/
+	/* 查看是否有设定 SRR IP option */
 	if (ipc.opt && ipc.opt->opt.srr) {
 		if (!daddr) {
 			err = -EINVAL;
@@ -1163,7 +1166,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/*获取TOS IP flag*/
+	/* 获取TOS IP flag */
 	tos = get_rttos(&ipc, inet);
 	if (sock_flag(sk, SOCK_LOCALROUTE) ||
 	    (msg->msg_flags & MSG_DONTROUTE) ||
@@ -1172,8 +1175,8 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/*组播处理*/
-	/*###6. Multicase or unicase?*/
+	/* 组播处理 */
+	/* 6. Multicase or unicase? */
 	if (ipv4_is_multicast(daddr)) {
 		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
 			ipc.oif = inet->mc_index;
@@ -1196,7 +1199,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		}
 	}
 
-	/*###7. Routing*/
+	/* 7. Routing */
 	if (connected)
 		rt = (struct rtable *)sk_dst_check(sk, 0);
 
@@ -1212,10 +1215,10 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 				   faddr, saddr, dport, inet->inet_sport,
 				   sk->sk_uid);
 
-		/*systems like SELinux or SMACK can set a security id value on the flow structure*/
+		/* systems like SELinux or SMACK can set a security id value on the flow structure */
 		security_sk_classify_flow(sk, flowi4_to_flowi(fl4));
 
-		/*the IP routing code to generate a routing structure*/
+		/* the IP routing code to generate a routing structure */
 		rt = ip_route_output_flow(net, fl4, sk);
 		if (IS_ERR(rt)) {
 			err = PTR_ERR(rt);
@@ -1233,22 +1236,24 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			sk_dst_set(sk, dst_clone(&rt->dst));
 	}
 
-	/*###8. Prevent the ARP cache from going stale with MSG_CONFIRM*/
-	if (msg->msg_flags&MSG_CONFIRM)
+	/* 8. Prevent the ARP cache from going stale with MSG_CONFIRM */
+	if (msg->msg_flags & MSG_CONFIRM)
 		goto do_confirm;
-back_from_confirm:
 
+back_from_confirm:
 	saddr = fl4->saddr;
 	if (!ipc.addr)
 		daddr = ipc.addr = fl4->daddr;
 
 	/* Lockless fast path for the non-corking case. */
-	/*###9. Fast path for uncorked UDP sockets: Prepare data for transmit*/
+	/* 9. Fast path for uncorked UDP sockets: Prepare data for transmit */
 	if (!corkreq) {
 		struct inet_cork cork;
 
-		/* 进行数据打包 */
-		/*the data can be packed into a struct sk_buff*/
+		/* 对用户数据打包到skb中，有数据拷贝，并添加ip header。
+		 * 所有的data在一个ip packet中，因为 udp是有边界的协议。
+		 */
+		/* the data can be packed into a struct sk_buff */
 		skb = ip_make_skb(sk, fl4, getfrag, msg, ulen,
 				  sizeof(struct udphdr), &ipc, &rt,
 				  &cork, msg->msg_flags);
@@ -1256,12 +1261,12 @@ back_from_confirm:
 
 		/*move down the stack and closer to the IP protocol layer*/
 		if (!IS_ERR_OR_NULL(skb))
-			/*这里会往 IP层 下传数据。。。。。。。*/
+			/* 对数据进行udp协议封装，并下发到network layer中。 */
 			err = udp_send_skb(skb, fl4, &cork);
 		goto out;
 	}
 
-	/*###10. Slow path for corked UDP sockets with no preexisting corked data*/
+	/* 10. Slow path for corked UDP sockets with no preexisting corked data */
 	lock_sock(sk);
 	if (unlikely(up->pending)) {
 		/* The socket is already corked while preparing it. */

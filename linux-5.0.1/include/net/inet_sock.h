@@ -41,18 +41,23 @@
  * @ts_needaddr - Need to record addr of outgoing dev
  */
 struct ip_options {
-	__be32		faddr;
-	__be32		nexthop;
-	unsigned char	optlen;
+	__be32		faddr; /* 保存的第一跳地址 */
+	__be32		nexthop; /* 下一跳 */
+	unsigned char	optlen; /* 标识 IP 首部中选项所占的字节数 */
+
+	/*
+	 * 记录宽松路由或严格路由选项在 IP 首部中的偏移量，
+	 * 即选项的第一个字节的地址减去 IP 首部的第一个字节的地址
+	 */
 	unsigned char	srr;
 	unsigned char	rr;
 	unsigned char	ts;
-	unsigned char	is_strictroute:1,
-			srr_is_hit:1,
-			is_changed:1,
-			rr_needaddr:1,
-			ts_needtime:1,
-			ts_needaddr:1;
+	unsigned char	is_strictroute:1, /* 严格的源路由 */
+			srr_is_hit:1, /* 包目标地址命中 */
+			is_changed:1, /* IP校验和不合法 */
+			rr_needaddr:1, /* 需要记录出口设备的地址 */
+			ts_needtime:1, /* 需要记录时间戳 */
+			ts_needaddr:1; /* 需要记录出口设备的地址 */
 	unsigned char	router_alert;
 	unsigned char	cipso;
 	unsigned char	__pad2;

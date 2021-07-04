@@ -34,7 +34,10 @@ struct tcp_congestion_ops;
  * Pointers to address related TCP functions
  * (i.e. things that depend on the address family)
  */
- //以TCP为例注释：包含了一组AF_INET地址族中TCP协议实例的操作函数
+ /* 
+  * 以TCP为例注释：包含了一组AF_INET地址族中TCP协议实例的操作函数
+  * 该结构封装了一组与传输层有关的操作集，包括向网络层发送的接口、传输层的setsockopt接口等。
+  */
 struct inet_connection_sock_af_ops {
 	/* IPv4网络层传输函数 */
 	int	    (*queue_xmit)(struct sock *sk, struct sk_buff *skb, struct flowi *fl);
@@ -107,6 +110,7 @@ struct inet_connection_sock_af_ops {
  * @icsk_ack:		   Delayed ACK control data
  * @icsk_mtup;		   MTU probing control data
  */
+ /* 它是所有面向传输控制块的表示。其在inet_sock的基础上，增加了有关连接，确认，重传等成员。*/
 struct inet_connection_sock {
 	/* inet_sock has to be the first member! */
 	struct inet_sock	  icsk_inet;

@@ -404,6 +404,7 @@ int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	unsigned long flags;
 	struct sk_buff_head *list = &sk->sk_receive_queue;
 
+	/* 检测当前用于接收的缓存大小是否已经达到了接收缓冲区大小的上限 */
 	if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf) {
 		atomic_inc(&sk->sk_drops);
 		trace_sock_rcvqueue_full(sk, skb);
@@ -415,7 +416,10 @@ int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		return -ENOBUFS;
 	}
 
+	/* 送到UDP层后，就不需要再关注dev字段了。 */
 	skb->dev = NULL;
+
+	/* 设置报文属主 */
 	skb_set_owner_r(skb, sk);
 
 	/* we escape from rcu protected region, make sure we dont leak
@@ -423,6 +427,7 @@ int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	 */
 	skb_dst_force(skb);
 
+	/* 将报文添加到接收队列的尾部 */
 	spin_lock_irqsave(&list->lock, flags);
 	sock_skb_set_dropcount(sk, skb);
 	__skb_queue_tail(list, skb);
@@ -438,6 +443,7 @@ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	int err;
 
+	/* 如果安装了过滤器，则只接收满足过滤条件的报文 */
 	err = sk_filter(sk, skb);
 	if (err)
 		return err;
