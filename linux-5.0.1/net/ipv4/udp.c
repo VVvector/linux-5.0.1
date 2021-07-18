@@ -943,6 +943,7 @@ send:
 /*
  * Push out all pending data as one UDP datagram. Socket is locked.
  */
+ 
 int udp_push_pending_frames(struct sock *sk)
 {
 	struct udp_sock  *up = udp_sk(sk);
@@ -1044,12 +1045,19 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		These options are documented in the UDP man page and the send / sendto / sendmsg man page, respectively.
 	*/
 	/* croked feature： kernel会把用户层多次传下来的数据进行一个打包，
-	 * 然后再调用send()接口一次性往下传 （需要用户设定）。
+	 * 然后再调用send()接口一次性往下传 （需要用户设定）。 提高效率。
+	 *
+	 * 这个函数指针将在__ip_append_data()函数中解析用户层传入的数据，
+	 * 然后，将用户数据拷贝到内核buffer skb_buff中。
 	 */
 	getfrag = is_udplite ? udplite_getfrag : ip_generic_getfrag;
 
 	/* 1. UDP corking */
 	fl4 = &inet->cork.fl.u.ip4;
+
+	/* up->pending 以确定 socket 当前是否已被塞住(corked)，如果是，
+	 * 则直接跳到 do_append_data 进行数据追加(append)。 
+	 */
 	if (up->pending) {
 		/*
 		 * There are pending frames.
@@ -1079,6 +1087,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	 * Get and verify the address.
 	 */
 	 /* 2. get the UDP destination address and port */
+	/* 地址通过辅助结构（struct msghdr）传入 */
 	if (usin) {
 		if (msg->msg_namelen < sizeof(*usin))
 			return -EINVAL;
@@ -1091,6 +1100,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		dport = usin->sin_port;
 		if (dport == 0)
 			return -EINVAL;
+	/* 如果之前 socket 已经建立连接，那 socket 本身就存储了目标地址 */
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
 			return -EDESTADDRREQ;
@@ -1102,15 +1112,20 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 1;
 	}
 
-	/* 3. Socket transmit bookkeeping and timestamping */
+	/* 3. 设置ipcm结构，用于后续传递信息给 ip_append_data()*/
 	ipcm_init_sk(&ipc, inet);
 	ipc.gso_size = up->gso_size;
 
-	/* 处理一些辅助信息， 例如 IP_PKTINFO, IP_TTL, IP_TOS， 通过setsockopt()*/
+	/* 处理一些辅助信息
+	 * 1. 用户程序可将请求信息组织成struct msghdr类型变量。例如，IP_PKTINFO
+	 * 2. setsockopt 可以在socket 级别设置发送包的IP_TTL和IP_TOS。
+	 * 而辅助消息允许在每个数据包级别设置 TTL 和 TOS 值。
+	 */
 	/* 4. ancillary messages, via sendmsg */
 	if (msg->msg_controllen) {
 		err = udp_cmsg_send(sk, msg, &ipc.gso_size);
 		if (err > 0)
+			/* 解析辅助信息。 */
 			err = ip_cmsg_send(sk, msg, &ipc,
 					   sk->sk_family == AF_INET6);
 		if (unlikely(err < 0)) {
@@ -1122,7 +1137,9 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/* 检查是否有设置辅助信息，如果有，则进行 settting custom IP options。*/
+	/* 检查是否有通过设置辅助信息设置了的任何自定义IP选项，如果有，
+	 * 将使用这些自定义值，如果没有，就使用socket中已经在用的参数。
+	 */
 	/* 5. setting custom IP options*/
 	if (!ipc.opt) {
 		struct ip_options_rcu *inet_opt;
@@ -1156,7 +1173,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	saddr = ipc.addr;
 	ipc.addr = faddr = daddr;
 
-	/* 查看是否有设定 SRR IP option */
+	/* 检查是否设置了源记录路由(source record route - SRR) IP选项。 */
 	if (ipc.opt && ipc.opt->opt.srr) {
 		if (!daddr) {
 			err = -EINVAL;
@@ -1166,7 +1183,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/* 获取TOS IP flag */
+	/* 处理TOS IP 选项。这可从辅助信息中获取，也可以从socket当前值中获取。*/
 	tos = get_rttos(&ipc, inet);
 	if (sock_flag(sk, SOCK_LOCALROUTE) ||
 	    (msg->msg_flags & MSG_DONTROUTE) ||
@@ -1175,7 +1192,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/* 组播处理 */
+	/* 多播或者组播处理，用户可通过IP_PKTINFO辅助信息来指定发送包的源地址或者设备号。*/
 	/* 6. Multicase or unicase? */
 	if (ipv4_is_multicast(daddr)) {
 		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
@@ -1195,31 +1212,43 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		if (ipc.oif != inet->uc_index &&
 		    ipc.oif == l3mdev_master_ifindex_by_index(sock_net(sk),
 							      inet->uc_index)) {
+
+			/* 表示目标地址不是一个组播地址，而是一个单播地址。 */
 			ipc.oif = inet->uc_index;
 		}
 	}
 
-	/* 7. Routing */
+	/* 7. Routing 路由， 这里表示快速路径(fast path)，即如果socket已连接，则直接尝试获取路由。*/
 	if (connected)
 		rt = (struct rtable *)sk_dst_check(sk, 0);
 
+	/* 如果 socket 未连接，或者虽然已连接，但路由辅助函数 sk_dst_check 认定路由已过期，
+	 * 则代码将进入慢速路径（slow path）以生成一条路由记录。
+	 */
 	if (!rt) {
 		struct net *net = sock_net(sk);
 		__u8 flow_flags = inet_sk_flowi_flags(sk);
 
 		fl4 = &fl4_stack;
 
+		/* 首先调用 flowi4_init_output构造一个描述此 UDP 流的变量。 */
 		flowi4_init_output(fl4, ipc.oif, sk->sk_mark, tos,
 				   RT_SCOPE_UNIVERSE, sk->sk_protocol,
 				   flow_flags,
 				   faddr, saddr, dport, inet->inet_sport,
 				   sk->sk_uid);
 
+		/* socket 及其 flow 实例会传递给安全子系统，这样SELinux或SMACK)这样的系统就可以在
+		 * flow 实例上设置安全 ID。 
+		 */
 		/* systems like SELinux or SMACK can set a security id value on the flow structure */
 		security_sk_classify_flow(sk, flowi4_to_flowi(fl4));
 
+		/* 调用IP路由接口，创建一个路由实例。 */
 		/* the IP routing code to generate a routing structure */
 		rt = ip_route_output_flow(net, fl4, sk);
+
+		/* 如果创建路由实例失败，并且返回码是 ENETUNREACH,则 OUTNOROUTES 计数器将会加 1。 */
 		if (IS_ERR(rt)) {
 			err = PTR_ERR(rt);
 			rt = NULL;
@@ -1228,15 +1257,22 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			goto out;
 		}
 
+		/* 如果是广播路由，但是，socket的SOCK_BROADCAST选项未设定，则处理过程终止。 */
 		err = -EACCES;
 		if ((rt->rt_flags & RTCF_BROADCAST) &&
 		    !sock_flag(sk, SOCK_BROADCAST))
 			goto out;
+
+		/* 如果socket是"已连接"状态，则路由实例将缓存到socket上。 */
 		if (connected)
 			sk_dst_set(sk, dst_clone(&rt->dst));
 	}
 
+	/* 阻止ARP缓存过期 */
 	/* 8. Prevent the ARP cache from going stale with MSG_CONFIRM */
+	/* 如果调用send, sendto, sendmsg的时候有指定了MSG_CONFIRM, 则做ARP确认处理。
+	 * 该标志提示系统去确认一下 ARP 缓存条目是否仍然有效，防止其被垃圾回收。 
+	 */
 	if (msg->msg_flags & MSG_CONFIRM)
 		goto do_confirm;
 
@@ -1245,12 +1281,17 @@ back_from_confirm:
 	if (!ipc.addr)
 		daddr = ipc.addr = fl4->daddr;
 
+	/* 将处理 UDP cork 和 uncorked 情况。 */
 	/* Lockless fast path for the non-corking case. */
 	/* 9. Fast path for uncorked UDP sockets: Prepare data for transmit */
+	/* uncorked UDP sockets 快速路径：准备待发送数据 */
 	if (!corkreq) {
 		struct inet_cork cork;
 
-		/* 对用户数据打包到skb中，有数据拷贝，并添加ip header。
+		/* 
+		 * 将创建一个skb，需考虑到MTU, UDP corking, UFO, Fragmentation(如果
+		 * 硬件不支持UFO, 但是，要传输大于MTU的数据，则需要软件做分片)。
+		 * 并把用户数据打包到skb中，有数据拷贝，并添加ip header。
 		 * 所有的data在一个ip packet中，因为 udp是有边界的协议。
 		 */
 		/* the data can be packed into a struct sk_buff */
@@ -1260,13 +1301,20 @@ back_from_confirm:
 		err = PTR_ERR(skb);
 
 		/*move down the stack and closer to the IP protocol layer*/
+		/* 对数据进行udp协议封装，并下发到network layer中。 */
 		if (!IS_ERR_OR_NULL(skb))
-			/* 对数据进行udp协议封装，并下发到network layer中。 */
 			err = udp_send_skb(skb, fl4, &cork);
 		goto out;
 	}
 
 	/* 10. Slow path for corked UDP sockets with no preexisting corked data */
+	/* 没有被 cork 的数据时的慢路径。
+	 * 如果是使用了UDP corking，但是，之前的数据还没有被cork，则满路径开始：
+	 * 1. 对socket加锁。
+	 * 2. 检查应用程序是否有bug，即已经被cork的socket被再次cork的情况检查。
+	 * 3. 设置该UDP flow的一些参数，为corking做准备。
+	 * 4. 将要发送的数据追加到现有的数据中。
+	 */
 	lock_sock(sk);
 	if (unlikely(up->pending)) {
 		/* The socket is already corked while preparing it. */
@@ -1292,14 +1340,26 @@ do_append_data:
 	err = ip_append_data(sk, fl4, getfrag, msg, ulen,
 			     sizeof(struct udphdr), &ipc, &rt,
 			     corkreq ? msg->msg_flags|MSG_MORE : msg->msg_flags);
+
+	/* flushing corked socket */
+	/* 如果出现错误（错误为非零），则调用 udp_flush_pending_frames，这将取消
+	 * cork 并从 socket 的发送队列中删除所有数据 
+	 */
 	if (err)
 		udp_flush_pending_frames(sk);
+
+	/* 如果在未指定 MSG_MORE 的情况下发送此数据，则调用 udp_push_pending_frames，
+	 * 它将数据传递到更下面的网络IP层 
+	 */
 	else if (!corkreq)
 		err = udp_push_pending_frames(sk);
+
+	/* 如果发送队列为空，请将 socket 标记为不再 cork */
 	else if (unlikely(skb_queue_empty(&sk->sk_write_queue)))
 		up->pending = 0;
 	release_sock(sk);
 
+	/* 如果追加操作完成并且有更多数据要进入 cork，则代码将做一些清理工作，并返回追加数据的长度。 */
 out:
 	ip_rt_put(rt);
 out_free:
@@ -1314,12 +1374,22 @@ out_free:
 	 * things).  We could add another new stat but at least for now that
 	 * seems like overkill.
 	 */
+	 /* error的记录
+	  * 仅当返回的错误是 ENOBUFS（内核无可用内存）或 socket 已设置 SOCK_NOSPACE（发送队列已满）时，
+	  * SNDBUFERRORS 统计信息才会增加。
+	  */
 	if (err == -ENOBUFS || test_bit(SOCK_NOSPACE, &sk->sk_socket->flags)) {
 		UDP_INC_STATS(sock_net(sk),
 			      UDP_MIB_SNDBUFERRORS, is_udplite);
 	}
 	return err;
 
+	/* dst_confirm 处理只是在相应的缓存条目上设置一个标记位，稍
+	 * 后当查询邻居缓存并找到条目时将检查该标志，我们后面一些会看到。
+	 * 此功能通常用于 UDP 网络应用程序，以减少不必要的 ARP 流量。
+
+	 * 确认缓存条目后，跳回 back_from_confirm 标签。
+	 */
 do_confirm:
 	if (msg->msg_flags & MSG_PROBE)
 		dst_confirm_neigh(&rt->dst, &fl4->daddr);
@@ -2921,8 +2991,12 @@ struct proto udp_prot = {
 	.destroy		= udp_destroy_sock,
 	.setsockopt		= udp_setsockopt,
 	.getsockopt		= udp_getsockopt,
+
+	/* udp 发送接口 */
 	.sendmsg		= udp_sendmsg,
 	.recvmsg		= udp_recvmsg,
+
+	/* 零拷贝，用户空间用sendfile() */
 	.sendpage		= udp_sendpage,
 	.release_cb		= ip4_datagram_release_cb,
 	.hash			= udp_lib_hash,

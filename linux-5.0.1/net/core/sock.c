@@ -2222,6 +2222,7 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 	}
 
 	pfrag->offset = 0;
+	/* 先申请8 pages大小的frag page buffer*/
 	if (SKB_FRAG_PAGE_ORDER) {
 		/* Avoid direct reclaim but allow kswapd to wake */
 		pfrag->page = alloc_pages((gfp & ~__GFP_DIRECT_RECLAIM) |
@@ -2233,6 +2234,8 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 			return true;
 		}
 	}
+
+	/* 如果上面失败，再申请一页大小的frag page buffer */
 	pfrag->page = alloc_page(gfp);
 	if (likely(pfrag->page)) {
 		pfrag->size = PAGE_SIZE;

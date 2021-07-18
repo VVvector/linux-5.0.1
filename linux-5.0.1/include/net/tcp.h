@@ -359,8 +359,21 @@ static inline void tcp_dec_quickack_mode(struct sock *sk,
 	}
 }
 
+/*
+ * CWR CWR 为发送端缩小拥塞窗口标志，用来通知接收端它已经收到了设置 ECE 标志的 ACK。
+ * ECE ECE 有两个作用:
+ * 1. 在 TCP 三次握手时表明 TCP 端是否支持 ECN；
+ * 2. 在传输数据时表明接收到的 TCP 段的 IP 首部的 ECN 被设置为 11，即接收端发现了拥塞.
+ *
+ * 当两个支持 ECN 的 TCP 端进行 TCP 连接时，它们交换 SYN、 SYN+ACK、 ACK
+ * 段。对于支持 ECN 的 TCP 端来说， SYN 段的 ECE 和 CWR 标志都被设置了， SYN
+ * 的 ACK 只设置 ECE 标志。
+ */
+ /* 本端支持ECN */
 #define	TCP_ECN_OK		1
+/* 本端被通知了拥塞，此时作为发送方。 */
 #define	TCP_ECN_QUEUE_CWR	2
+/* 通知对端发送了拥塞，此时作为接收方。 */
 #define	TCP_ECN_DEMAND_CWR	4
 #define	TCP_ECN_SEEN		8
 
@@ -967,20 +980,46 @@ static inline bool tcp_skb_can_collapse_to(const struct sk_buff *skb)
 	return likely(!TCP_SKB_CB(skb)->eor);
 }
 
+/*
+ * 为了将拥塞控制算法相关的部分抽取处理， Linux 的开发者们采用了事件机制，即
+ * 在发生和拥塞控制相关的事件后，调用拥塞控制算法中的事件处理函数，以通知拥塞控
+ * 制模块，具体发生了什么。而作为实现拥塞控制算法的开发者，则无需关心事件是如何
+ * 发生的，以及相关的实现，只要专注于事件所对应的需要执行的算法即可。
+ *
+ * 当发生相关事件是会调用cwnd_event函数。该函数会传入一个枚举值作为参数，代
+ * 表具体发生的事件。枚举值如下：
+ */
 /* Events passed to congestion control interface */
 enum tcp_ca_event {
+	/* 首次传输，且无已发出但还未确认的包 */
 	CA_EVENT_TX_START,	/* first transmit when no packets in flight */
+
+	/* 拥塞窗口重启 */
 	CA_EVENT_CWND_RESTART,	/* congestion window restart */
+
+	/* 拥塞恢复结束 */
 	CA_EVENT_COMPLETE_CWR,	/* end of congestion recovery */
+
+	/* 超时，进入loss装 */
 	CA_EVENT_LOSS,		/* loss timeout */
+
+	/* ECN被设置了，但CE没有被置位 */
 	CA_EVENT_ECN_NO_CE,	/* ECT set, but not CE marked */
+
+	/* 收到了设置了CE位的IP报文 */
 	CA_EVENT_ECN_IS_CE,	/* received CE marked IP packet */
 };
 
+/* 当收到了 ACK 包时，会调用in_ack_event()。此时也会传递一些信息给拥塞控制算法。 */
 /* Information about inbound ACK, passed to cong_ops->in_ack_event() */
 enum tcp_ca_ack_event_flags {
+	/* 在慢速路径中处理 */
 	CA_ACK_SLOWPATH		= (1 << 0),	/* In slow path processing */
+
+	/* 该ACK更新了窗口大小 */
 	CA_ACK_WIN_UPDATE	= (1 << 1),	/* ACK updated window */
+
+	/* ECE位被设置了 */
 	CA_ACK_ECE		= (1 << 2),	/* ECE bit is set on ack */
 };
 
@@ -1030,43 +1069,57 @@ struct rate_sample {
 	bool is_ack_delayed;	/* is this (likely) a delayed ACK? */
 };
 
+/* 该结构描述了一套拥塞控制算法所需要支持的操作。 */
 struct tcp_congestion_ops {
+	/* 链接注册到系统中不同的拥塞算法 */
 	struct list_head	list;
 	u32 key;
 	u32 flags;
 
 	/* initialize private data (optional) */
 	void (*init)(struct sock *sk);
+
 	/* cleanup private data  (optional) */
+	/* 调用点：关闭套接字；sock选择了另外一套拥塞控制算法。 */
 	void (*release)(struct sock *sk);
 
 	/* return slow start threshold (required) */
-	u32 (*ssthresh)(struct sock *sk);
+	u32 (*ssthresh)(struct sock *sk); //返回ssthresh
+	
 	/* do new cwnd calculation (required) */
-	void (*cong_avoid)(struct sock *sk, u32 ack, u32 acked);
+	void (*cong_avoid)(struct sock *sk, u32 ack, u32 acked); //计算新的拥塞窗口
+	
 	/* call before changing ca_state (optional) */
-	void (*set_state)(struct sock *sk, u8 new_state);
+	void (*set_state)(struct sock *sk, u8 new_state); //在改变ca_state前会被调用
+	
 	/* call when cwnd event occurs (optional) */
-	void (*cwnd_event)(struct sock *sk, enum tcp_ca_event ev);
+	void (*cwnd_event)(struct sock *sk, enum tcp_ca_event ev); //处理拥塞窗口相关的事件
+	
 	/* call when ack arrives (optional) */
-	void (*in_ack_event)(struct sock *sk, u32 flags);
+	void (*in_ack_event)(struct sock *sk, u32 flags); //处理ACK包到达事件
+	
 	/* new value of cwnd after loss (required) */
-	u32  (*undo_cwnd)(struct sock *sk);
+	u32  (*undo_cwnd)(struct sock *sk); //用于撤销“缩小拥塞窗口”
+	
 	/* hook for packet ack accounting (optional) */
-	void (*pkts_acked)(struct sock *sk, const struct ack_sample *sample);
+	void (*pkts_acked)(struct sock *sk, const struct ack_sample *sample); //有段被确认时，会被调用
+	
 	/* override sysctl_tcp_min_tso_segs */
 	u32 (*min_tso_segs)(struct sock *sk);
+	
 	/* returns the multiplier used in tcp_sndbuf_expand (optional) */
 	u32 (*sndbuf_expand)(struct sock *sk);
+	
 	/* call when packets are delivered to update cwnd and pacing rate,
 	 * after all the ca_state processing. (optional)
 	 */
 	void (*cong_control)(struct sock *sk, const struct rate_sample *rs);
+	
 	/* get info for inet_diag (optional) */
 	size_t (*get_info)(struct sock *sk, u32 ext, int *attr,
-			   union tcp_cc_info *info);
+			   union tcp_cc_info *info); //为inet_diag准备的获取信息接口
 
-	char 		name[TCP_CA_NAME_MAX];
+	char 		name[TCP_CA_NAME_MAX]; //算法名
 	struct module 	*owner;
 };
 

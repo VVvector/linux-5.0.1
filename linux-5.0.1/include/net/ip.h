@@ -67,6 +67,7 @@ static inline unsigned int ip_hdrlen(const struct sk_buff *skb)
 	return ip_hdr(skb)->ihl * 4;
 }
 
+/* 该结构作为ip_append_data()的一个入参，让高层协议将一些控制信息传递给ip_append_data()。 */
 struct ipcm_cookie {
 	struct sockcm_cookie	sockc;
 	__be32			addr;
@@ -89,8 +90,8 @@ static inline void ipcm_init_sk(struct ipcm_cookie *ipcm,
 	ipcm_init(ipcm);
 
 	ipcm->sockc.tsflags = inet->sk.sk_tsflags;
-	ipcm->oif = inet->sk.sk_bound_dev_if;
-	ipcm->addr = inet->inet_saddr;
+	ipcm->oif = inet->sk.sk_bound_dev_if; //设备索引
+	ipcm->addr = inet->inet_saddr; //源地址
 }
 
 #define IPCB(skb) ((struct inet_skb_parm*)((skb)->cb))

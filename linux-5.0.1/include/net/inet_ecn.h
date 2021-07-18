@@ -72,6 +72,9 @@ static inline void INET_ECN_dontxmit(struct sock *sk)
 		(label) |= htonl(INET_ECN_ECT_0 << 20);			\
     } while (0)
 
+/* 当路由器检测到拥塞的时候，设置 ECN 域为 11。当然在设置之前会检测之前是否
+ * 出现了拥塞。没有的时候再进行设置。
+ */
 static inline int IP_ECN_set_ce(struct iphdr *iph)
 {
 	u32 check = (__force u32)iph->check;
@@ -84,6 +87,7 @@ static inline int IP_ECN_set_ce(struct iphdr *iph)
 	 * INET_ECN_ECT_0   => 11
 	 * INET_ECN_CE      => 00
 	 */
+	 /* 不支持 ECN 的返回 0, 已经设置拥塞的不重复设置，返回。 */
 	if (!(ecn & 2))
 		return !ecn;
 
@@ -94,7 +98,10 @@ static inline int IP_ECN_set_ce(struct iphdr *iph)
 	 */
 	check += (__force u16)htons(0xFFFB) + (__force u16)htons(ecn);
 
+	/* 重新计算校验码 */
 	iph->check = (__force __sum16)(check + (check>=0xFFFF));
+
+	/* 把ECN域设置为11，表示发送了拥塞 */
 	iph->tos |= INET_ECN_CE;
 	return 1;
 }

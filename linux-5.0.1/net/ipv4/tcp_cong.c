@@ -66,11 +66,12 @@ struct tcp_congestion_ops *tcp_ca_find_key(u32 key)
  * Attach new congestion control algorithm to the list
  * of available options.
  */
+ /* 该函数用于注册一个新的拥塞控制算法。 */
 int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 {
 	int ret = 0;
 
-	/* 必须实现 快启动，拥塞避免等 */
+	/* 所有的算法都必须实现 ssthresh 和 cong_avoid ops。即慢启动，拥塞避免 */
 	/* all algorithms must implement these */
 	if (!ca->ssthresh || !ca->undo_cwnd ||
 	    !(ca->cong_avoid || ca->cong_control)) {
@@ -78,6 +79,10 @@ int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 		return -EINVAL;
 	}
 
+	/* 计算算法名称的哈希值，加快比对速度。
+	 * tcp_ca_find_key函数通过哈希值来查找名称。 jash 是一种久经考验的性能极佳
+	 * 的哈希算法。据称，其计算速度和产生的分布都很漂亮。
+	 */
 	ca->key = jhash(ca->name, sizeof(ca->name), strlen(ca->name));
 
 	spin_lock(&tcp_cong_list_lock);
@@ -86,7 +91,7 @@ int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 			  ca->name);
 		ret = -EEXIST;
 	} else {
-		/* 注册到系统中 */
+		/* 将算法注册到系统中 */
 		list_add_tail_rcu(&ca->list, &tcp_cong_list);
 		pr_debug("%s registered\n", ca->name);
 	}
@@ -102,9 +107,11 @@ EXPORT_SYMBOL_GPL(tcp_register_congestion_control);
  * to ensure that this can't be done till all sockets using
  * that method are closed.
  */
+ /* 用于撤销一个拥塞控制算法。 */
 void tcp_unregister_congestion_control(struct tcp_congestion_ops *ca)
 {
 	spin_lock(&tcp_cong_list_lock);
+	/* 删除该拥塞算法 */
 	list_del_rcu(&ca->list);
 	spin_unlock(&tcp_cong_list_lock);
 
@@ -394,8 +401,12 @@ int tcp_set_congestion_control(struct sock *sk, const char *name, bool load, boo
  */
 u32 tcp_slow_start(struct tcp_sock *tp, u32 acked)
 {
+	/* 新的拥塞窗口的大小等于 ssthresh 和 cwnd 中较小的那一个 */
 	u32 cwnd = min(tp->snd_cwnd + acked, tp->snd_ssthresh);
 
+	/* 如果新的拥塞窗口小于 ssthresh，则 acked=0。
+	 * 否则 acked 为超过 ssthresh 部分的数目。
+	 */
 	acked -= cwnd - tp->snd_cwnd;
 	tp->snd_cwnd = min(cwnd, tp->snd_cwnd_clamp);
 
@@ -408,14 +419,24 @@ EXPORT_SYMBOL_GPL(tcp_slow_start);
  */
 void tcp_cong_avoid_ai(struct tcp_sock *tp, u32 w, u32 acked)
 {
+	/* 这里做了一个奇怪的小补丁，用于解决这样一种情况：
+	 * 如果 w 很大，那么， snd_cwnd_cnt 可能会积累为一个很大的值。
+	 * 此后， w 由于种种原因突然被缩小了很多。那么下面计算处理的 delta 就会很大。
+	 * 这可能导致流量的爆发。为了避免这种情况，这里提前增加了一个特判。
+	 */
 	/* If credits accumulated at a higher w, apply them gently now. */
 	if (tp->snd_cwnd_cnt >= w) {
 		tp->snd_cwnd_cnt = 0;
 		tp->snd_cwnd++;
 	}
 
+	/* 累计被确认的包的数目 */
 	tp->snd_cwnd_cnt += acked;
 	if (tp->snd_cwnd_cnt >= w) {
+		/* 窗口增大的大小应当为被确认的包的数目除以当前窗口大小。
+		 * 以往都是直接加一，但直接加一并不是正确的加法增加 (AI) 的实现。
+		 * 例如， w 为 10， acked 为 20 时，应当增加 20/10=2，而不是 1。
+		 */
 		u32 delta = tp->snd_cwnd_cnt / w;
 
 		tp->snd_cwnd_cnt -= delta * w;
@@ -459,6 +480,10 @@ u32 tcp_reno_ssthresh(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(tcp_reno_ssthresh);
 
+/* 
+ * CUBIC 通过返回当前拥塞窗口和上一次 LOSS 状态时的拥塞控制窗口中的最大值，
+ * 来得到窗口缩小前的大小。
+ */
 u32 tcp_reno_undo_cwnd(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);

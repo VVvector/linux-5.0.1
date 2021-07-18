@@ -47,11 +47,21 @@ MODULE_PARM_DESC(smooth_part, "log(B/(B*Smin))/log(B/(B-1))+B, # of RTT from Wma
 
 /* BIC TCP Parameters */
 struct bictcp {
+	/* 每次cwnd增长 1/cnt的比例 */
 	u32	cnt;		/* increase cwnd by 1 after ACKs */
+
+	/* snd_cwnd之前的最大值 */
 	u32	last_max_cwnd;	/* last maximum snd_cwnd */
+
+	/* 最近的snd_cwnd */
 	u32	last_cwnd;	/* the last snd_cwnd */
+
+	/* 更新last_cwnd的时间 */
 	u32	last_time;	/* time when updated last_cwnd */
+
+	/* 一轮的开始 */
 	u32	epoch_start;	/* beginning of an epoch */
+
 #define ACK_RATIO_SHIFT	4
 	u32	delayed_ack;	/* estimate the ratio of Packets/ACKs << 4 */
 };
@@ -72,6 +82,7 @@ static void bictcp_init(struct sock *sk)
 
 	bictcp_reset(ca);
 
+	/* 如果设置了初始值，就设置为初始值 */
 	if (initial_ssthresh)
 		tcp_sk(sk)->snd_ssthresh = initial_ssthresh;
 }
@@ -156,6 +167,14 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
  *	behave like Reno until low_window is reached,
  *	then increase congestion window slowly
  */
+ /* 门限值的计算
+  * 这里涉及到了 Fast Convergence 机制。该机制的存在是为了加快 CUBIC 算法的收敛速
+  * 度。在网络中，一个新的流的加入，会使得旧的流让出一定的带宽，以便给新的流让出一
+  * 定的增长空间。为了增加旧的流释放的带宽量， CUBIC 的作者引入了 Fast Convergence
+  * 机制。每次发生丢包后，会对比此次丢包时拥塞窗口的大小和之前的拥塞窗口大小。如
+  * 果小于了之前拥塞窗口的最大值，那么就说明可能是有新的流加入了。此时，就多留出
+  * 一些带宽给新的流使用，以使得网络尽快收敛到稳定状态。
+  */
 static u32 bictcp_recalc_ssthresh(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);

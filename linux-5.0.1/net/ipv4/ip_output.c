@@ -950,6 +950,13 @@ csum_page(struct page *page, int offset, int copy)
 	return csum;
 }
 
+
+/*
+ * 对上层下来的数据进行整形，如果是大数据包进行切割，变成多个小于或等于MTU的SKB。
+ * (CORK flag设置的情况下)如果是小数据包，并且开启了聚合，就会将若干个数据包整合。
+ *
+ * https://blog.csdn.net/minghe_uestc/article/details/7836920?utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromMachineLearnPai2%7Edefault-1.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromMachineLearnPai2%7Edefault-1.control
+ */
 static int __ip_append_data(struct sock *sk,
 			    struct flowi4 *fl4,
 			    struct sk_buff_head *queue,
@@ -988,12 +995,25 @@ static int __ip_append_data(struct sock *sk,
 	    sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID)
 		tskey = sk->sk_tskey++;
 
+	/* hh_len是L2的首部长度，分配内存时会为L2/L3首部预留空间，这样底层协议在处理时就
+	 * 不用重新分配内存并移动数据了
+	 */
 	hh_len = LL_RESERVED_SPACE(rt->dst.dev);
 
+	/* 每个IP片段都需要有IP首部，fragheaderlen就是IP层首部长度，包括选项部分 */
 	fragheaderlen = sizeof(struct iphdr) + (opt ? opt->optlen : 0);
-	maxfraglen = ((mtu - fragheaderlen) & ~7) + fragheaderlen;
-	maxnonfragsize = ip_sk_ignore_df(sk) ? 0xFFFF : mtu;
 
+	/* 为了计算方便，这里IP分片要求载荷部分是8字节对齐，所以，maxfraglen就是
+	 * 最大的IP分片长度（包括IP首部）。
+	 */
+	maxfraglen = ((mtu - fragheaderlen) & ~7) + fragheaderlen;
+
+	/* 长度判断，由于IPv4数据报首部的total字段是16bit，所以，一个IP报文
+	 * 的总长度(包括IP首部)最大就是0xffff，如果多次调用ip_append_data()，
+	 * 使得总长度超过了该限定值，那么就发送失败。
+	 * 一个IP数据包最大大小不能超过64K
+	 */
+	maxnonfragsize = ip_sk_ignore_df(sk) ? 0xFFFF : mtu;
 	if (cork->length + length > maxnonfragsize - fragheaderlen) {
 		ip_local_error(sk, EMSGSIZE, fl4->daddr, inet->inet_dport,
 			       mtu - (opt ? opt->optlen : 0));
@@ -1009,6 +1029,7 @@ static int __ip_append_data(struct sock *sk,
 	    rt->dst.dev->features & (NETIF_F_HW_CSUM | NETIF_F_IP_CSUM) &&
 	    (!(flags & MSG_MORE) || cork->gso_size) &&
 	    (!exthdrlen || (rt->dst.dev->features & NETIF_F_HW_ESP_TX_CSUM)))
+	    	/*由硬件执行校验和计算 */
 		csummode = CHECKSUM_PARTIAL;
 
 	if (flags & MSG_ZEROCOPY && length && sock_flag(sk, SOCK_ZEROCOPY)) {
@@ -1016,6 +1037,8 @@ static int __ip_append_data(struct sock *sk,
 		if (!uarg)
 			return -ENOBUFS;
 		extra_uref = true;
+
+		/* device支持SG, 且支持tx checksum offload */
 		if (rt->dst.dev->features & NETIF_F_SG &&
 		    csummode == CHECKSUM_PARTIAL) {
 			paged = true;
@@ -1033,16 +1056,25 @@ static int __ip_append_data(struct sock *sk,
 	 * each of segments is IP fragment ready for sending to network after
 	 * adding appropriate IP header.
 	 */
-
+	/* 判断输出队列是否为空，如果为空，就申请新的skb，
+	 * 不为空，就直接使用追加到上传的skb中。
+	*/
 	if (!skb)
 		goto alloc_new_skb;
 
 	/* 开始循环拷贝用户数据到skb中。 */
 	while (length > 0) {
 		/* Check if the remaining data fits into current packet. */
+		/* copy表示本轮循环要拷贝的数据量，初始化为当前skb还可用容纳的数据量。*/
 		copy = mtu - skb->len;
+
+		/* 当前skb不能容纳全部的剩余数据，说明当前skb不是最后一个IP分片，
+		 * 所以，需要按照8字节对齐方式安排skb，故重新计算copy。 
+		 */
 		if (copy < length)
 			copy = maxfraglen - skb->len;
+
+		/* 表示当前skb无剩余空间可以拷贝数据，那么需要重新分配一个新的skb */
 		if (copy <= 0) {
 			char *data;
 			unsigned int datalen;
@@ -1051,6 +1083,10 @@ static int __ip_append_data(struct sock *sk,
 			unsigned int alloclen;
 			unsigned int pagedlen;
 			struct sk_buff *skb_prev;
+
+		/* 这里需要分配skb，说明上一个skb肯定无法容纳更多的数据，所以，skb_prev->len
+		 * 一定是大于maxfrglen的，而且二者的差值一定在[0, 8)区间内
+		 */
 alloc_new_skb:
 			skb_prev = skb;
 			if (skb_prev)
@@ -1062,13 +1098,21 @@ alloc_new_skb:
 			 * If remaining data exceeds the mtu,
 			 * we know we need more fragment(s).
 			 */
+			 /* datalen记录了该新的skb能够保存多少字节的L4数据。*/
 			datalen = length + fraggap;
 			if (datalen > mtu - fragheaderlen)
 				datalen = maxfraglen - fragheaderlen;
+
+			/* fraglen记录了该新的skb的实际片段长度(datalen + IP首部长度) */
 			fraglen = datalen + fragheaderlen;
 			pagedlen = 0;
 
-			/* 如果对应的net dev不支持SG */
+			/* 1.如果后续很快有数据到达，并且设备不支持S/G IO：那么最优的分配策略就是直接分配一个
+			 * mtu大小的skb，这样后续的ip_append_data()调用可以直接使用，无需再次分配（当然，如果该skb
+			 * 剩余空间不足还是会继续分配的）。
+
+			 * 2. 其他情况，只需要分配能够容纳当前数据的大小就好。
+			 */
 			if ((flags & MSG_MORE) &&
 			    !(rt->dst.dev->features&NETIF_F_SG))
 				alloclen = mtu;
@@ -1086,9 +1130,15 @@ alloc_new_skb:
 			 * because we have no idea what fragment will be
 			 * the last.
 			 */
+
+			/* 如果是最后一个片段，将可能存在的额外尾部加上，IPsec才需要。 */
 			if (datalen == length + fraggap)
 				alloclen += rt->dst.trailer_len;
 
+			/* 分配缓冲区，transhdrlen不为0，表示第一次调用ip_append_data(),即
+			 * IP报文的第一个IP片段。
+			 * 第一次调用需要拷贝L4报文的首部，这是需要考虑更多的情况，所以分配函数不同。
+			 */
 			if (transhdrlen) {
 				skb = sock_alloc_send_skb(sk,
 						alloclen + hh_len + 15,
@@ -1102,14 +1152,20 @@ alloc_new_skb:
 				if (unlikely(!skb))
 					err = -ENOBUFS;
 			}
+
+			/* 分配失败，那么本次调用失败结束。 */
 			if (!skb)
 				goto error;
 
+
+			/* 初始化好skb的一些字段 */
 			/*
 			 *	Fill in the control structures
 			 */
 			skb->ip_summed = csummode;
 			skb->csum = 0;
+
+			/* 为L2预留头部空间 */
 			skb_reserve(skb, hh_len);
 
 			/*
@@ -1121,6 +1177,9 @@ alloc_new_skb:
 						 fragheaderlen);
 			data += fragheaderlen + exthdrlen;
 
+			/* fraggap不为0，需要将上一个skb末尾的几个字节数据拷贝到新的skb中，需要以增量方式
+			 * 重新计算校验和。
+			 */
 			if (fraggap) {
 				skb->csum = skb_copy_and_csum_bits(
 					skb_prev, maxfraglen,
@@ -1132,13 +1191,19 @@ alloc_new_skb:
 			}
 
 			copy = datalen - transhdrlen - fraggap - pagedlen;
+			/* 这里的getfrag()函数是 udplite_getfrag或之前ip_generic_getfrag，
+			 * 会做用户数据到内核buffer skb的拷贝。
+			 */
 			if (copy > 0 && getfrag(from, data + transhdrlen, offset, copy, fraggap, skb) < 0) {
 				err = -EFAULT;
 				kfree_skb(skb);
 				goto error;
 			}
 
+			/* 本次拷贝结束，更新偏移量，因为下一次拷贝有可能需要从offset出开始。 */
 			offset += copy;
+
+			/* 递减总的带拷贝数据量 */
 			length -= copy + transhdrlen;
 			transhdrlen = 0;
 			exthdrlen = 0;
@@ -1163,18 +1228,27 @@ alloc_new_skb:
 				wmem_alloc_delta += skb->truesize;
 			}
 
-			/* 将本skb加入到该skb list中。*/
+			/* 将新分配的skb放入发送队列中 */
 			__skb_queue_tail(queue, skb);
 			continue;
 		}
 
+		/* copy > 0的情况：表示最后一个skb还有一些空余空间。 */
+		/* 重新调整待拷贝的数据量 */
 		if (copy > length)
 			copy = length;
 
+		/*
+		 * 处理支持分散/收集（scatter/gather）IO 的网卡。许多卡都支持此功能，
+		 * 并使用 NETIF_F_SG 标志进行通告。支持该特性的网卡可以处理数据被分散到多个 buffer 的数据包;
+		 * 内核不需要花时间将多个缓冲区合并成一个缓冲区中。避免这种额外的复制会提升性能，
+		 * 大多数网卡都支持此功能
+		 */
 		if (!(rt->dst.dev->features&NETIF_F_SG) &&
 		    skb_tailroom(skb) >= copy) {
 			unsigned int off;
 
+			/* 只能拷贝到线性区 */
 			off = skb->len;
 			if (getfrag(from, skb_put(skb, copy),
 					offset, copy, off, skb) < 0) {
@@ -1182,13 +1256,18 @@ alloc_new_skb:
 				err = -EFAULT;
 				goto error;
 			}
+
+		/* 设备支持S/G IO 时，将数据拷贝到skb的frags page数组中。 */
 		} else if (!uarg || !uarg->zerocopy) {
 			int i = skb_shinfo(skb)->nr_frags;
 
 			err = -ENOMEM;
+
+			/* 申请skb frag buffer */
 			if (!sk_page_frag_refill(sk, pfrag))
 				goto error;
 
+			/* 检查页面是否可以合并 */
 			if (!skb_can_coalesce(skb, i, pfrag->page,
 					      pfrag->offset)) {
 				err = -EMSGSIZE;
@@ -1200,6 +1279,8 @@ alloc_new_skb:
 				skb_shinfo(skb)->nr_frags = ++i;
 				get_page(pfrag->page);
 			}
+
+			/* 将数据拷贝到skb的frags[]数组中 */
 			copy = min_t(int, copy, pfrag->size - pfrag->offset);
 			if (getfrag(from,
 				    page_address(pfrag->page) + pfrag->offset,
@@ -1217,6 +1298,8 @@ alloc_new_skb:
 			if (err < 0)
 				goto error;
 		}
+
+		/* 更新偏移和剩余要拷贝的数据量 */
 		offset += copy;
 		length -= copy;
 	}
@@ -1227,6 +1310,8 @@ alloc_new_skb:
 
 error_efault:
 	err = -EFAULT;
+
+	/* 出错处理，将length从cork中减去。 */
 error:
 	if (uarg)
 		sock_zerocopy_put_abort(uarg, extra_uref);
@@ -1303,9 +1388,15 @@ int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 	struct inet_sock *inet = inet_sk(sk);
 	int err;
 
+	/* 检查是否从用户传入了 MSG_PROBE 标志。该标志表示用户查询当前是否有数据可读。
+	 * 只是做路径探测（例如，确定PMTU） 
+	 */
 	if (flags&MSG_PROBE)
 		return 0;
 
+	/* 检查 socket 的发送队列是否为空。如果为空，意味着没有 cork 数据等待处理，
+	 * 因此调用ip_setup_cork 来设置 corking 
+	 */
 	if (skb_queue_empty(&sk->sk_write_queue)) {
 		err = ip_setup_cork(sk, &inet->cork.base, ipc, rtp);
 		if (err)
@@ -1314,6 +1405,7 @@ int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 		transhdrlen = 0;
 	}
 
+	/* 用于将数据处理成数据包的大量逻辑 */
 	return __ip_append_data(sk, fl4, &sk->sk_write_queue, &inet->cork.base,
 				sk_page_frag(sk), getfrag,
 				from, length, transhdrlen, flags);
@@ -1451,6 +1543,7 @@ error:
 
 static void ip_cork_release(struct inet_cork *cork)
 {
+	/* 主要是路由和IP选项 */
 	cork->flags &= ~IPCORK_OPT;
 	kfree(cork->opt);
 	cork->opt = NULL;
@@ -1508,9 +1601,12 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 	 */
 	skb->ignore_df = ip_sk_ignore_df(sk);
 
+
+	/* 下面是构造IP报文首部 */
 	/* DF bit is set when we want to see DF on outgoing frames.
 	 * If ignore_df is set too, we still allow to fragment this frame
 	 * locally. */
+	 /* PMTU相关 */
 	if (inet->pmtudisc == IP_PMTUDISC_DO ||
 	    inet->pmtudisc == IP_PMTUDISC_PROBE ||
 	    (skb->len <= dst_mtu(&rt->dst) &&
@@ -1580,6 +1676,7 @@ int ip_send_skb(struct net *net, struct sk_buff *skb)
 	return err;
 }
 
+/* RAW_SOCKET, ICMP等 都是用该接口，将用户数据发送到IP layer中。 */
 int ip_push_pending_frames(struct sock *sk, struct flowi4 *fl4)
 {
 	struct sk_buff *skb;
@@ -1626,6 +1723,7 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 	if (flags & MSG_PROBE)
 		return NULL;
 
+	/* 初始化一个新的tx        skb list，用于后续管理用户拷贝的skb。 */
 	__skb_queue_head_init(&queue);
 
 	cork->flags = 0;
@@ -1635,15 +1733,19 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 	if (err)
 		return ERR_PTR(err);
 
+	/* 申请新的skb buffer，并拷贝user data。 */
 	err = __ip_append_data(sk, fl4, &queue, cork,
 			       &current->task_frag, getfrag,
 			       from, length, transhdrlen, flags);
 	if (err) {
+		/* 清除发送队列
+		 * 如果__ip_append_data()遇到异常，那么需要将之前已经构造成功且放入发送队列的skb全部清除。 
+		 */
 		__ip_flush_pending_frames(sk, &queue, cork);
 		return ERR_PTR(err);
 	}
 
-	/* 将多个skb用frag_list的方式合成一个大的ip skb。 */
+	/* 将发送队列中的所有skb组织成一个IP报文。 */
 	return __ip_make_skb(sk, fl4, &queue, cork);
 }
 

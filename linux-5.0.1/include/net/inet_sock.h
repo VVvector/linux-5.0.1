@@ -156,12 +156,32 @@ static inline bool inet_bound_dev_eq(bool l3mdev_accept, int bound_dev_if,
 	return bound_dev_if == dif || bound_dev_if == sdif;
 }
 
+
+/*
+ * http://blog.chinaunix.net/uid-20671208-id-4557492.html
+ * 1.cork保存了同一个IP包中的一些共用信息。主要用于分片，或者多个数据组成一个IP报文发送时；
+ * 2.cork在udp中可以保存UDP首部需要的信息。这样当append UDP数据时，不需要通过参数传递这些信息；
+
+ * cork在英文中是软木塞的意思，那软木塞又和UDP有什么关系？
+ * 可以将UDP底部到IP的部分看成一个漏斗，如果从UDP下来的数据都是小数据（比如都只有几十个字节），
+ * 那无疑会加重下层处理数据的负担，而且会让网络充斥各种小报文。所以cork给人的感觉就是将这个漏斗底部给堵住，
+ * 等在一定时候再拔掉这个塞子，这样就可以把各种小数据汇集成一个大数据了。
+ */
 struct inet_cork {
+	/* 可取IPCORK_OP和IPCORK_ALLFRAG两个值的组合 */
 	unsigned int		flags;
 	__be32			addr;
+
+	/* IP选项 */
 	struct ip_options	*opt;
+
+	/* 记录一个IP分片可以容纳的数据量，其实就是MTU。目的是不用每次都计算。 */
 	unsigned int		fragsize;
+
+	/* 当前IP报文的数据长度，初始化为0 */
 	int			length; /* Total length of all frames */
+
+	/* 路由信息 */
 	struct dst_entry	*dst;
 	u8			tx_flags;
 	__u8			ttl;
