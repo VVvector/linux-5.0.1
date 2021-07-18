@@ -4173,16 +4173,41 @@ void tcp_reset(struct sock *sk)
  *
  *	If we are in FINWAIT-2, a received FIN moves us to TIME-WAIT.
  */
+ /*
+  * 被动关闭
+  * 在正常的被动关闭开始时， TCP 控制块目前处于 ESTABLISHED 状态，此时接收
+  * 到的 TCP 段都由tcp_rcv_established函数来处理，因此 FIN 段必定要做首部预测，
+  * 当然预测一定不会通过，所以 FIN 段是走慢速路径 tcp_data_queue()处理的。
+  * 在慢速路径中，首先进行 TCP 选项的处理 (假设存在)，然后根据段的序号检测该
+  * FIN 段是不是期望接收的段。如果是，则调用tcp_fin函数进行处理。如果不是，则说
+  * 明在 TCP 段传输过程中出现了失序，因此将该 FIN 段缓存到乱序队列中，等待它之前
+  * 的所有 TCP 段都到, 才能做处理。
+  */
+ /*
+  * 第一次握手: 接收 FIN
+  * 在这个过程中，服务器端主要接收到了客户端的 FIN 段，并且跳转到了CLOSE_WAIT状态。
+  */
 void tcp_fin(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 接收到 FIN 段后需要调度、发送 ACK。*/
 	inet_csk_schedule_ack(sk);
 
+	/* 设置了传输控制块的套接口状态为RCV_SHUTDOWN，表示服务器端不允许再接收数据 */
 	sk->sk_shutdown |= RCV_SHUTDOWN;
+
+	/* 设置传输控制块的SOCK_DONE标志，表示 TCP 会话结束。 */
 	sock_set_flag(sk, SOCK_DONE);
 
+	/* 当然，接收到 FIN 字段的时候， TCP 有可能并不是处于TCP_ESTABLISHED的，这
+	 * 里我们一并介绍了。
+	 */
 	switch (sk->sk_state) {
+	/* 
+	 * 如果 TCP 块处于TCP_SYN_RECV或者TCP_ESTABLISHED状态，接收到 FIN 之后，将
+	 * 状态设置为CLOSE_WAIT, 并确定延时发送 ack。
+	 */
 	case TCP_SYN_RECV:
 	case TCP_ESTABLISHED:
 		/* Move to CLOSE_WAIT */
@@ -4190,6 +4215,10 @@ void tcp_fin(struct sock *sk)
 		inet_csk(sk)->icsk_ack.pingpong = 1;
 		break;
 
+	/*
+	 * 在TCP_CLOSE_WAIT或者TCP_CLOSING状态下收到的 FIN 为重复收到的 FIN，忽略。
+	 * 在TCP_LAST_ACK状态下正在等待最后的 ACK 字段，故而忽略。
+	 */
 	case TCP_CLOSE_WAIT:
 	case TCP_CLOSING:
 		/* Received a retransmission of the FIN, do
@@ -4200,6 +4229,10 @@ void tcp_fin(struct sock *sk)
 		/* RFC793: Remain in the LAST-ACK state. */
 		break;
 
+	/*
+	 * 显然，只有客户端和服务器端同时关闭的情况下，才会出现这种状态，而且此时双
+	 * 方必须都发送 ACK 字段，并且将状态置为TCP_CLOSING。
+	 */
 	case TCP_FIN_WAIT1:
 		/* This case occurs when a simultaneous close
 		 * happens, we must ack the received FIN and
@@ -4208,6 +4241,12 @@ void tcp_fin(struct sock *sk)
 		tcp_send_ack(sk);
 		tcp_set_state(sk, TCP_CLOSING);
 		break;
+
+	/*
+	 * 在TCP_FIN_WAIT2状态下接收到 FIN 段，根据 TCP 状态转移图应该发送 ACK 响
+	 * 应服务器端。
+	 * 在其他状态，显然是不能收到 FIN 段的。
+	 */
 	case TCP_FIN_WAIT2:
 		/* Received a FIN -- send ACK and enter TIME_WAIT. */
 		tcp_send_ack(sk);
@@ -4222,6 +4261,13 @@ void tcp_fin(struct sock *sk)
 		break;
 	}
 
+	/*
+	 * 清空接到的乱序队列上的段，再清除有关 SACK 的信息和标志，最后释放已接收队
+	 * 列中的段。
+	 * 如果此时套接口未处于 DEAD 状态，则唤醒等待该套接口的进程。如果在发送接
+	 * 收方向上都进行了关闭，或者此时传输控制块处于 CLOSE 状态，则唤醒异步等待该套
+	 * 接口的进程，通知它们该连接已经停止，否则通知它们连接可以进行写操作。
+	 */
 	/* It _is_ possible, that we have something out-of-order _after_ FIN.
 	 * Probably, we should reset in this case. For now drop them.
 	 */
@@ -6173,6 +6219,12 @@ reset_and_undo:
  * 心主动连接情况下的处理。之前我们分析源码时得出，客户端发送 SYN 包后，
  * 会将状态机设置为TCP_SYN_SENT状态。因此，我们仅在这里分析该状态下的代码。
  */
+ /*
+  * 主动关闭：第二次握手：接收ACK。
+  * 在发出 FIN 后，接收端会回复 ACK 确认收到了请求。从这里开始有两种情况，一
+  * 种是教科书式的四次握手的情况，另一种是双方同时发出 FIN 的情况，这里我们考虑前
+  * 一种情况。
+  */
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -6262,6 +6314,7 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		return 0;
 
 	/* step 5: check the ACK field */
+	/* 判断是否可以接收 */
 	acceptable = tcp_ack(sk, skb, FLAG_SLOWPATH |
 				      FLAG_UPDATE_TS_RECENT |
 				      FLAG_NO_CHALLENGE_ACK) > 0;
@@ -6339,25 +6392,39 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		 * ACK we have received, this would have acknowledged
 		 * our SYNACK so stop the SYNACK timer.
 		 */
+		 /*
+		  * 如果当前的套接字为开启了 Fast Open 的套接字，且该 ACK 为
+		  * 接收到的第一个 ACK，那么这个 ACK 应该是在确认 SYN ACK 包，
+		  * 因此，停止 SYNACK 计时器。
+		  */
 		if (req) {
 			/* We no longer need the request sock. */
+			/* 移除 fastopen 请求 */
 			reqsk_fastopen_remove(sk, req, false);
 			tcp_rearm_rto(sk);
 		}
+
+		/* 未确认的序列号是不是等于发送队列队尾序列号??*/
 		if (tp->snd_una != tp->write_seq)
 			break;
 
+		/* 收到 ACK 后，转移到 TCP_FIN_WAIT2 状态，将发送端关闭。 */
 		tcp_set_state(sk, TCP_FIN_WAIT2);
 		sk->sk_shutdown |= SEND_SHUTDOWN;
 
+		/* 如果路由缓存非空，确认路由缓存有效 */
 		sk_dst_confirm(sk);
 
+		/* 唤醒等待该套接字的进程 */
 		if (!sock_flag(sk, SOCK_DEAD)) {
 			/* Wake up lingering close() */
 			sk->sk_state_change(sk);
 			break;
 		}
 
+		/* 如果 linger2 小于 0, 则说明无需在 FIN_WAIT2 状态等待，
+		 * 直接关闭传输控制块。 
+		 */
 		if (tp->linger2 < 0) {
 			tcp_done(sk);
 			NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONDATA);
@@ -6373,6 +6440,11 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 			return 1;
 		}
 
+		/*
+		 * 转换到TCP_FIN_WAIT2以后，计算接受 fin 包的超时时间。如果还能留出 TIMEWAIT 阶段的时间
+		 *（TIMEWAIT 阶段有最长时间限制），那么在此之前，就激活保活计
+		 * 时器保持连接。如果时间已经不足了，就主动调用tcp_time_wait 进入 TIMEWAIT 状态。
+		 */
 		tmo = tcp_fin_time(sk);
 		if (tmo > TCP_TIMEWAIT_LEN) {
 			inet_csk_reset_keepalive_timer(sk, tmo - TCP_TIMEWAIT_LEN);
@@ -6385,12 +6457,24 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 			 */
 			inet_csk_reset_keepalive_timer(sk, tmo);
 		} else {
+			/* 进入 TCP_FIN_WAIT2 状态等待。 
+			 * 执行完该段代码后，则进入了FIN_WAIT2状态。
+			 * 由于进入到FIN_WAIT2状态后，不会再处理 TCP 段的数据。因此，出于资源和方
+			 * 面的考虑， Linux 内核采用了一个较小的结构体tcp_timewait_sock来取代正常的 TCP
+			 * 传输控制块。 TIME_WAIT也是可作同样处理。该替换过程通过函数tcp_time_wait完成。
+			 */
 			tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
 			goto discard;
 		}
 		break;
 	}
 
+	/*
+	 * 同时关闭：
+	 * 还有一种情况是双方同时发出了 FIN 报文，准备关闭连接。表现在 TCP 的状态图
+	 * 上，就是在发出 FIN 包以后又收到了 FIN 包，因此进入了 CLOSING 状态。之后，
+	 * CLOSING 状态等待接受 ACK，就会进入到下一个状态。
+	 */
 	case TCP_CLOSING:
 		if (tp->snd_una == tp->write_seq) {
 			tcp_time_wait(sk, TCP_TIME_WAIT, 0);
@@ -6398,9 +6482,16 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		}
 		break;
 
+	/*
+	 * 第四次握手: 接收 FIN 的 ACK
+	 * 我们知道内核中接收数据都是从 tcp_v4_do_rcv 函数开始，简单分析就知道会继
+	 * 续调用 tcp_rcv_state_process 函数，然后会根据相应的状态到这里。
+	 */
 	case TCP_LAST_ACK:
+		/* 未确认等于下一个要发送，更新 metrics， */
 		if (tp->snd_una == tp->write_seq) {
 			tcp_update_metrics(sk);
+			/* 置状态为 CLOSE*/
 			tcp_done(sk);
 			goto discard;
 		}
@@ -6411,6 +6502,10 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 	tcp_urg(sk, skb, th);
 
 	/* step 7: process the segment text */
+	/* 如果收到的 ACK 没问题则转入TIME_WAIT状态，利用 timewait 控制块完成后续的工作。
+	 * 如果段中的数据正常，且接口没有关闭，那么就收下数据。否则，就直接忽略掉数据段
+	 * 的数据。
+	 */
 	switch (sk->sk_state) {
 	case TCP_CLOSE_WAIT:
 	case TCP_CLOSING:
@@ -6424,10 +6519,15 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		 * RFC 1122 says we MUST send a reset.
 		 * BSD 4.4 also does reset.
 		 */
+		 /*
+		  * 如果接收方向已经关闭，而又收到新的数据，则需要给对方发送
+		  * RST 段，告诉对方已经把数据丢弃。
+		  */
 		if (sk->sk_shutdown & RCV_SHUTDOWN) {
 			if (TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq &&
 			    after(TCP_SKB_CB(skb)->end_seq - th->fin, tp->rcv_nxt)) {
 				NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONDATA);
+				/* 如果接收端已经关闭了，那么发送 RESET。 */
 				tcp_reset(sk);
 				return 1;
 			}
@@ -6440,6 +6540,10 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* tcp_data could move socket to TIME-WAIT */
+	/*
+	 * 如果 TCP 的状态不处于 CLOSE 状态，则发送队列中的段，
+	 * 同时调度 ACK，确定是立即发送，还是延时发送。
+	 */
 	if (sk->sk_state != TCP_CLOSE) {
 		tcp_data_snd_check(sk);
 		tcp_ack_snd_check(sk);

@@ -87,6 +87,11 @@ tcp_timewait_check_oow_rate_limit(struct inet_timewait_sock *tw,
  *
  * We don't need to initialize tmp_out.sack_ok as we don't use the results
  */
+ /* 第三次握手: 接受 FIN
+  * 此时，由于已经使用了 timewait 控制块取代了 TCP 控制块。因此，对应的处理代
+  * 码不再位于 tcp_rcv_state_process中，而是换到了 tcp_timewait_state_process函
+  * 数中。
+  */
 enum tcp_tw_status
 tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 			   const struct tcphdr *th)
@@ -95,7 +100,12 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 	struct tcp_timewait_sock *tcptw = tcp_twsk((struct sock *)tw);
 	bool paws_reject = false;
 
+	/* 首先标记没有看到时间戳 */
 	tmp_opt.saw_tstamp = 0;
+
+	/* 检测收到的包是否含有时间戳选项，如果有，则进行 PAWS 相关的检测。之后，开始进
+	 * 行 TCP_FIN_WAIT2相关的处理。
+	 */
 	if (th->doff > (sizeof(*th) >> 2) && tcptw->tw_ts_recent_stamp) {
 		tcp_parse_options(twsk_net(tw), skb, &tmp_opt, 0, NULL);
 
@@ -108,10 +118,13 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 		}
 	}
 
+	/* TCP_FIN_WAIT2相关处理 */
 	if (tw->tw_substate == TCP_FIN_WAIT2) {
 		/* Just repeat all the checks of tcp_rcv_state_process() */
+		/* 重复 tcp_rcv_state_process() 所进行的所有检测 */
 
 		/* Out of window, send ACK */
+		/* 序号不在窗口内或序号无效，发送ACK */
 		if (paws_reject ||
 		    !tcp_in_window(TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq,
 				   tcptw->tw_rcv_nxt,
@@ -119,12 +132,15 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 			return tcp_timewait_check_oow_rate_limit(
 				tw, skb, LINUX_MIB_TCPACKSKIPPEDFINWAIT2);
 
+		/* 如果收到 RST 包，则销毁 timewait 控制块并返回 TCP_TW_SUCCESS */
 		if (th->rst)
 			goto kill;
 
+		/* 如果收到过期的 SYN 包，则销毁并发送 RST */
 		if (th->syn && !before(TCP_SKB_CB(skb)->seq, tcptw->tw_rcv_nxt))
 			return TCP_TW_RST;
 
+		/* 如果收到 DACK，则释放该控制块，返回 TCP_TW_SUCCESS*/
 		/* Dup ACK? */
 		if (!th->ack ||
 		    !after(TCP_SKB_CB(skb)->end_seq, tcptw->tw_rcv_nxt) ||
@@ -133,6 +149,7 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 			return TCP_TW_SUCCESS;
 		}
 
+		/* 之后只有两种情况，有新数据或收到 FIN 包 */
 		/* New data or FIN. If new data arrive after half-duplex close,
 		 * reset.
 		 */
@@ -141,17 +158,22 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 			return TCP_TW_RST;
 
 		/* FIN arrived, enter true time-wait state. */
+		/* 收到了 FIN 包，进入 TIME_WAIT 状态 */
 		tw->tw_substate	  = TCP_TIME_WAIT;
 		tcptw->tw_rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+
+		/* 如果启用了时间戳选项，则设置相关属性 */
 		if (tmp_opt.saw_tstamp) {
 			tcptw->tw_ts_recent_stamp = ktime_get_seconds();
 			tcptw->tw_ts_recent	  = tmp_opt.rcv_tsval;
 		}
 
+		/* 启动 TIME_WAIT 定时器 */
 		inet_twsk_reschedule(tw, TCP_TIMEWAIT_LEN);
 		return TCP_TW_ACK;
 	}
 
+	/* 下面是TIME_WAIT状态的处理 */
 	/*
 	 *	Now real TIME-WAIT state.
 	 *
@@ -168,12 +190,15 @@ tcp_timewait_state_process(struct inet_timewait_sock *tw, struct sk_buff *skb,
 	 *	(2)  returns to TIME-WAIT state if the SYN turns out
 	 *	to be an old duplicate".
 	 */
-
+	/* 序号没有回卷, 且正是预期接收的段，段中没有负载
+	 * 或段中存在 RST 标志。
+	 */
 	if (!paws_reject &&
 	    (TCP_SKB_CB(skb)->seq == tcptw->tw_rcv_nxt &&
 	     (TCP_SKB_CB(skb)->seq == TCP_SKB_CB(skb)->end_seq || th->rst))) {
 		/* In window segment, it may be only reset or bare ack. */
 
+		/* 如果存在 RST*/
 		if (th->rst) {
 			/* This is TIME_WAIT assassination, in two flavors.
 			 * Oh well... nobody has a sufficient solution to this
@@ -185,6 +210,7 @@ kill:
 				return TCP_TW_SUCCESS;
 			}
 		} else {
+			/* 重新激活定时器 */
 			inet_twsk_reschedule(tw, TCP_TIMEWAIT_LEN);
 		}
 
@@ -197,6 +223,14 @@ kill:
 		return TCP_TW_SUCCESS;
 	}
 
+	/*
+	 * 如果处于TIME_WAIT状态时，收到了 Reset 包，那么，按照 TCP 协议的要求，应当重置
+	 * 连接。但这里就产生了一个问题。本来TIME_WAIT之所以要等待 2MSL 的时间，就是为了
+	 * 避免在网络上滞留的包对新的连接造成影响。但是，此处却可以通过发送 rst 报文强行
+	 * 重置连接。重置意味着该连接会被强行关闭，跳过了 2MSL 阶段。这样就和设立 2MSL
+	 * 的初衷不符了。具体的讨论见1.3.3。如果启用了 RFC1337，那么就会忽略掉这个 RST
+	 * 报文。
+	 */
 	/* Out of window segment.
 
 	   All the segments are ACKed immediately.
@@ -214,10 +248,12 @@ kill:
 	   but not fatal yet.
 	 */
 
+	/* 接收到 SYN 段，并且没有 RST 和 ACK 标志，并且没有拒绝检测，并且序号有效。 */
 	if (th->syn && !th->rst && !th->ack && !paws_reject &&
 	    (after(TCP_SKB_CB(skb)->seq, tcptw->tw_rcv_nxt) ||
 	     (tmp_opt.saw_tstamp &&
 	      (s32)(tcptw->tw_ts_recent - tmp_opt.rcv_tsval) < 0))) {
+	      /* 如果可以接受该 SYN 请求，那么重新计算 isn 号，并返回 TCP_TW_SYN。 */
 		u32 isn = tcptw->tw_snd_nxt + 65535 + 2;
 		if (isn == 0)
 			isn++;
@@ -228,6 +264,7 @@ kill:
 	if (paws_reject)
 		__NET_INC_STATS(twsk_net(tw), LINUX_MIB_PAWSESTABREJECTED);
 
+	/* 此后，如果收到了序号绕回的包，那么就重置TIME_WAIT定时器，并返回 TCP_TW_ACK。 */
 	if (!th->rst) {
 		/* In this case we must reset the TIMEWAIT timer.
 		 *
@@ -271,6 +308,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 
 	if (tw) {
 		struct tcp_timewait_sock *tcptw = tcp_twsk((struct sock *)tw);
+		/* 计算重传超时时间 */
 		const int rto = (icsk->icsk_rto << 2) - (icsk->icsk_rto >> 1);
 		struct inet_sock *inet = inet_sk(sk);
 
@@ -315,6 +353,12 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		} while (0);
 #endif
 
+
+		/*
+		 * 如果成功将相关时间戳信息添加到对端信息管理块中，
+		 * 则 TIME_WAIT 的超时时间设置为 3.5 倍的往返时间。
+		 * 否则，设置为 60s。 
+		 */
 		/* Get the TIME_WAIT timeout firing. */
 		if (timeo < rto)
 			timeo = rto;
@@ -328,11 +372,12 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		 */
 		local_bh_disable();
 
-		/* 很重要： TCP_TIMEWAIT_LEN: 60s */
+		 /* 启动定时器 */
 		inet_twsk_schedule(tw, timeo);
 		/* Linkage updates.
 		 * Note that access to tw after this point is illegal.
 		 */
+		 /* 将 timewait 控制块插入到哈希表中，替代原有的传输控制块 */
 		inet_twsk_hashdance(tw, sk, &tcp_hashinfo);
 		local_bh_enable();
 	} else {
@@ -340,9 +385,11 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		 * socket up.  We've got bigger problems than
 		 * non-graceful socket closings.
 		 */
+		 /* 当内存不够时，直接关闭连接 */
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPTIMEWAITOVERFLOW);
 	}
 
+	/* 更新一些测量值并关闭原来的传输控制块 */
 	tcp_update_metrics(sk);
 	tcp_done(sk);
 }

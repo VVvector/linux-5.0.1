@@ -3290,6 +3290,7 @@ void sk_forced_mem_schedule(struct sock *sk, int size)
  */
 void tcp_send_fin(struct sock *sk)
 {
+	/* 取得 sock 发送队列的最后一个元素，如果为空，返回 null*/
 	struct sk_buff *skb, *tskb = tcp_write_queue_tail(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 
@@ -3298,15 +3299,17 @@ void tcp_send_fin(struct sock *sk)
 	 * Note: in the latter case, FIN packet will be sent after a timeout,
 	 * as TCP stack thinks it has already been transmitted.
 	 */
+	 /* 这里做了一些优化, 如果发送队列的末尾还有段没有发出去，则利用该段发送 FIN。 */
 	if (!tskb && tcp_under_memory_pressure(sk))
 		tskb = skb_rb_last(&sk->tcp_rtx_queue);
 
+	/* 如果当前正在发送的队列不为空，或者当前 TCP 处于内存压力下 (值得进一步分析)，则进行该优化 */
 	if (tskb) {
 coalesce:
 		TCP_SKB_CB(tskb)->tcp_flags |= TCPHDR_FIN;
-		TCP_SKB_CB(tskb)->end_seq++;
+		TCP_SKB_CB(tskb)->end_seq++; //递增序列号
 		tp->write_seq++;
-		if (tcp_write_queue_empty(sk)) {
+		if (tcp_write_queue_empty(sk)) { //队头为空
 			/* This means tskb was already sent.
 			 * Pretend we included the FIN on previous transmit.
 			 * We need to set tp->snd_nxt to the value it would have
@@ -3317,8 +3320,10 @@ coalesce:
 			return;
 		}
 	} else {
+		/* 为封包分配空间 */
 		skb = alloc_skb_fclone(MAX_TCP_HEADER, sk->sk_allocation);
 		if (unlikely(!skb)) {
+			/* 如果分配不到空间，且队尾还有未发送的包，利用该包发出 FIN。 */
 			if (tskb)
 				goto coalesce;
 			return;
@@ -3326,11 +3331,18 @@ coalesce:
 		INIT_LIST_HEAD(&skb->tcp_tsorted_anchor);
 		skb_reserve(skb, MAX_TCP_HEADER);
 		sk_forced_mem_schedule(sk, skb->truesize);
+
+		/* 构造一个 FIN 包，并加入发送队列。 */
 		/* FIN eats a sequence byte, write_seq advanced by tcp_queue_skb(). */
 		tcp_init_nondata_skb(skb, tp->write_seq,
 				     TCPHDR_ACK | TCPHDR_FIN);
 		tcp_queue_skb(sk, skb);
 	}
+
+	/*  
+	 * 在函数的最后，将所有的剩余数据一口气发出去，完成发送 FIN 包的过程。至此，主动
+	 * 关闭过程的第一次握手完成。
+	 */
 	__tcp_push_pending_frames(sk, tcp_current_mss(sk), TCP_NAGLE_OFF);
 }
 

@@ -2618,13 +2618,18 @@ static const unsigned char new_state[16] = {
   [TCP_NEW_SYN_RECV]	= TCP_CLOSE,	/* should not happen ! */
 };
 
+/* 进行状态转移，并且判断是否可以发送 FIN。 */
 static int tcp_close_state(struct sock *sk)
 {
 	int next = (int)new_state[sk->sk_state];
+
+	/* 除去可能的FIN_ACTION */
 	int ns = next & TCP_STATE_MASK;
 
+	/* 根据状态图进行状态转移 */
 	tcp_set_state(sk, ns);
 
+	/* 如果需要执行发送FIN的动作，则返回true */
 	return next & TCP_ACTION_FIN;
 }
 
@@ -2632,7 +2637,7 @@ static int tcp_close_state(struct sock *sk)
  *	Shutdown the sending side of a connection. Much like close except
  *	that we don't receive shut down or sock_set_flag(sk, SOCK_DEAD).
  */
-
+/* 通过 shutdown 系统调用，主动关闭 TCP 连接。该系统调用最终由tcp_shutdown实现。 */
 void tcp_shutdown(struct sock *sk, int how)
 {
 	/*	We need to grab some memory, and put together a FIN,
@@ -2642,11 +2647,15 @@ void tcp_shutdown(struct sock *sk, int how)
 	if (!(how & SEND_SHUTDOWN))
 		return;
 
+	/* 发送方向的关闭，并且 TCP状态为ESTABLISHED, SYN_SENT, SYN_RECV, CLOSE_WAIT状态的一个 */
 	/* If we've already sent a FIN, or it's a closed state, skip this. */
 	if ((1 << sk->sk_state) &
 	    (TCPF_ESTABLISHED | TCPF_SYN_SENT |
 	     TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
 		/* Clear out any half completed packets.  FIN if needed. */
+	     	/* 如果此时已经发送了一个FIN了，就跳过。
+	     	 * 该函数会在需要发送 FIN 时，调用tcp_close_state()来设置 TCP 的状态。
+	     	 */
 		if (tcp_close_state(sk))
 			tcp_send_fin(sk);
 	}
@@ -2667,12 +2676,23 @@ bool tcp_check_oom(struct sock *sk, int shift)
 	return too_many_orphans || out_of_socket_memory;
 }
 
+/* 主动关闭 - 第一次握手：发送FIN
+ * 当一段完成数据发送任务之后，应用层即可调用 close 发送一个 FIN 来终止该方向
+ * 上的连接，当另一端收到这个 FIN 后，必须通知应用层，另一端已经终止了数据传送。
+ * 而 close 系统调用在传输层接收的实现就是 tcp_close,
+ */
 void tcp_close(struct sock *sk, long timeout)
 {
 	struct sk_buff *skb;
 	int data_was_unread = 0;
 	int state;
 
+	/*
+	 * 首先，对传输控制块加锁。然后设置关闭标志为 SHUTDOWN_MASK, 表示进行双向的关闭。
+	 * 如果套接口处于侦听状态，这种情况处理相对比较简单，因为没有建立起连接，因
+	 * 此无需发送 FIN 等操作。设置 TCP 的状态为 CLOSE，然后终止侦听。最后跳转到
+	 * adjudge_to_death 处进行相关处理。
+	 */
 	lock_sock(sk);
 	sk->sk_shutdown = SHUTDOWN_MASK;
 
@@ -2685,6 +2705,9 @@ void tcp_close(struct sock *sk, long timeout)
 		goto adjudge_to_death;
 	}
 
+	/*
+	 * 因为要关闭连接，故需要释放已接收队列上的段，同时, 统计释放了多少数据，然后回收缓存。
+	 */
 	/*  We need to flush the recv. buffs.  We do this only on the
 	 *  descriptor close, not protocol-sourced closes, because the
 	 *  reader process may not have drained the data yet!
@@ -2700,6 +2723,8 @@ void tcp_close(struct sock *sk, long timeout)
 
 	sk_mem_reclaim(sk);
 
+	/* 如果 socket 本身就是 close 状态的话，直接跳到 adjudge_to_death 就好。
+	 */
 	/* If socket has been already reset (e.g. in tcp_reset()) - kill it. */
 	if (sk->sk_state == TCP_CLOSE)
 		goto adjudge_to_death;
@@ -2711,18 +2736,31 @@ void tcp_close(struct sock *sk, long timeout)
 	 * advertise a zero window, then kill -9 the FTP client, wheee...
 	 * Note: timeout is always zero in such a case.
 	 */
+	 /* 开启 repair 选项 */
 	if (unlikely(tcp_sk(sk)->repair)) {
 		sk->sk_prot->disconnect(sk, 0);
 	} else if (data_was_unread) {
+		/*
+		 * 
+		 * 在存在数据未读的情况下断开连接。这时应该直接置状态
+		 * CLOSE，并主动向对方发送 RST，因为这是不正常的情况，
+		 * 而发送 FIN 表示一切正常。
+		 */
 		/* Unread data was tossed, zap the connection. */
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONCLOSE);
 		tcp_set_state(sk, TCP_CLOSE);
 		tcp_send_active_reset(sk, sk->sk_allocation);
 	} else if (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime) {
+		/*
+		 * 如果设置了 SO_LINGER，并且，延时时间为 0, 则直接调用 disconnect 断开。
+		 * 删除并释放已建立连接但未被 accept 的传输控制块。同时删除并释放
+		 * 已收到在接收队列、失序队列上的段以及发送队列上的段。
+		 */
 		/* Check zero linger _after_ checking for unread data. */
 		sk->sk_prot->disconnect(sk, 0);
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONDATA);
-	} else if (tcp_close_state(sk)) {
+		
+	} else if (tcp_close_state(sk)) { //判断是否可以发送 FIN
 		/* We FIN if the application ate all the data before
 		 * zapping the connection.
 		 */
@@ -2757,7 +2795,12 @@ void tcp_close(struct sock *sk, long timeout)
 
 	sk_stream_wait_close(sk, timeout);
 
+	/*
+	 * 在给对端发送 RST 或 FIN 段后，等待套接口的关闭，直到 TCP 的状态为 FIN_WAIT_1、
+	 * CLOSING、 LAST_ACK 或等待超时。
+	 */
 adjudge_to_death:
+	/* 置套接口为 DEAD 状态，成为孤儿套接口，同时更新系统中的孤儿套接口数。 */
 	state = sk->sk_state;
 	sock_hold(sk);
 	sock_orphan(sk);
@@ -2786,26 +2829,35 @@ adjudge_to_death:
 	 *	consume significant resources. Let's do it with special
 	 *	linger2	option.					--ANK
 	 */
-
+	/* 处理 FIN_WAIT2 到 CLOSE 状态的转换。 */
 	if (sk->sk_state == TCP_FIN_WAIT2) {
 		struct tcp_sock *tp = tcp_sk(sk);
+		/*
+		 * 如果 linger2 小于 0，则表示无需从 TCP_FIN_WAIT2hangtag 等待转移到
+		 * CLOSE 状态，而是立即设置 CLOSE 状态，然后给对端发送 RST 段。
+		 */
 		if (tp->linger2 < 0) {
 			tcp_set_state(sk, TCP_CLOSE);
 			tcp_send_active_reset(sk, GFP_ATOMIC);
 			__NET_INC_STATS(sock_net(sk),
 					LINUX_MIB_TCPABORTONLINGER);
 		} else {
+			/* 计算需要保持 TCP_FIN_WAIT2 状态的时长     */
 			const int tmo = tcp_fin_time(sk);
 
 			if (tmo > TCP_TIMEWAIT_LEN) {
+				/* 小于 1min，调用 TCP_FIN_WAIT2 定时器 */
 				inet_csk_reset_keepalive_timer(sk,
 						tmo - TCP_TIMEWAIT_LEN);
 			} else {
+				/* 否则调用 timewait 控制块取代 tcp_sock 传出控制块。 */
 				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
 				goto out;
 			}
 		}
 	}
+
+	/* 继续处理不是CLOSE状态 */
 	if (sk->sk_state != TCP_CLOSE) {
 		sk_mem_reclaim(sk);
 		if (tcp_check_oom(sk, 0)) {
@@ -2819,6 +2871,7 @@ adjudge_to_death:
 		}
 	}
 
+	/* 处理是CLOSE状态 */
 	if (sk->sk_state == TCP_CLOSE) {
 		struct request_sock *req = tcp_sk(sk)->fastopen_rsk;
 		/* We could get here with a non-NULL req if the socket is

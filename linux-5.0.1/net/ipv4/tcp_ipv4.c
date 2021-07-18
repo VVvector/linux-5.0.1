@@ -868,7 +868,7 @@ out:
 /* The code following below sending ACKs in SYN-RECV and TIME-WAIT states
    outside socket context is ugly, certainly. What can I do?
  */
-
+/* 发送 ACK 包的任务,  负责在SYN_RECV 和 TIME_WAIT 状态下发送 ACK 包。 */
 static void tcp_v4_send_ack(const struct sock *sk,
 			    struct sk_buff *skb, u32 seq, u32 ack,
 			    u32 win, u32 tsval, u32 tsecr, int oif,
@@ -891,6 +891,7 @@ static void tcp_v4_send_ack(const struct sock *sk,
 	memset(&rep.th, 0, sizeof(struct tcphdr));
 	memset(&arg, 0, sizeof(arg));
 
+	/* 构造参数和 TCP 头部 */
 	arg.iov[0].iov_base = (unsigned char *)&rep;
 	arg.iov[0].iov_len  = sizeof(rep.th);
 	if (tsecr) {
@@ -902,6 +903,7 @@ static void tcp_v4_send_ack(const struct sock *sk,
 		arg.iov[0].iov_len += TCPOLEN_TSTAMP_ALIGNED;
 	}
 
+	/* 交换发送端和接收端 */
 	/* Swap the send and the receive. */
 	rep.th.dest    = th->source;
 	rep.th.source  = th->dest;
@@ -927,6 +929,7 @@ static void tcp_v4_send_ack(const struct sock *sk,
 				    ip_hdr(skb)->daddr, &rep.th);
 	}
 #endif
+	/* 设定标志位和校验码 */
 	arg.flags = reply_flags;
 	arg.csum = csum_tcpudp_nofold(ip_hdr(skb)->daddr,
 				      ip_hdr(skb)->saddr, /* XXX */
@@ -941,6 +944,8 @@ static void tcp_v4_send_ack(const struct sock *sk,
 	if (sk)
 		ctl_sk->sk_mark = (sk->sk_state == TCP_TIME_WAIT) ?
 				   inet_twsk(sk)->tw_mark : sk->sk_mark;
+
+	/* 调用 IP 层接口将包发出，到这里，主动关闭的四次握手就完成了。*/
 	ip_send_unicast_reply(ctl_sk,
 			      skb, &TCP_SKB_CB(skb)->header.h4.opt,
 			      ip_hdr(skb)->saddr, ip_hdr(skb)->daddr,
@@ -956,6 +961,7 @@ static void tcp_v4_timewait_ack(struct sock *sk, struct sk_buff *skb)
 	struct inet_timewait_sock *tw = inet_twsk(sk);
 	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
 
+	/* 发送ACK包 */
 	tcp_v4_send_ack(sk, skb,
 			tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
 			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
@@ -967,6 +973,7 @@ static void tcp_v4_timewait_ack(struct sock *sk, struct sk_buff *skb)
 			tw->tw_tos
 			);
 
+	/* 释放timewait控制块 */
 	inet_twsk_put(tw);
 }
 
@@ -1929,6 +1936,11 @@ static void tcp_v4_fill_cb(struct sk_buff *skb, const struct iphdr *iph,
 /*
  * 当 IP 层接收到报文，或将多个分片组装成一个完整的 IP 数据报之后，会调用传输层的接收函数，传递给传输层处理。
  */
+ /*
+  * 第四次握手：发送ACK
+  * 在tcp_v4_rcv中，如果发现目前的连接处于FIN_WAIT2 或TIME_WAIT状态，则调用tcp_timewait_state
+  * 进行处理，根据其返回值，执行相关操作
+  */
 int tcp_v4_rcv(struct sk_buff *skb)
 {
 	struct net *net = dev_net(skb->dev);
@@ -2188,6 +2200,7 @@ do_time_wait:
 		/* to ACK */
 		/* fall through */
 	case TCP_TW_ACK:
+		/* 回复ACK包 */
 		tcp_v4_timewait_ack(sk, skb);
 		break;
 	case TCP_TW_RST:
