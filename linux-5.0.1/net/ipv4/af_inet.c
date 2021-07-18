@@ -618,6 +618,7 @@ static long inet_wait_for_connect(struct sock *sk, long timeo, int writebias)
  *	Connect to a remote host. There is regrettably still a little
  *	TCP 'magic' in here.
  */
+ /* 用于连接到一个远程的主机的 */
 int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			  int addr_len, int flags, int is_sendmsg)
 {
@@ -634,6 +635,7 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	 * write() will invoke tcp_sendmsg_fastopen() which calls
 	 * __inet_stream_connect().
 	 */
+	 /* 判断长度和协议 */
 	if (uaddr) {
 		if (addr_len < sizeof(uaddr->sa_family))
 			return -EINVAL;
@@ -644,6 +646,11 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			goto out;
 		}
 	}
+
+	/* 根据当前的状态执行相应的功能：
+	 * 1. 处于已连接或者其他状态返回错误值。
+	 * 2. 如果处于未连接状态则调用传输层的连接函数，实现连接远程主机的功能。
+	 */
 
 	switch (sock->state) {
 	default:

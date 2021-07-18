@@ -53,7 +53,7 @@ void sk_stream_write_space(struct sock *sk)
  *
  * Must be called with the socket locked.
  */
- /* 等待连接建立 */
+ /* 等待套接字完成连接 */
 int sk_stream_wait_connect(struct sock *sk, long *timeo_p)
 {
 	/* 初始化等待任务 */
@@ -85,7 +85,9 @@ int sk_stream_wait_connect(struct sock *sk, long *timeo_p)
 		sk->sk_write_pending++;
 
 		/* 进入睡眠，返回值为真的条件：
-			连接没有错误，且状态为 TCPF_ESTABLISHED和TCPF_CLOSE_WAIT */
+			连接没有错误，且状态为 TCPF_ESTABLISHED和TCPF_CLOSE_WAIT 
+		 * 等待 TCP 进入连接建立状态 
+		 */
 		done = sk_wait_event(sk, timeo_p,
 				     !sk->sk_err &&
 				     !((1 << sk->sk_state) &

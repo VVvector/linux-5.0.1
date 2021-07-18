@@ -2637,7 +2637,14 @@ static int tcp_close_state(struct sock *sk)
  *	Shutdown the sending side of a connection. Much like close except
  *	that we don't receive shut down or sock_set_flag(sk, SOCK_DEAD).
  */
-/* 通过 shutdown 系统调用，主动关闭 TCP 连接。该系统调用最终由tcp_shutdown实现。 */
+/* 通过 shutdown 系统调用，主动关闭 TCP 连接。该系统调用最终由tcp_shutdown实现。
+ * 如果是发送方向的关闭，并且 TCP 状态为 ESTABLISHED、 SYN_SENT、 SYN_RECV
+ * 或 CLOSE_WAIT 时，根据 TC 状态迁移图和当前的状态设置新的状态，并在需要发
+ * 送 FIN 时，调用 FIN 时，调用tcp_send_fin时向对方发送 FIN。
+ * 而对于接收方向的关闭，则无需向对方发送 FIN，因为可能还需要向对方发送数据。
+ * 至于接收方向的关闭的实现，在 recvmsg 系统调用中发现设置了 RCV_SHUTDOWN
+ * 标志会立即返回。
+ */
 void tcp_shutdown(struct sock *sk, int how)
 {
 	/*	We need to grab some memory, and put together a FIN,
@@ -4144,20 +4151,26 @@ EXPORT_SYMBOL(tcp_md5_hash_key);
 
 #endif
 
+/* 该函数用于完成关闭 TCP 连接，回收并清理相关资源。 */
 void tcp_done(struct sock *sk)
 {
 	struct request_sock *req = tcp_sk(sk)->fastopen_rsk;
 
+	/* 当套接字状态为 SYN_SENT 或 SYN_RECV 时，更新统计数据。 */
 	if (sk->sk_state == TCP_SYN_SENT || sk->sk_state == TCP_SYN_RECV)
 		TCP_INC_STATS(sock_net(sk), TCP_MIB_ATTEMPTFAILS);
 
+	/* 将连接状态设置为关闭，并清除定时器。 */
 	tcp_set_state(sk, TCP_CLOSE);
 	tcp_clear_xmit_timers(sk);
+
+	/* 当启用了 Fast Open 时，移除 fastopen 请求 */
 	if (req)
 		reqsk_fastopen_remove(sk, req, false);
 
 	sk->sk_shutdown = SHUTDOWN_MASK;
 
+	/* 如果状态不为 SOCK_DEAD，则唤醒等待着的进程。 */
 	if (!sock_flag(sk, SOCK_DEAD))
 		sk->sk_state_change(sk);
 	else

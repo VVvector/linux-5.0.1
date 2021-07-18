@@ -1865,6 +1865,12 @@ static void tcp_check_reno_reordering(struct sock *sk, const int addend)
 
 /* Emulate SACKs for SACKless connection: account for a new dupack. */
 
+/*
+ * 该函数用于检查 sacked_out 是否过多，过多则限制，且返回 true，说明出现 reordering 了。
+ * 那么我们怎么判断是否有 reordering 呢？我们知道 dupack 可能由 lost 引起，也有可
+ * 能由 reorder 引起，那么如果 sacked_out + lost_out > packets_out，则说明 sacked_out
+ * 偏大了，因为它错误的把由 reorder 引起的 dupack 当客户端的 sack 了
+ */
 static void tcp_add_reno_sack(struct sock *sk, int num_dupack)
 {
 	if (num_dupack) {
@@ -1872,12 +1878,12 @@ static void tcp_add_reno_sack(struct sock *sk, int num_dupack)
 		u32 prior_sacked = tp->sacked_out;
 		s32 delivered;
 
-		tp->sacked_out += num_dupack;
-		tcp_check_reno_reordering(sk, 0);
-		delivered = tp->sacked_out - prior_sacked;
+		tp->sacked_out += num_dupack; //增加 sacked 的包数.
+		tcp_check_reno_reordering(sk, 0); // 检查是否有 reordering
+		delivered = tp->sacked_out - prior_sacked; 
 		if (delivered > 0)
 			tp->delivered += delivered;
-		tcp_verify_left_out(tp);
+		tcp_verify_left_out(tp); //判断 left_out 是否大于 packets_out, 出警告信息
 	}
 }
 
@@ -1915,6 +1921,7 @@ void tcp_clear_retrans(struct tcp_sock *tp)
 
 static inline void tcp_init_undo(struct tcp_sock *tp)
 {
+	/* 标记重传起始点 */
 	tp->undo_marker = tp->snd_una;
 	/* Retransmission still in flight may cause DSACKs later. */
 	tp->undo_retrans = tp->retrans_out ? : -1;
@@ -2031,13 +2038,28 @@ void tcp_enter_loss(struct sock *sk)
  * restore sanity to the SACK scoreboard. If the apparent reneging
  * persists until this RTO then we'll clear the SACK scoreboard.
  */
+/*
+ * 如果接收到的确认 ACK 指向之前记录的 SACK，这说明之前记录的 SACK 并没有
+ * 反映接收方的真实状态。接收路径上很有可能已经有拥塞发生或者接收主机正在经历严
+ * 重的拥塞甚至处理出现了 BUG，因为按照正常的逻辑流程，接收的 ACK 不应该指向已
+ * 记录的 SACK，而应该指向 SACK 后面未接收的地方。通常情况下，此时接收方已经删
+ * 除了保存到失序队列中的段。
+ * 为了避免短暂奇怪的看起来像是违约的 SACK 导致更大量的重传，我们给接收者
+ * 一些时间, 即 max(RT T/2; 10ms) 以便于让他可以给我们更多的 ACK，从而可以使得
+ * SACK 的记分板变得正常一点。如果这个表面上的违约一直持续到重传时间结束，我们
+ * 就把 SACK 的记分板清除掉。
+ */
 static bool tcp_check_sack_reneging(struct sock *sk, int flag)
 {
+	//如果确认接收方违约了。
 	if (flag & FLAG_SACK_RENEGING) {
 		struct tcp_sock *tp = tcp_sk(sk);
+
+		//计算超时重传时间
 		unsigned long delay = max(usecs_to_jiffies(tp->srtt_us >> 4),
 					  msecs_to_jiffies(10));
 
+		//更新超时重传定时器
 		inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
 					  delay, TCP_RTO_MAX);
 		return true;
@@ -2340,6 +2362,7 @@ static void tcp_undo_cwnd_reduction(struct sock *sk, bool unmark_loss)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 如果丢失了 */
 	if (unmark_loss) {
 		struct sk_buff *skb;
 
@@ -2347,9 +2370,12 @@ static void tcp_undo_cwnd_reduction(struct sock *sk, bool unmark_loss)
 			TCP_SKB_CB(skb)->sacked &= ~TCPCB_LOST;
 		}
 		tp->lost_out = 0;
+
+		/* 清除所有重传标记 */
 		tcp_clear_all_retrans_hints(tp);
 	}
 
+	/* 如果之前的慢启动门限值不为零 */
 	if (tp->prior_ssthresh) {
 		const struct inet_connection_sock *icsk = inet_csk(sk);
 
@@ -2365,16 +2391,23 @@ static void tcp_undo_cwnd_reduction(struct sock *sk, bool unmark_loss)
 	tp->rack.advanced = 1; /* Force RACK to re-exam losses */
 }
 
+/* 检测能否撤销。 */
 static inline bool tcp_may_undo(const struct tcp_sock *tp)
 {
+	/* 记录了重传起点
+	 * 以及没有重传的段数
+	 * 或者没有重传或者重传了之后还没有接收到对方发送的确认。
+	 */
 	return tp->undo_marker && (!tp->undo_retrans || tcp_packet_delayed(tp));
 }
 
 /* People celebrate: "We love our President!" */
+/* 尝试从恢复状态撤销 */
 static bool tcp_try_undo_recovery(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 检测能否撤销 */
 	if (tcp_may_undo(tp)) {
 		int mib_idx;
 
@@ -2392,6 +2425,8 @@ static bool tcp_try_undo_recovery(struct sock *sk)
 	} else if (tp->rack.reo_wnd_persist) {
 		tp->rack.reo_wnd_persist--;
 	}
+
+	/* 如果不支持 SACK，则需要防止虚假的快重传 */
 	if (tp->snd_una == tp->high_seq && tcp_is_reno(tp)) {
 		/* Hold old state until something *above* high_seq
 		 * is ACKed. For Reno it is MUST to prevent false
@@ -2400,6 +2435,8 @@ static bool tcp_try_undo_recovery(struct sock *sk)
 			tp->retrans_stamp = 0;
 		return true;
 	}
+
+	/* 支持，回到 OPen 状态 */
 	tcp_set_ca_state(sk, TCP_CA_Open);
 	tp->is_sack_reneg = 0;
 	return false;
@@ -2457,13 +2494,26 @@ static void tcp_init_cwnd_reduction(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 开始拥塞的时候下一个要发送的字节序号 */
 	tp->high_seq = tp->snd_nxt;
 	tp->tlp_high_seq = 0;
+
+	/* 自从上次调整拥塞窗口到目前为止接收到的总 ACK 段数 */
 	tp->snd_cwnd_cnt = 0;
+
+	/* 在进入 Recovery 状态时的拥塞窗口 */
 	tp->prior_cwnd = tp->snd_cwnd;
+
+	/* 在恢复阶段给接收者新发送包的数量 */
 	tp->prr_delivered = 0;
+
+	/* 在恢复阶段一共发送的包的数量 */
 	tp->prr_out = 0;
+
+	/* 根据拥塞算法，计算新阈值 */
 	tp->snd_ssthresh = inet_csk(sk)->icsk_ca_ops->ssthresh(sk);
+
+	/* 设置 TCP_ECN_QUEUE_CWR 标志，标识由于收到显式拥塞通知而进入拥塞状态 */
 	tcp_ecn_queue_cwr(tp);
 }
 
@@ -2504,7 +2554,10 @@ static inline void tcp_end_cwnd_reduction(struct sock *sk)
 	/* Reset cwnd to ssthresh in CWR or Recovery (unless it's undone) */
 	if (tp->snd_ssthresh < TCP_INFINITE_SSTHRESH &&
 	    (inet_csk(sk)->icsk_ca_state == TCP_CA_CWR || tp->undo_marker)) {
+	    	/* 拥塞窗口恢复慢启动门限值 */
 		tp->snd_cwnd = tp->snd_ssthresh;
+
+		/* 记录检验拥塞窗口的时间 */
 		tp->snd_cwnd_stamp = tcp_jiffies32;
 	}
 	tcp_ca_event(sk, CA_EVENT_COMPLETE_CWR);
@@ -2725,6 +2778,7 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 有重传起点，并且包延迟 */
 	if (tp->undo_marker && tcp_packet_delayed(tp)) {
 		/* Plain luck! Hole if filled with delayed
 		 * packet, rather than with a retransmit. Check reordering.
@@ -2743,6 +2797,8 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una)
 			tp->retrans_stamp = 0;
 
 		DBGUNDO(sk, "partial recovery");
+
+		/* 撤销窗口减小 */
 		tcp_undo_cwnd_reduction(sk, true);
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPPARTIALUNDO);
 		tcp_try_keep_open(sk);
@@ -3331,6 +3387,18 @@ static void tcp_ack_probe(struct sock *sk)
 	}
 }
 
+/* 判断一个ACK是否可疑
+ * 什么样的 ACK 算是可疑的呢? 如下:
+ * 非 FLAG_NOT_DUP 通过查看相关的宏定义我们知道 FLAG_NOT_DUP 为 (FLAG_DATA|FLAG_WIN_UPDATE|FLA
+ * 而 FLAG_ACKED 又为 (FLAG_DATA_ACKED|FLAG_SYN_ACKED), 故而
+ * 即其所包含的种类有接收的 ACK 段是 (1) 负荷数据携带的;(2) 更新窗口的;(3) 确
+ * 认新数据的;(4) 确认 SYN 段的。如果上述四种都不属于那是可疑的了。
+ *
+ * FLAG_CA_ALERT 通过查看相关的宏定义我们知道 FLAG_CA_ALERT 为 (FLAG_DATA_SACKED|FLAG_ECE)，
+ * 如果被发现时确认新数据的 ACK 或者在 ACK 中存在 ECE 标志，即收到显式拥
+ * 塞通知，也认为是可疑的。 似乎和上面的有矛盾，
+ * 非 Open 即当前拥塞状态不为 Open。
+ */
 static inline bool tcp_ack_is_dubious(const struct sock *sk, const int flag)
 {
 	return !(flag & FLAG_NOT_DUP) || (flag & FLAG_CA_ALERT) ||
@@ -3384,6 +3452,12 @@ static inline bool tcp_may_update_window(const struct tcp_sock *tp,
 					const u32 ack, const u32 ack_seq,
 					const u32 nwin)
 {
+	/*
+	 * 三种情况成立一种
+	 * 1. 起始序列号大于 una
+	 * 2. 确认号大于窗口的左端
+	 * 3. 确认号等于窗口的左端，同时，窗口大于本身的发送窗口
+	 */
 	return	after(ack, tp->snd_una) ||
 		after(ack_seq, tp->snd_wl1) ||
 		(ack_seq == tp->snd_wl1 && nwin > tp->snd_wnd);
@@ -3392,10 +3466,14 @@ static inline bool tcp_may_update_window(const struct tcp_sock *tp,
 /* If we update tp->snd_una, also update tp->bytes_acked */
 static void tcp_snd_una_update(struct tcp_sock *tp, u32 ack)
 {
+	/* 得到已经确认的数量 */
 	u32 delta = ack - tp->snd_una;
-
+	
+	/* 记录已经得到确认的字节数量 */
 	sock_owned_by_me((struct sock *)tp);
 	tp->bytes_acked += delta;
+
+	/* 更新 una*/
 	tp->snd_una = ack;
 }
 
@@ -3419,27 +3497,36 @@ static int tcp_ack_update_window(struct sock *sk, const struct sk_buff *skb, u32
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	int flag = 0;
+
+	/* 得到接收窗口大小 */
 	u32 nwin = ntohs(tcp_hdr(skb)->window);
 
+	/* 判断是否有 syn，没有的话，窗口扩大 */
 	if (likely(!tcp_hdr(skb)->syn))
 		nwin <<= tp->rx_opt.snd_wscale;
 
 	if (tcp_may_update_window(tp, ack, ack_seq, nwin)) {
+		/* 表明要更新 */
 		flag |= FLAG_WIN_UPDATE;
 		tcp_update_wl(tp, ack_seq);
 
+		/* 更新本端发送窗口 */
 		if (tp->snd_wnd != nwin) {
 			tp->snd_wnd = nwin;
 
 			/* Note, it is the only place, where
 			 * fast path is recovered for sending TCP.
 			 */
+			 /* 取消头部预测 */
 			tp->pred_flags = 0;
+
+			/* 快速路径检测 */
 			tcp_fast_path_check(sk);
 
 			if (!tcp_write_queue_empty(sk))
 				tcp_slow_start_after_idle_check(sk);
 
+			/* 如果接收窗口大于之前的最大的接收窗口，更新，重新计算 MSS*/
 			if (nwin > tp->max_window) {
 				tp->max_window = nwin;
 				tcp_sync_mss(sk, inet_csk(sk)->icsk_pmtu_cookie);
@@ -3447,6 +3534,7 @@ static int tcp_ack_update_window(struct sock *sk, const struct sk_buff *skb, u32
 		}
 	}
 
+	/* 更新 una*/
 	tcp_snd_una_update(tp, ack);
 
 	return flag;
@@ -3520,12 +3608,17 @@ static void tcp_send_challenge_ack(struct sock *sk, const struct sk_buff *skb)
 	}
 }
 
+/* 替换时间戳 ts_recent */
 static void tcp_store_ts_recent(struct tcp_sock *tp)
 {
+	/* 替换时间戳为刚刚接收到的时间戳值 */
 	tp->rx_opt.ts_recent = tp->rx_opt.rcv_tsval;
+
+	/* 记录下替换时间戳的时间 */
 	tp->rx_opt.ts_recent_stamp = ktime_get_seconds();
 }
 
+/* 考虑是否要替换时间戳 ts_recent */
 static void tcp_replace_ts_recent(struct tcp_sock *tp, u32 seq)
 {
 	if (tp->rx_opt.saw_tstamp && !after(seq, tp->rcv_wup)) {
@@ -3535,7 +3628,7 @@ static void tcp_replace_ts_recent(struct tcp_sock *tp, u32 seq)
 		 *
 		 * Not only, also it occurs for expired timestamps.
 		 */
-
+		/*PAWS 检测成功 */
 		if (tcp_paws_check(&tp->rx_opt, 0))
 			tcp_store_ts_recent(tp);
 	}
@@ -3864,6 +3957,7 @@ static void smc_parse_options(const struct tcphdr *th,
  * But, this can also be called on packets in the established flow when
  * the fast version below fails.
  */
+ /* tcp options的解析 */
 void tcp_parse_options(const struct net *net,
 		       const struct sk_buff *skb,
 		       struct tcp_options_received *opt_rx, int estab,
@@ -3871,13 +3965,20 @@ void tcp_parse_options(const struct net *net,
 {
 	const unsigned char *ptr;
 	const struct tcphdr *th = tcp_hdr(skb);
+	/* 选项部分长度 */
 	int length = (th->doff * 4) - sizeof(struct tcphdr);
 
+	/* 得到选项的首部 */
 	ptr = (const unsigned char *)(th + 1);
+
+	/* 标记没有看到时间戳 */
 	opt_rx->saw_tstamp = 0;
 
 	while (length > 0) {
+		/* 选项的类型 */
 		int opcode = *ptr++;
+
+		/* 选项长度的大小 */
 		int opsize;
 
 		switch (opcode) {
@@ -3893,10 +3994,12 @@ void tcp_parse_options(const struct net *net,
 			if (opsize > length)
 				return;	/* don't parse partial options */
 			switch (opcode) {
+			/* 最大报文段长度, 只用于最初的协商阶段 */
 			case TCPOPT_MSS:
 				if (opsize == TCPOLEN_MSS && th->syn && !estab) {
 					u16 in_mss = get_unaligned_be16(ptr);
 					if (in_mss) {
+						/* 将最大段长度设置为选项中和用户自身的较小值。 */
 						if (opt_rx->user_mss &&
 						    opt_rx->user_mss < in_mss)
 							in_mss = opt_rx->user_mss;
@@ -3904,11 +4007,18 @@ void tcp_parse_options(const struct net *net,
 					}
 				}
 				break;
+
+			/* 窗口扩大因子选项，也只能出现在 SYN 且未建立的情况下，并且支持该选项 */
 			case TCPOPT_WINDOW:
 				if (opsize == TCPOLEN_WINDOW && th->syn &&
 				    !estab && net->ipv4.sysctl_tcp_window_scaling) {
+				    	/* 取位移数 */
 					__u8 snd_wscale = *(__u8 *)ptr;
+
+					/* 将表示包含窗口扩大因子的选项置位 */
 					opt_rx->wscale_ok = 1;
+
+					/* 大于 14 则警告，并设重新设置为 14.*/
 					if (snd_wscale > TCP_MAX_WSCALE) {
 						net_info_ratelimited("%s: Illegal window scaling value %d > %u received\n",
 								     __func__,
@@ -3919,27 +4029,42 @@ void tcp_parse_options(const struct net *net,
 					opt_rx->snd_wscale = snd_wscale;
 				}
 				break;
+
+			/* 时间戳选项，满足条件为：在建立的时候或者未建立但支持时间戳选项 */
 			case TCPOPT_TIMESTAMP:
 				if ((opsize == TCPOLEN_TIMESTAMP) &&
 				    ((estab && opt_rx->tstamp_ok) ||
 				     (!estab && net->ipv4.sysctl_tcp_timestamps))) {
+				     	/* 看见时间戳 */
 					opt_rx->saw_tstamp = 1;
 					opt_rx->rcv_tsval = get_unaligned_be32(ptr);
 					opt_rx->rcv_tsecr = get_unaligned_be32(ptr + 4);
 				}
 				break;
+
+			/*SACK Permit，只能在 syn 并且未建立的时候使用 */
 			case TCPOPT_SACK_PERM:
 				if (opsize == TCPOLEN_SACK_PERM && th->syn &&
 				    !estab && net->ipv4.sysctl_tcp_sack) {
+				    	//标记看见
 					opt_rx->sack_ok = TCP_SACK_SEEN;
 					tcp_sack_reset(opt_rx);
 				}
 				break;
 
+			/* 表明有 SACK*/
 			case TCPOPT_SACK:
+				/*
+				 * TCPOLEN_SACK_BASE 为 2,TCPOLEN_SACK_PERBLOCK 为 8
+				 * 因此， if 语句的意思是，该选项包含 kind、 length 以及
+				 * 一个左右边界值对，且扣除 kind 和 length 字段之后，
+				 * nnegbei 左右边界值对的大小整除， sack_ok 为 1 表示
+				 * 允许 SACK.
+				 */
 				if ((opsize >= (TCPOLEN_SACK_BASE + TCPOLEN_SACK_PERBLOCK)) &&
 				   !((opsize - TCPOLEN_SACK_BASE) % TCPOLEN_SACK_PERBLOCK) &&
 				   opt_rx->sack_ok) {
+				   	/* 将 sacked 的值指向这些左右边界值对的起始处 */
 					TCP_SKB_CB(skb)->sacked = (ptr - 2) - (unsigned char *)th;
 				}
 				break;
@@ -3951,12 +4076,14 @@ void tcp_parse_options(const struct net *net,
 				 */
 				break;
 #endif
+			/* 快打开 fastopen */
 			case TCPOPT_FASTOPEN:
 				tcp_parse_fastopen_option(
 					opsize - TCPOLEN_FASTOPEN_BASE,
 					ptr, th->syn, foc, false);
 				break;
 
+			/* 实验阶段的 Fast Open，现在基本上已经成形了。 */
 			case TCPOPT_EXP:
 				/* Fast Open option shares code 254 using a
 				 * 16 bits magic number.
@@ -3973,6 +4100,8 @@ void tcp_parse_options(const struct net *net,
 				break;
 
 			}
+
+			/* 进入下一个循环，处理下一个选项 */
 			ptr += opsize-2;
 			length -= opsize;
 		}
@@ -5392,11 +5521,22 @@ static void tcp_check_urg(struct sock *sk, const struct tcphdr *th)
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 ptr = ntohs(th->urg_ptr);
 
+	/*
+	 * 计算带外数据的位置
+	 * 注意:
+	 * 目前仍有许多关于紧急指针是指向带外数据的最后一个字节还是指向
+	 * 带外数据最后一个字节的下一个字节。 Host Requirements RFC 确定
+	 * 指向最后一个字节是正确的。然而，大多数的实现，包括 BSD 的实现，
+	 * 继续使用错误的方法来实现。因此如果启用兼容错误选项，就需要将
+	 * 指针前移。
+	 */
+
 	if (ptr && !sock_net(sk)->ipv4.sysctl_tcp_stdurg)
 		ptr--;
 	ptr += ntohl(th->seq);
 
 	/* Ignore urgent data that we've already seen and read. */
+	/* 如果我们已经读取过或者接收过相应的数据，就忽略。*/
 	if (after(tp->copied_seq, ptr))
 		return;
 
@@ -5414,10 +5554,15 @@ static void tcp_check_urg(struct sock *sk, const struct tcphdr *th)
 		return;
 
 	/* Do we already have a newer (or duplicate) urgent pointer? */
+	/*
+	 * 如果还有带外数据用户进程尚未读取，并且当前带外数据早于该
+	 * 尚未读取的带外数据，则丢弃该带外数据。
+	 */
 	if (tp->urg_data && !after(ptr, tp->urg_seq))
 		return;
 
 	/* Tell the world about our new urgent pointer. */
+	/* 唤醒异步等待该套接口的进程，并告诉它们有新的带外数据到达。 */
 	sk_send_sigurg(sk);
 
 	/* We may be adding urgent data when the last byte read was
@@ -5435,6 +5580,13 @@ static void tcp_check_urg(struct sock *sk, const struct tcphdr *th)
 	 * decline of BSD again. Verdict: it is better to remove to trap
 	 * buggy users.
 	 */
+	 /*
+	  * 在当前接收到的带外数据的段的序号正是接下来需要复制到进程空间
+	  * 的段的序号，且下一个接收段的序号与需要复制到进程空间的序号相等
+	  * 的情况下，需要检测接收队列中的第一个段是否有效。因为当前处理的
+	  * 是带外数据，因此需要递增 copied_seq。接着检测接收队列中第一个段
+	  * 是否已经国企，如果是，则释放。
+	  */
 	if (tp->urg_seq == tp->copied_seq && tp->urg_data &&
 	    !sock_flag(sk, SOCK_URGINLINE) && tp->copied_seq != tp->rcv_nxt) {
 		struct sk_buff *skb = skb_peek(&sk->sk_receive_queue);
@@ -5445,10 +5597,12 @@ static void tcp_check_urg(struct sock *sk, const struct tcphdr *th)
 		}
 	}
 
+	/* 设置带外数据序号以及标记，以便后续根据标志作相应处理。 */
 	tp->urg_data = TCP_URG_NOTYET;
 	tp->urg_seq = ptr;
 
 	/* Disable header prediction. */
+	/* 由于接收到了带外数据，禁止下次首部预测 */
 	tp->pred_flags = 0;
 }
 
@@ -5458,6 +5612,7 @@ static void tcp_urg(struct sock *sk, struct sk_buff *skb, const struct tcphdr *t
 	struct tcp_sock *tp = tcp_sk(sk);
 
 	/* Check if we get a new urgent pointer - normally not. */
+	/* 检查带外数据偏移量是否正常。 */
 	if (th->urg)
 		tcp_check_urg(sk, th);
 
@@ -5471,6 +5626,8 @@ static void tcp_urg(struct sock *sk, struct sk_buff *skb, const struct tcphdr *t
 			u8 tmp;
 			if (skb_copy_bits(skb, ptr, &tmp, 1))
 				BUG();
+
+			/* 设置 TCP_URG_VALID 标志表示用户进程可以读取，然后通知用户进程读取。 */
 			tp->urg_data = TCP_URG_VALID | tmp;
 			if (!sock_flag(sk, SOCK_DEAD))
 				sk->sk_data_ready(sk);

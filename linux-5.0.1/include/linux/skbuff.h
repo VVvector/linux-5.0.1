@@ -2203,6 +2203,18 @@ static inline void *pskb_pull(struct sk_buff *skb, unsigned int len)
 	return unlikely(len > skb->len) ? NULL : __pskb_pull(skb, len);
 }
 
+/*
+ * 我们首先需要知道的是收到的包的数据在 sk_buff 中是如何组织的。数据先会出
+ * 现在 sk_buff->data 中，也就是线性数据缓冲区，多余的数据就放在 skb_shinfo(skb)->frag[] 当中，
+ * 这些数据存在于所谓的非线性缓冲区当中，这些数据都存在于 unmapped
+ * page 当中，这是用于支持驱动的分散/聚集 I/O 的。另外，还有一部分存在于 skb_shinfo(skb)->frag_list 当中，
+ * 这是一个 sk_buff 结构的链表。所以，对 shk_shinfo(skb)->frag_list当中的 sk_buff 中的数据可以进行上述的递归表达。
+ *
+ * 造成上述的原因是数据可能会分片。
+ * 如果数据本身的头部长度就已经大于给定的头部长度了，说明合法。如果给定长度大
+ * 于第一个分片的全部长度，显然不合法，如果都不是，那么就需要调用 __pskb_pull_tail
+ * 处理剩下的分片了，这里我们就不详细叙述了。
+ */
 static inline int pskb_may_pull(struct sk_buff *skb, unsigned int len)
 {
 	if (likely(len <= skb_headlen(skb)))
@@ -3691,6 +3703,10 @@ void skb_complete_wifi_ack(struct sk_buff *skb, bool acked);
 __sum16 __skb_checksum_complete_head(struct sk_buff *skb, int len);
 __sum16 __skb_checksum_complete(struct sk_buff *skb);
 
+/*
+ * 如果不想要网卡帮忙校验或者 Checksum 合法，或者硬件给出的时部分校验并且校验的
+ * 偏移必须大于零。则返回 1, 否则，返回 0。
+ */
 static inline int skb_csum_unnecessary(const struct sk_buff *skb)
 {
 	return ((skb->ip_summed == CHECKSUM_UNNECESSARY) ||

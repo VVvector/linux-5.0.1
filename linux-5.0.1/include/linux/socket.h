@@ -289,8 +289,10 @@ struct ucred {
 
 /* 使用这个标识，实际上并不会进行真正的数据传递，而是进行路径MTU的探测 */
 #define MSG_PROBE	0x10	/* Do not send. Only probe path f.e. for MTU */
+
 /* 只返回包的真实长度，并截断(丢弃)返回长度的数据 */
 #define MSG_TRUNC	0x20
+
 /* 无阻塞接收或发送，如果接收缓存中有数据，则接收数据并立即返回，如果没有数据，也立即返回，而不做任何等待。 */
 #define MSG_DONTWAIT	0x40	/* Nonblocking io		 */
 #define MSG_EOR         0x80	/* End of record */
@@ -312,6 +314,7 @@ struct ucred {
 
 /* 后续还有数据待发送 */
 #define MSG_MORE	0x8000	/* Sender will send more */
+
 #define MSG_WAITFORONE	0x10000	/* recvmmsg(): block until 1+ packets avail */
 #define MSG_SENDPAGE_NOPOLICY 0x10000 /* sendpage() internal : do no apply policy */
 #define MSG_SENDPAGE_NOTLAST 0x20000 /* sendpage() internal : not the last page */

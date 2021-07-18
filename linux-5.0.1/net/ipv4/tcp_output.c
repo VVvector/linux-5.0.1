@@ -616,6 +616,10 @@ static void smc_set_option_cond(const struct tcp_sock *tp,
 /* Compute TCP options for SYN packets. This is not the final
  * network wire format yet.
  */
+ /*
+  * 该函数用户构建带 SYN 选项的 TCP 包。当然，这里只是计算出 TCP 的选项字段
+  * 需要多大空间，并不是真正地将选项构建成了 TCP 标准中所规定的格式。
+  */
 static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 				struct tcp_out_options *opts,
 				struct tcp_md5sig_key **md5)
@@ -625,6 +629,10 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 	struct tcp_fastopen_request *fastopen = tp->fastopen_req;
 
 	*md5 = NULL;
+
+	/* remaining 代表剩余了多少空间。根据 RFC793， TCP 选项的空间是有限的。
+ 	 * 在后面的代码中，每增加一个选项就会相应地减少 remaining。
+ 	 */
 #ifdef CONFIG_TCP_MD5SIG
 	if (static_key_false(&tcp_md5_needed) &&
 	    rcu_access_pointer(tp->md5sig_info)) {
@@ -671,6 +679,9 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 		need += fastopen->cookie.exp ? TCPOLEN_EXP_FASTOPEN_BASE :
 					       TCPOLEN_FASTOPEN_BASE;
 		need = (need + 3) & ~3U;  /* Align to 32 bits */
+		/* 到这里会产生一个有趣的现象， remaining 有可能不够用。
+ 		 * 可以看到，如果选项中的剩余空间不够用了，那么就放弃启用 Fast Open。
+ 	 	 */
 		if (remaining >= need) {
 			opts->options |= OPTION_FAST_OPEN_COOKIE;
 			opts->fastopen_cookie = &fastopen->cookie;
@@ -751,6 +762,12 @@ static unsigned int tcp_synack_options(const struct sock *sk,
 /* Compute TCP options for ESTABLISHED sockets. This is not the
  * final wire format yet.
  */
+ /*
+  * 这个函数用于计算连接已经建立的状态下， TCP 包的头部选项所占用的空间。通
+  * 过和 tcp_syn_options函数的对比我们可以直观地看到，大部分 TCP 选项都是在发起
+  * 连接的时候放在 TCP 包里的。真正开始传输后， TCP 包所需携带的选项信息就少了很
+  * 多。
+  */
 static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb,
 					struct tcp_out_options *opts,
 					struct tcp_md5sig_key **md5)

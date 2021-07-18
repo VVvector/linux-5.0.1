@@ -265,7 +265,10 @@ static inline bool tcp_under_memory_pressure(const struct sock *sk)
  * The next routines deal with comparing 32 bit unsigned ints
  * and worry about wraparound (automatic with unsigned arithmetic).
  */
-
+/*
+ * 可以看到，这两个函数实际上就是将两个数直接相减。之所以要单独弄个函数应该是为
+ * 了避免强制转型造成影响。序号都是 32 位无符号整型。
+ */
 static inline bool before(__u32 seq1, __u32 seq2)
 {
         return (__s32)(seq1-seq2) < 0;
@@ -1193,6 +1196,14 @@ void tcp_rate_check_app_limited(struct sock *sk);
  * tcp_is_sack - SACK enabled
  * tcp_is_reno - No SACK
  */
+/*
+ * ACK 机制与数据传输紧密关联可以体现在以下几个方面。
+ * 1. 通过 ACK 可以使得发送方可以很容易地计算出数据往返时间。
+ * 2. 因为 ACK 段中携带接收方的通告窗口，因此，此时接收方能接收的数据上限为通
+ * 告的接收窗口大小，接收到 ACK 后，在正常情况下会引发下一个段的发送。
+ * 3. 通过拥塞窗口的调节， TCP 可以进行限制性地传输，以免网络拥塞。从接收 ACK
+ * 可以判断和评估当前网络的状况，从而进一步调整拥塞窗口。
+ */
 static inline int tcp_is_sack(const struct tcp_sock *tp)
 {
 	return likely(tp->rx_opt.sack_ok);
@@ -1203,6 +1214,9 @@ static inline bool tcp_is_reno(const struct tcp_sock *tp)
 	return !tcp_is_sack(tp);
 }
 
+/* 该函数用于计算已经发出去的 TCP 段 (离开主机) 中一共有多少个 tcp 段还未得到
+ * 确认。
+*/
 static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
 {
 	return tp->sacked_out + tp->lost_out;
@@ -1262,6 +1276,11 @@ static inline __u32 tcp_current_ssthresh(const struct sock *sk)
 }
 
 /* Use define here intentionally to get WARN_ON location shown at the caller */
+/*
+ * 主要是判断 left_out 是否大于 packets_out, 当然，这是不可能的，因
+ * 为前者是已经发送离开主机的未被确认的段数，而后者是已经离开发送队列 (不一定离
+ * 开主机) 但未确认的段数。故而，这里有一个 WARN_ON，以便输出相应的警告信息。
+ */
 #define tcp_verify_left_out(tp)	WARN_ON(tcp_left_out(tp) > tp->packets_out)
 
 void tcp_enter_cwr(struct sock *sk);
@@ -1386,6 +1405,10 @@ static inline __sum16 tcp_v4_check(int len, __be32 saddr,
 	return csum_tcpudp_magic(saddr,daddr,len,IPPROTO_TCP,base);
 }
 
+/*
+ * 该函数是基于伪首部累加和，完成全包校验和的检测，值得注意的是，该函数用于
+ * 校验没有负载的 TCP 段。如果需要校验，并且校验成功，则返回 1。
+ */
 static inline bool tcp_checksum_complete(struct sk_buff *skb)
 {
 	return !skb_csum_unnecessary(skb) &&
@@ -1484,6 +1507,7 @@ static inline u32 keepalive_time_elapsed(const struct tcp_sock *tp)
 			  tcp_jiffies32 - tp->rcv_tstamp);
 }
 
+/* 计算等待接收 FIN 的超时时间。超时时间至少为 7/2 倍的 rto。 */
 static inline int tcp_fin_time(const struct sock *sk)
 {
 	int fin_timeout = tcp_sk(sk)->linger2 ? : sock_net(sk)->ipv4.sysctl_tcp_fin_timeout;
@@ -1495,11 +1519,14 @@ static inline int tcp_fin_time(const struct sock *sk)
 	return fin_timeout;
 }
 
+/* 序号回绕检测 */
 static inline bool tcp_paws_check(const struct tcp_options_received *rx_opt,
 				  int paws_win)
 {
 	if ((s32)(rx_opt->ts_recent - rx_opt->rcv_tsval) <= paws_win)
 		return true;
+
+	/* 判断从存储 ts_recent 到现在是否有 24 天的时间, 有的话，就可能失效 */
 	if (unlikely(!time_before32(ktime_get_seconds(),
 				    rx_opt->ts_recent_stamp + TCP_PAWS_24DAYS)))
 		return true;
@@ -1513,9 +1540,11 @@ static inline bool tcp_paws_check(const struct tcp_options_received *rx_opt,
 	return false;
 }
 
+/* 判断是否要拒绝 */
 static inline bool tcp_paws_reject(const struct tcp_options_received *rx_opt,
 				   int rst)
 {
+	/* 检测是否通过 PAWS 检测 */
 	if (tcp_paws_check(rx_opt, 0))
 		return false;
 

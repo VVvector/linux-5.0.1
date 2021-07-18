@@ -786,6 +786,10 @@ static void reqsk_queue_hash_req(struct request_sock *req,
 	refcount_set(&req->rsk_refcnt, 2 + 1);
 }
 
+/*
+ * 首先将连接请求块保存到父传输请求块的散列表中，并设置定时器超时时间。之后
+ * 更新已存在的连接请求块数，并启动连接建立定时器。
+ */
 void inet_csk_reqsk_queue_hash_add(struct sock *sk, struct request_sock *req,
 				   unsigned long timeout)
 {
