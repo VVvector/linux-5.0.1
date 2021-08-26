@@ -2243,6 +2243,8 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 	
 		/* 从socket的接收队列中取出一个skb。*/
 		last = skb_peek_tail(&sk->sk_receive_queue);
+
+		/* 遍历接收队列接收数据 */
 		skb_queue_walk(&sk->sk_receive_queue, skb) {
 			last = skb;
 
@@ -2365,6 +2367,7 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 			release_sock(sk);
 			lock_sock(sk);
 		} else {
+			/* 没有收到足够的数据，就阻塞当前进程。 */
 			sk_wait_data(sk, &timeo, last);
 		}
 

@@ -35,6 +35,10 @@ EXPORT_SYMBOL(inet_protos);
 const struct net_offload __rcu *inet_offloads[MAX_INET_PROTOS] __read_mostly;
 EXPORT_SYMBOL(inet_offloads);
 
+
+/* tcp/udp协议的处理函数的注册，会被注册到inet_protos数组中。
+ * 例如：当接收到tcp segment时，会在inet_protos中找到tcp_v4_rcv()处理函数。
+ */
 int inet_add_protocol(const struct net_protocol *prot, unsigned char protocol)
 {
 	if (!prot->netns_ok) {

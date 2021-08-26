@@ -4532,13 +4532,11 @@ static inline bool skb_gso_ok(struct sk_buff *skb, netdev_features_t features)
 }
 
 
-/* 是否需要协议栈进行gso：
-1. 该skb是gso packet。gso_size表示生产gso大包时的数据包长度，一般为mss的整数倍。
-2. 
-	2.1 网卡不支持gso
-	2.2 frag_list为null，且网卡不支持 NETIF_F_FRAGLIST.
-	2.3 网卡不支持ALL_CSUM
-*/
+/* 是否需要 协议栈 进行gso操作：
+ * 1. gso_size不为0；网卡不支持HW offload gso。
+ * 2. gso_size不为0；skb有frag_list；网卡不支持frag list。
+ * 3. gso_size不为0；网卡不支持checksum HW offload。
+ */
 static inline bool netif_needs_gso(struct sk_buff *skb,
 				   netdev_features_t features)
 {

@@ -248,11 +248,9 @@ EXPORT_SYMBOL(inet_listen);
  *	Create an inet socket.
  */
 
-/* user调用socket时， 会被执行。
-
-eg. sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-
-*/
+/* user在创建socket时， 会被执行。
+ * eg. sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+ */
 static int inet_create(struct net *net, struct socket *sock, int protocol,
 		       int kern)
 {
@@ -273,7 +271,8 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 lookup_protocol:
 	err = -ESOCKTNOSUPPORT;
 	rcu_read_lock();
-	//查找协议交换表，根据协议族套接字创建类型type获取要创建的协议实例。例如，TCP --> SOCK_STREAM
+
+	/* 查找协议交换表，根据协议族套接字创建类型type获取要创建的协议实例。例如，TCP --> SOCK_STREAM */
 	list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
 
 		err = 0;
@@ -320,10 +319,11 @@ lookup_protocol:
 	    !ns_capable(net->user_ns, CAP_NET_RAW))
 		goto out_rcu_unlock;
 
-	/*查找到了对应的protocl stack.
+	/*查找到了对应的protocal stack.
 		You can find the structure definitions for all of the protocol stacks in af_inet.
 		static struct inet_protosw inetsw_array[]
 	*/
+	/* eg. TCP的话，就会将inet_stream_ops赋值给socket->ops。 */
 	sock->ops = answer->ops;
 	answer_prot = answer->prot;
 	answer_flags = answer->flags;
@@ -331,7 +331,9 @@ lookup_protocol:
 
 	WARN_ON(!answer_prot->slab);
 
-	/* 分配一个新的struct sock数据结构， 套接字类型为PF_INET,协议为从协议交换表中获取的协议类型。*/
+	/* 分配一个新的struct sock数据结构， 套接字类型为PF_INET, 协议为从协议交换表中获取的协议类型。
+	 * 例如，tcp，就会把tcp_prot赋值给sock->sk_port上。
+	 */
 	err = -ENOBUFS;
 	sk = sk_alloc(net, PF_INET, GFP_KERNEL, answer_prot, kern);
 	if (!sk)
@@ -854,6 +856,10 @@ ssize_t inet_sendpage(struct socket *sock, struct page *page, int offset,
 }
 EXPORT_SYMBOL(inet_sendpage);
 
+/*
+ * udp: 实际调用 udp_recvmsg() - net/ipv4/udp.c
+ * tcp: 实际调用 tcp_recvmsg() - net/ipv4/tcp.c
+ */
 int inet_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		 int flags)
 {
@@ -1334,6 +1340,10 @@ void inet_sk_state_store(struct sock *sk, int newstate)
 	smp_store_release(&sk->sk_state, newstate);
 }
 
+/* ip层GSO操作只是提供接口给链路层来访问传输层(tcp,udp),
+ * 因此IP层实现的接口只是根据分段数据报获取对应的传输层接口，
+ * 并对完成GSO分段后的IP数据报重新计算校验和。
+ */
 struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 				 netdev_features_t features)
 {
@@ -1349,9 +1359,12 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 
 	skb_reset_network_header(skb);
 	nhoff = skb_network_header(skb) - skb_mac_header(skb);
+
+	/* 分段数据至少大于IP首部长度 */
 	if (unlikely(!pskb_may_pull(skb, sizeof(*iph))))
 		goto out;
 
+	/* 检验首部中的长度字段是否有效 */
 	iph = ip_hdr(skb);
 	ihl = iph->ihl * 4;
 	if (ihl < sizeof(*iph))
@@ -1360,9 +1373,12 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	id = ntohs(iph->id);
 	proto = iph->protocol;
 
+	/* 再次通过首部中的长度字段检测skb长度是否有效 */
 	/* Warning: after this point, iph might be no longer valid */
 	if (unlikely(!pskb_may_pull(skb, ihl)))
 		goto out;
+
+	/* 注意：这里已经将data偏移到了传送层头部了，去掉了IP头 */
 	__skb_pull(skb, ihl);
 
 	encap = SKB_GSO_CB(skb)->encap_level > 0;
@@ -1370,6 +1386,7 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 		features &= skb->dev->hw_enc_features;
 	SKB_GSO_CB(skb)->encap_level += ihl;
 
+	/* 设置传输层头部位置 */
 	skb_reset_transport_header(skb);
 
 	segs = ERR_PTR(-EPROTONOSUPPORT);
@@ -1383,7 +1400,9 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 			goto out;
 	}
 
+	/* 根据协议字段取得上层的协议接口 */
 	ops = rcu_dereference(inet_offloads[proto]);
+	/* 调用上册协议的GSO处理函数, 例如: tcp_gso_segment(), udp4_ufo_fragment() */
 	if (likely(ops && ops->callbacks.gso_segment))
 		segs = ops->callbacks.gso_segment(skb, features);
 
@@ -1392,16 +1411,34 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 
 	gso_partial = !!(skb_shinfo(segs)->gso_type & SKB_GSO_PARTIAL);
 
+
+	/* 开始处理分段后的skb:
+	 * UDP经过GSO分片后每个分片的IP头部id是一样的，这个符合IP分片的逻辑，
+	 * 但是为什么TCP的GSO分片，IP头部的id会依次加1呢？
+	 * 原因是： tcp建立三次握手的过程中产生合适的mss（具体的处理机制参见TCP/IP详解P257），
+	 * 这个mss肯定是<=网络层的最大路径MTU，然后tcp数据封装成ip数据包通过网络层发送，
+	 * 当服务器端传输层接收到tcp数据之后进行tcp重组。
+	 * 所以正常情况下tcp产生的ip数据包在传输过程中是不会发生分片的！
+	 * 由于GSO应该保证对外透明，所以其效果应该也和在TCP层直接分片的效果是一样的，
+	 * 所以这里对UDP的处理是IP分片逻辑，但对TCP的处理是构造新的skb逻辑。
+	 */
 	skb = segs;
 	do {
 		iph = (struct iphdr *)(skb_mac_header(skb) + nhoff);
+
+		/* 对于UDP进行的IP分片的头部处理逻辑 */
 		if (udpfrag) {
+			/* ip头部偏移字段单位为8字节 */
 			iph->frag_off = htons(offset >> 3);
+
+			/* 设置分片标识 */
 			if (skb->next)
 				iph->frag_off |= htons(IP_MF);
+
 			offset += skb->len - nhoff - ihl;
 			tot_len = skb->len - nhoff;
 		} else if (skb_is_gso(skb)) {
+			/* 对于TCP报，分片后IP头部中id加1 */
 			if (!fixedid) {
 				iph->id = htons(id);
 				id += skb_shinfo(skb)->gso_segs;
@@ -1418,7 +1455,10 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 				iph->id = htons(id++);
 			tot_len = skb->len - nhoff;
 		}
+
 		iph->tot_len = htons(tot_len);
+
+		/* ip checksum计算 */
 		ip_send_check(iph);
 		if (encap)
 			skb_reset_inner_headers(skb);

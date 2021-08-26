@@ -114,6 +114,7 @@ int __skb_wait_for_more_packets(struct sock *sk, int *err, long *timeo_p,
 	if (signal_pending(current))
 		goto interrupted;
 
+	/* 将自己调度出去，即睡眠等待 */
 	error = 0;
 	*timeo_p = schedule_timeout(*timeo_p);
 out:

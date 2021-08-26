@@ -499,16 +499,19 @@ struct skb_shared_info {
 	__u8		nr_frags;
 	__u8		tx_flags;
 
-	/* 表示gso 分片的长度 */
+	/* 表示gso支持的单位分片长度，例如，tso的mss */
 	unsigned short	gso_size;
 
-	/*表示gso分片的个数 ， gso用来delay大包的分片，一直到 dev_hard_start_xmit()才会被调用。*/
+	/*表示gso分片的个数 ， gso用来delay大包的分片，一直到 sch_direct_xmit()才会被调用。*/
 	/* Warning: this field is not always filled in (UFO)! */
 	unsigned short	gso_segs;
 	
 	struct sk_buff	*frag_list;
 	struct skb_shared_hwtstamps hwtstamps;
+
+	/* gso type，例如 SKB_GSO_TCPV4，SKB_GSO_TCPV6，SKB_GSO_UDP，等等 */
 	unsigned int	gso_type;
+
 	u32		tskey;
 
 	/*
@@ -1983,12 +1986,13 @@ static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
 	return skb;
 }
 
-
+/* 非线性区数据长度 */
 static inline bool skb_is_nonlinear(const struct sk_buff *skb)
 {
 	return skb->data_len;
 }
 
+/* 线性区数据长度 */
 static inline unsigned int skb_headlen(const struct sk_buff *skb)
 {
 	return skb->len - skb->data_len;
@@ -2597,6 +2601,11 @@ static inline int __pskb_trim(struct sk_buff *skb, unsigned int len)
 	return 0;
 }
 
+/*
+ * pskb_trim()与skb_trim()功能类似，也是根据指定长度删除SKB尾部的数据。
+ * 不同的是，pskb_trim()是skb_trim()的功能超集，不仅可以处理线性数据的SKB，
+ * 还可以处理非线性的SKB。线性数据的处理过程与skb_trim()相同，
+ */
 static inline int pskb_trim(struct sk_buff *skb, unsigned int len)
 {
 	return (len < skb->len) ? __pskb_trim(skb, len) : 0;
@@ -3285,16 +3294,22 @@ static inline int __skb_grow_rcsum(struct sk_buff *skb, unsigned int len)
 #define skb_rb_next(skb)   rb_to_skb(rb_next(&(skb)->rbnode))
 #define skb_rb_prev(skb)   rb_to_skb(rb_prev(&(skb)->rbnode))
 
+/* 从queue头部开始遍历，直到遍历循环回到queue结束。
+ * 但是，该宏不能做删除skb操作，一旦删除skb后，skb->next就是非法的。
+ */
 #define skb_queue_walk(queue, skb) \
 		for (skb = (queue)->next;					\
 		     skb != (struct sk_buff *)(queue);				\
 		     skb = skb->next)
 
+/* 从queue头部开始遍历，直到遍历循环回到queue结束。
+ * 但是，相比上个宏，可以做删除skb操作。(next可从临时遍历获得。)
+ */
 #define skb_queue_walk_safe(queue, skb, tmp)					\
 		for (skb = (queue)->next, tmp = skb->next;			\
 		     skb != (struct sk_buff *)(queue);				\
 		     skb = tmp, tmp = skb->next)
-
+/* 从skb处开始遍历。 */
 #define skb_queue_walk_from(queue, skb)						\
 		for (; skb != (struct sk_buff *)(queue);			\
 		     skb = skb->next)
@@ -4235,6 +4250,7 @@ static inline __sum16 gso_make_checksum(struct sk_buff *skb, __wsum res)
 	return csum_fold(csum_partial(csum_start, plen, partial));
 }
 
+/* gso_size表示生产GSO大包时的数据包长度，一般时mss的整数倍。 */
 static inline bool skb_is_gso(const struct sk_buff *skb)
 {
 	return skb_shinfo(skb)->gso_size;

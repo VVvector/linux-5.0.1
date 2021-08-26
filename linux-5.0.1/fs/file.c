@@ -607,6 +607,7 @@ void __fd_install(struct files_struct *files, unsigned int fd,
 	rcu_read_unlock_sched();
 }
 
+/* 添加新文件到当前进程的打开文件列表中 */
 void fd_install(unsigned int fd, struct file *file)
 {
 	__fd_install(current->files, fd, file);

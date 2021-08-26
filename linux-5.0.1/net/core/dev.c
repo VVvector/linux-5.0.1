@@ -385,6 +385,7 @@ static inline void netdev_set_addr_lockdep_class(struct net_device *dev)
  *							--ANK (980803)
  */
 
+/* ptype_base是一个哈希表，用于快速查找。 */
 static inline struct list_head *ptype_head(const struct packet_type *pt)
 {
 	if (pt->type == htons(ETH_P_ALL))
@@ -406,7 +407,11 @@ static inline struct list_head *ptype_head(const struct packet_type *pt)
  *	guarantee all CPU's that are in middle of receiving packets
  *	will see the new packet type (until the next received packet).
  */
-
+/* 用于注册packet的处理函数，例如ipv4和ipv6的接收函数( ip_packet_type-af_inet.c)
+ * 实际会被注册到 ptype_base这个哈希表中。
+ * 接收packet时，就可以通过packet的type在ptype_base找到对应的接收函数，
+ * 例如，IP packet就会路由到 ip_rcv()函数进行处理。
+ */
 void dev_add_pack(struct packet_type *pt)
 {
 	struct list_head *head = ptype_head(pt);
@@ -3035,6 +3040,7 @@ struct sk_buff *skb_mac_gso_segment(struct sk_buff *skb,
 
 	__skb_pull(skb, vlan_depth);
 
+	/* 调用上层的gso分段函数, 例如，inet_gso_segment()*/
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, &offload_base, list) {
 		if (ptype->type == type && ptype->callbacks.gso_segment) {
@@ -3044,6 +3050,7 @@ struct sk_buff *skb_mac_gso_segment(struct sk_buff *skb,
 	}
 	rcu_read_unlock();
 
+	/* 把skb->data再次指向mac header */
 	__skb_push(skb, skb->data - skb_mac_header(skb));
 
 	return segs;
@@ -3111,6 +3118,7 @@ struct sk_buff *__skb_gso_segment(struct sk_buff *skb,
 	skb_reset_mac_header(skb);
 	skb_reset_mac_len(skb);
 
+	/* 调用上层的gso offload函数，对skb进行gso处理。 */
 	segs = skb_mac_gso_segment(skb, features);
 
 	if (unlikely(skb_needs_check(skb, tx_path) && !IS_ERR(segs)))
@@ -3282,6 +3290,7 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
 	unsigned int len;
 	int rc;
 
+	/* 抓包的hook点，例如 用wireshark抓发送方向的packet。*/
 	if (dev_nit_active(dev))
 		dev_queue_xmit_nit(skb, dev);
 
@@ -3295,7 +3304,7 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
 
 
 
-/* 这里为啥有一个 while()， 因为 该skb可能是 gso后的，被切片为多个skb了，list连接起来的。 */
+/* 这里为啥有一个 while()， 因为该skb可能是gso后的，被切片为多个skb了，list连接起来的。 */
 struct sk_buff *dev_hard_start_xmit(struct sk_buff *first, struct net_device *dev,
 				    struct netdev_queue *txq, int *ret)
 {
@@ -3306,6 +3315,8 @@ struct sk_buff *dev_hard_start_xmit(struct sk_buff *first, struct net_device *de
 		struct sk_buff *next = skb->next;
 
 		skb_mark_not_on_list(skb);
+
+		/* 调用网卡driver的xmit，将skb发送到网卡中 */
 		rc = xmit_one(skb, dev, txq, next != NULL);
 		if (unlikely(!dev_xmit_complete(rc))) {
 			skb->next = next;
@@ -3359,16 +3370,15 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 	if (unlikely(!skb))
 		goto out_null;
 
-	/* 如果开启了gso，则进行gso操作 */
+	/* 查看该skb和netdev是否开启了gso，则进行gso操作 */
 	if (netif_needs_gso(skb, features)) {
 		struct sk_buff *segs;
 
-		/* 对skb进行 gso处理。 
-		这里主要完成对skb的分片，并将分片存放在原始skb的skb->next中。
-
-		UDP:所有分片ip头部id都相同，设置IP_MF分片标志(除最后一片) （等同于IP分片）
-    	TCP:分片后，每个分片IP头部中id加1, （等同于TCP分段）
-	*/
+		/* 对skb进行gso处理：
+		 * 这里主要完成对skb的分片，并将分片存放在原始skb的skb->next中。
+		 * UDP:所有分片ip头部id都相同，设置IP_MF分片标志(除最后一片) （等同于IP分片）
+    		 * TCP:分片后，每个分片IP头部中id加1, （等同于TCP分段）
+		 */
 		segs = skb_gso_segment(skb, features);
 		if (IS_ERR(segs)) {
 			goto out_kfree_skb;
@@ -3379,8 +3389,7 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 
 	/* 不进行gso， 需要将gso packet线性化。*/
 	} else {
-
-		/* 这里看 nic device是否支持 fraglist或者sg, 然后再决定是否做线性化处理。 */
+		/* 这里看 nic device是否支持 fraglist或者sg, 然后, 再决定是否做线性化处理。 */
 		if (skb_needs_linearize(skb, features) &&
 		    __skb_linearize(skb))
 			goto out_kfree_skb;
@@ -3398,7 +3407,7 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 				skb_set_transport_header(skb,
 							 skb_checksum_start_offset(skb));
 
-			/* 这里 会做tx checksum offload的工作 */
+			/* 这里会做tx checksum offload的工作 */
 			if (skb_csum_hwoffload_help(skb, features))
 				goto out_kfree_skb;
 		}
@@ -3421,12 +3430,14 @@ struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *d
 
 	for (; skb != NULL; skb = next) {
 		next = skb->next;
+		/* 把这个skb从list中拿了下来 */
 		skb_mark_not_on_list(skb);
 
+		/* 将gso返回的多个skb buff用链表串起来， */
 		/* in case skb wont be segmented, point to itself */
 		skb->prev = skb;
 
-		/* 验证要发送的skb数据包， 例如  checksum */
+		/* 验证要发送的skb数据包， 例如 gso,   checksum */
 		skb = validate_xmit_skb(skb, dev, again);
 		if (!skb)
 			continue;
@@ -3435,6 +3446,7 @@ struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *d
 			head = skb;
 		else
 			tail->next = skb;
+
 		/* If skb was segmented, skb->prev points to
 		 * the last segment. If not, it still contains skb.
 		 */
@@ -3944,7 +3956,7 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 				     XMIT_RECURSION_LIMIT))
 				goto recursion_alert;
 
-			/*将会再次判断是否支持HW checksum offload*/
+			/* 将会再次判断是否支持HW checksum offload, 是否要做gso等。 */
 			skb = validate_xmit_skb(skb, dev, &again);
 			if (!skb)
 				goto out;
@@ -4009,6 +4021,7 @@ int dev_direct_xmit(struct sk_buff *skb, u16 queue_id)
 		     !netif_carrier_ok(dev)))
 		goto drop;
 
+	/* 做gso，checksum等检查处理 */
 	skb = validate_xmit_skb_list(skb, dev, &again);
 	if (skb != orig_skb)
 		goto drop;
@@ -4018,6 +4031,7 @@ int dev_direct_xmit(struct sk_buff *skb, u16 queue_id)
 
 	local_bh_disable();
 
+	/* 发送skb到网卡 */
 	HARD_TX_LOCK(dev, txq, smp_processor_id());
 	if (!netif_xmit_frozen_or_drv_stopped(txq))
 		ret = netdev_start_xmit(skb, dev, txq, false);
@@ -5070,7 +5084,7 @@ skip_classify:
 	}
 
 
-	/* 2. protocol layer dilivery  -- ip, arp, rarp
+	/* 2. protocol layer dilivery  -- ip, arp, rarp --ip_rcv(), arp_rcv()
 
 		把skb 数据上传到 协议层 tcp/ip 的网络层。 
 		ptype_base是一个hash table (net/core/dev.c)
@@ -5083,7 +5097,7 @@ skip_classify:
 	*/
 	type = skb->protocol;
 	/* deliver only exact match when indicated */
-	/* 若未设置精确传送，则向未指定设备的协议处理例程传送一份数据 */
+	/* 若未设置精确传送，则向未指定设备的协议处理例程传送一份数据。 */
 	if (likely(!deliver_exact)) {
 		deliver_ptype_list_skb(skb, &pt_prev, orig_dev, type,
 				       &ptype_base[ntohs(type) &
@@ -5713,7 +5727,9 @@ INDIRECT_CALLABLE_DECLARE(struct sk_buff *inet_gro_receive(struct list_head *,
 INDIRECT_CALLABLE_DECLARE(struct sk_buff *ipv6_gro_receive(struct list_head *,
 							   struct sk_buff *));
 
-/* gro核心函数  */
+/* gro核心函数
+ * 把相关的小包合并成一个大包，目的是减少送给网络栈的包数，有助于减少CPU的使用量。
+ */
 static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 {
 	/* 8个hash桶 */
@@ -5748,6 +5764,8 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 		skb_set_network_header(skb, skb_gro_offset(skb));
 		skb_reset_mac_len(skb);
 		NAPI_GRO_CB(skb)->same_flow = 0;
+
+		/* 表示说如果网卡driver已经用skb list来组织数据，即网卡支持gro hw offload。就立即flush，不再做gro. */
 		NAPI_GRO_CB(skb)->flush = skb_is_gso(skb) || skb_has_frag_list(skb); //如果是gso或者有frag list，则需要flush到stack。
 		NAPI_GRO_CB(skb)->free = 0;
 		NAPI_GRO_CB(skb)->encap_mark = 0;
@@ -5923,7 +5941,9 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 	return ret;
 }
 
-/*GRO(Generic receive offload) 收包函数， 处理skb数据包的。*/
+/*GRO(Generic receive offload) 收包函数， 处理skb数据包的。
+ 网卡driver用此接口来上传数据包到gro。
+ */
 gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 {
 	gro_result_t ret;
@@ -5933,12 +5953,11 @@ gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 
 	/*将skb包含的gro上下文reset（某些包线性区没有数据，都存在非线性区中。）
 		frag0的作用是: 有些包的包头会存在skb->frag[0]里面，
-		gro合并时会调用skb_gro_header_slow将包头拉到线性空间中，
+		gro合并时会调用 skb_gro_header_slow() 将包头拉到线性空间中，
 		那么在非线性skb->frag[0]中的包头部分就应该删掉。
 	*/
 	skb_gro_reset_offset(skb);
 
-	/**/
 	ret = napi_skb_finish(dev_gro_receive(napi, skb), skb);
 	trace_napi_gro_receive_exit(ret);
 
@@ -6535,8 +6554,13 @@ void napi_disable(struct napi_struct *n)
 	might_sleep();
 	set_bit(NAPI_STATE_DISABLE, &n->state);
 
+	/*
+	 * 设置NAPI_STATE_SCHED，并返回原来的值。如果原来的值不是 NAPI_STATE_SCHED，才会跳出。
+	 * 即必须和napi_enable()配对，即在napi_enable()中会clear掉NAPI_STATE_SCHED。
+	 */
 	while (test_and_set_bit(NAPI_STATE_SCHED, &n->state))
 		msleep(1);
+	
 	while (test_and_set_bit(NAPI_STATE_NPSVC, &n->state))
 		msleep(1);
 
@@ -6578,6 +6602,7 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 	void *have;
 	int work, weight;
 
+	/* 先把本次的poll先从list中删除 */	
 	list_del_init(&n->poll_list);
 
 	have = netpoll_poll_lock(n);
@@ -6592,12 +6617,14 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 	 */
 	 
 	/*
-	调用NAIP struct的poll函数：
-		非napi的poll为 process_backlog(); 
-		napi的poll为driver自己注册的。
+	 * 调用NAIP struct的poll函数：
+		1. 非napi的poll为 process_backlog(); 
+		2. napi的poll为driver自己注册的。
 	*/
 	
 	work = 0;
+
+	/* 如果本napi的状态是NAPI_STATE_SCHED，就执行poll函数，否则不执行。 */
 	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
 		work = n->poll(n, weight);
 		trace_napi_poll(n, work, weight);
@@ -6605,6 +6632,7 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 
 	WARN_ON_ONCE(work > weight);
 
+	/* 如果本次poll的packet数量小于weight，表示poll完成，就直接退出。 */
 	if (likely(work < weight))
 		goto out_unlock;
 
@@ -6635,6 +6663,7 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 		goto out_unlock;
 	}
 
+	/* 再次将poll添加到repoll中，表示后续还要继续进行poll。 */
 	list_add_tail(&n->poll_list, repoll);
 
 out_unlock:
@@ -6658,21 +6687,27 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 	LIST_HEAD(repoll);
 
 	local_irq_disable();
+	/* 将当前cpu的sd的poll_list添加到新初始化的list head中, 并且清空sd->poll_list*/
 	list_splice_init(&sd->poll_list, &list);
 	local_irq_enable();
 
 	for (;;) {
 		struct napi_struct *n;
 
+		/* 如果本cpu的sd所有的poll都执行完成，就退出。 */
 		if (list_empty(&list)) {
 			if (!sd_has_rps_ipi_waiting(sd) && list_empty(&repoll))
 				goto out;
 			break;
 		}
 
+		/* 取出poll_list中的第一个poll元素。 */
 		n = list_first_entry(&list, struct napi_struct, poll_list);
+
+		/* 执行poll函数 */
 		budget -= napi_poll(n, &repoll);
 
+		/* 如果总poll的packet已经大于budget-300或者超时了就会退出rx_action，避免在用softirq太久。 */
 		/* If softirq window is exhausted then punt.
 		 * Allow this to run for 2 jiffies since which will allow
 		 * an average latency of 1.5/HZ.
@@ -6686,12 +6721,21 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 
 	local_irq_disable();
 
+	/* 将该cpu 的sd->poll_list再次添加到list中（在上面执行过程中，也有可能有poll添加到sd->poll_list中），
+	 并且清空sd->poll_list。*/
 	list_splice_tail_init(&sd->poll_list, &list);
+
+	/* 将上面没有完成的poll再次加入到list中 */
 	list_splice_tail(&repoll, &list);
+
+	/* 在把所有要执行的poll添加会sd->poll_list执行新添加的poll。注意：这里看出下次polling先执行新添加的poll。*/
 	list_splice(&list, &sd->poll_list);
+
+	/* 这里会检查，并再次trigger softirq去处理。 */
 	if (!list_empty(&sd->poll_list))
 		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
 
+	/* 再次enable local irq */
 	net_rps_action_and_irq_enable(sd);
 out:
 	__kfree_skb_flush();

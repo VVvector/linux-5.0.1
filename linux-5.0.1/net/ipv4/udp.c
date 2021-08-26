@@ -1638,9 +1638,7 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 
 	/*把skb挂入sock的 sk_receive_queue 链表上*/
 	/*
-
 	################这里取消了之前的 backlog机制。减少了锁的等待。-- TCP是有backlog的。#############
-
 	*/
 	__skb_queue_tail(list, skb);
 	spin_unlock(&list->lock);
@@ -1801,6 +1799,7 @@ EXPORT_SYMBOL(udp_ioctl);
 struct sk_buff *__skb_recv_udp(struct sock *sk, unsigned int flags,
 			       int noblock, int *peeked, int *off, int *err)
 {
+	/* 该udp的接收队列 */
 	struct sk_buff_head *sk_queue = &sk->sk_receive_queue;
 	struct sk_buff_head *queue;
 	struct sk_buff *last;
@@ -1820,6 +1819,7 @@ struct sk_buff *__skb_recv_udp(struct sock *sk, unsigned int flags,
 		error = -EAGAIN;
 		*peeked = 0;
 		do {
+			/* 先从sk->reader_queue中读取数据。 */
 			spin_lock_bh(&queue->lock);
 			skb = __skb_try_recv_from_queue(sk, queue, flags,
 							udp_skb_destructor,
@@ -1841,6 +1841,9 @@ struct sk_buff *__skb_recv_udp(struct sock *sk, unsigned int flags,
 			 * is needed.
 			 */
 			spin_lock(&sk_queue->lock);
+			/* 将sk->sk_receive_queue拼接到(sk)->reader_queue中,
+			 * 然后，再从reader_queue中读取数据。
+			 */
 			skb_queue_splice_tail_init(sk_queue, queue);
 
 			skb = __skb_try_recv_from_queue(sk, queue, flags,
@@ -2287,6 +2290,7 @@ static int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	for (skb = segs; skb; skb = next) {
 		next = skb->next;
 		__skb_pull(skb, skb_transport_offset(skb));
+		/* 接收skb到sk->sk_receive_queue */
 		ret = udp_queue_rcv_one_skb(sk, skb);
 		if (ret > 0)
 			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
@@ -2444,8 +2448,7 @@ static int udp_unicast_rcv_skb(struct sock *sk, struct sk_buff *skb,
 					 inet_compute_pseudo);
 
 	/*
-	往sk->sk_receive_queue上挂包，
-
+	 * 往sk->sk_receive_queue上挂包
 	 */
 	ret = udp_queue_rcv_skb(sk, skb);
 
@@ -2540,8 +2543,10 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		goto csum_error;
 
 
-	/* 累计输入数据包错误统计值，并且回复端口不可达的 ICMP 报文。 */
+	/* 累计输入数据包错误统计值 */
 	__UDP_INC_STATS(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
+
+	/* 没有找到skb对应的sk，则发送一个目标不可达的icmp包。 */
 	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
 
 	/*

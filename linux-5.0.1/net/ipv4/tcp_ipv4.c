@@ -2119,6 +2119,7 @@ process:
 
 	/* 进程此时没有访问传输控制块 */
 	if (!sock_owned_by_user(sk)) {
+		
 		/* 继续往上传skb，放入sk->sk_receive_queue中 */
 		ret = tcp_v4_do_rcv(sk, skb);
 	} else if (tcp_add_backlog(sk, skb)) {

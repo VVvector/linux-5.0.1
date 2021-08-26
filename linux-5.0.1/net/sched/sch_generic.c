@@ -222,6 +222,9 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate,
 	const struct netdev_queue *txq = q->dev_queue;
 	struct sk_buff *skb = NULL;
 
+	/* 表示该qdisc中，上次的gso_skb没有发送完成。即 需要继续发送该gso_skb。
+	 * 且不需要再次检查gso，checksum这些了。validate = false。
+	 */
 	*packets = 1;
 	if (unlikely(!skb_queue_empty(&q->gso_skb))) {
 		spinlock_t *lock = NULL;
@@ -264,6 +267,8 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate,
 			spin_unlock(lock);
 		goto trace;
 	}
+
+	/* qdisc没有未发送完的gso_skb, 即需要检测skb的gso，checksum等。 */
 validate:
 	*validate = true;
 
@@ -274,6 +279,8 @@ validate:
 	skb = qdisc_dequeue_skb_bad_txq(q);
 	if (unlikely(skb))
 		goto bulk;
+
+	/* 直接从qdisc dequeue一个skb进行发送 */
 	skb = q->dequeue(q);
 	if (skb) {
 bulk:
@@ -308,8 +315,8 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 		spin_unlock(root_lock);
 
 	/*  这里需要验证     该skb是否是开启了gso或者checksum offload 
-		注意：这里要进行gso和hw checksum 的检查或处理。
-	*   /
+	 * 注意：这里要进行gso和hw checksum 的检查或处理。
+	 */
 	/* Note that we validate skb (GSO, checksum, ...) outside of locks */
 	if (validate)
 		skb = validate_xmit_skb_list(skb, dev, &again);
@@ -325,7 +332,7 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 #endif
 
 	if (likely(skb)) {
-		/* 这里看出 ndo_start_xmit是不能阻塞的。 */ 
+		/* 有spinlock保护，所有这里看出ndo_start_xmit()是不能阻塞的。 */ 
 		HARD_TX_LOCK(dev, txq, smp_processor_id());
 		if (!netif_xmit_frozen_or_stopped(txq))
 			skb = dev_hard_start_xmit(skb, dev, txq, &ret);
@@ -381,7 +388,7 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 	bool validate;
 
 	/* Dequeue packet */
-	/*dequeue一个skb*/
+	/* 从qdisc中取出一个skb */
 	skb = dequeue_skb(q, &validate, packets);
 	if (unlikely(!skb))
 		return false;

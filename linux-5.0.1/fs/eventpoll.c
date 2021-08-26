@@ -139,6 +139,9 @@ struct nested_calls {
  * Avoid increasing the size of this struct, there can be many thousands
  * of these on a server and we do not want this to take another cache line.
  */
+/*
+ *  对于每一个 socket，调用 epoll_ctl 的时候，都会为之分配一个 epitem。
+ */
 struct epitem {
 	union {
 		/* RB tree node links this structure to the eventpoll RB tree */
@@ -156,15 +159,18 @@ struct epitem {
 	 */
 	struct epitem *next;
 
+	/* socket文件描述符信息 */
 	/* The file descriptor information this item refers to */
 	struct epoll_filefd ffd;
 
 	/* Number of active wait queue attached to poll operations */
 	int nwait;
 
+	/* 等待队列 */
 	/* List containing poll wait queues */
 	struct list_head pwqlist;
 
+	/* 所归属的 eventpoll 对象 */
 	/* The "container" of this item */
 	struct eventpoll *ep;
 
@@ -194,15 +200,26 @@ struct eventpoll {
 	 */
 	struct mutex mtx;
 
+	/* epollwait使用的等待队列 
+	 * 软中断数据就绪的时候会通过wq来找到阻塞在epoll对象上的用户进程。
+	 */
 	/* Wait queue used by sys_epoll_wait() */
 	wait_queue_head_t wq;
 
 	/* Wait queue used by file->poll() */
 	wait_queue_head_t poll_wait;
 
+	/* 就绪描述符队列 
+	 * 当有的连接就绪的时候，内核会把就绪的连接放到rdlist链表中。
+	 * 这样应用进程只需要判断链表就能找到就绪进程，而不用去遍历整棵树。
+	 */
 	/* List of ready file descriptors */
 	struct list_head rdllist;
 
+	/* 红黑树
+	 * 为了支持对海量连接的高效查找，插入和删除。
+	 * 通过这棵树来管理用户进程下添加进来的所有socket连接。
+	 */
 	/* RB tree root used to store monitored fd structs */
 	struct rb_root_cached rbr;
 
@@ -1018,10 +1035,13 @@ static int ep_alloc(struct eventpoll **pep)
 
 	user = get_current_user();
 	error = -ENOMEM;
+
+	/* 申请epollevent内存  */
 	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
 	if (unlikely(!ep))
 		goto free_uid;
 
+	/* 初始化资源 */
 	mutex_init(&ep->mtx);
 	init_waitqueue_head(&ep->wq);
 	init_waitqueue_head(&ep->poll_wait);
@@ -1242,9 +1262,12 @@ static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
 	struct eppoll_entry *pwq;
 
 	if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+		/* 初始化回调方法 */
 		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
 		pwq->whead = whead;
 		pwq->base = epi;
+
+		/* 将ep_poll_callback放入socket的等待队列whead中。（注意不是epoll的等待队列） */
 		if (epi->event.events & EPOLLEXCLUSIVE)
 			add_wait_queue_exclusive(whead, &pwq->wait);
 		else
@@ -1429,9 +1452,16 @@ static int ep_insert(struct eventpoll *ep, const struct epoll_event *event,
 	user_watches = atomic_long_read(&ep->user->epoll_watches);
 	if (unlikely(user_watches >= max_user_watches))
 		return -ENOSPC;
+
+	/* 分配并初始化epitem
+	 * 分配一个epi对象
+	 */
 	if (!(epi = kmem_cache_alloc(epi_cache, GFP_KERNEL)))
 		return -ENOMEM;
 
+	/* 对分配的epi进行初始化
+	 * epi->ffd中保存了句柄号和struct file对象地址
+	 */
 	/* Item initialization follow here ... */
 	INIT_LIST_HEAD(&epi->rdllink);
 	INIT_LIST_HEAD(&epi->fllink);
@@ -1449,6 +1479,10 @@ static int ep_insert(struct eventpoll *ep, const struct epoll_event *event,
 		RCU_INIT_POINTER(epi->ws, NULL);
 	}
 
+	/* 
+	 * 设置socket等待队列
+	 * 定义并初始化ep_pqueue对象
+	 */
 	/* Initialize the poll table using the queue callback */
 	epq.epi = epi;
 	init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);
@@ -1459,6 +1493,10 @@ static int ep_insert(struct eventpoll *ep, const struct epoll_event *event,
 	 * been increased by the caller of this function. Note that after
 	 * this operation completes, the poll callback can start hitting
 	 * the new item.
+	 */
+	/*
+	 * 调用ep_ptable_queue_proc注册回到函数
+	 * 实际注入的函数是 ep_poll_callback()
 	 */
 	revents = ep_item_poll(epi, &epq.pt, 1);
 
@@ -1480,6 +1518,7 @@ static int ep_insert(struct eventpoll *ep, const struct epoll_event *event,
 	 * Add the current item to the RB tree. All RB tree operations are
 	 * protected by "mtx", and ep_insert() is called with "mtx" held.
 	 */
+	 /* 将epi插入到eventpoll对象中的红黑树中 */
 	ep_rbtree_insert(ep, epi);
 
 	/* now check if we've created too many backpaths */
@@ -2004,8 +2043,10 @@ out_free_ep:
 	return error;
 }
 
+/* epoll_create的系统调用 */
 SYSCALL_DEFINE1(epoll_create1, int, flags)
 {
+	/* 创建一个eventpoll对象 */
 	return do_epoll_create(flags);
 }
 
@@ -2022,6 +2063,7 @@ SYSCALL_DEFINE1(epoll_create, int, size)
  * the eventpoll file that enables the insertion/removal/change of
  * file descriptors inside the interest set.
  */
+ /* 实现如何添加到epoll对象里。 */
 SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 		struct epoll_event __user *, event)
 {
@@ -2038,11 +2080,13 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
 		goto error_return;
 
+	/* 根据epfd找到eventpoll内核对象 */
 	error = -EBADF;
 	f = fdget(epfd);
 	if (!f.file)
 		goto error_return;
 
+	/* 根据socket句柄号，找到其file内核对象。 */
 	/* Get the "struct file *" for the target file */
 	tf = fdget(fd);
 	if (!tf.file)
@@ -2136,6 +2180,7 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 	case EPOLL_CTL_ADD:
 		if (!epi) {
 			epds.events |= EPOLLERR | EPOLLHUP;
+			/* 注册ep */
 			error = ep_insert(ep, &epds, tf.file, fd, full_check);
 		} else
 			error = -EEXIST;

@@ -89,6 +89,9 @@ static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
 		if (flags & WQ_FLAG_BOOKMARK)
 			continue;
 
+		/* 这里将调用wait定义时设置的唤醒函数。
+		 * 例如，有将wait关联的进程切换到调度的可运行队列中。即进程可被再次调度运行。
+		 */
 		ret = curr->func(curr, mode, wake_flags, key);
 		if (ret < 0)
 			break;

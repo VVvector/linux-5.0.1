@@ -321,6 +321,7 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 	uh = udp_hdr(skb);
 	iph = ip_hdr(skb);
 
+	/* 计算udp的checksum */
 	uh->check = 0;
 	csum = skb_checksum(skb, 0, skb->len, 0);
 	uh->check = udp_v4_check(skb->len, iph->saddr, iph->daddr, csum);
@@ -338,6 +339,10 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 
 	/* Fragment the skb. IP headers of the fragments are updated in
 	 * inet_gso_segment()
+	 */
+	/* 注意这里传递给skb_segment 做分片是带有udp首部的，分片将udp首部作为普通数据切分，
+	 * 这也意味着对于udp的GSO分片，只有第一片有UDP首部。udp的分段其实和ip的分片没什么区别，
+	 * 只是多一个计算checksum的步骤
 	 */
 	segs = skb_segment(skb, features);
 out:

@@ -1310,7 +1310,7 @@ static void tcp_set_skb_tso_segs(struct sk_buff *skb, unsigned int mss_now)
 		TCP_SKB_CB(skb)->tcp_gso_size = 0;
 	} else {
 		tcp_skb_pcount_set(skb, DIV_ROUND_UP(skb->len, mss_now));
-		TCP_SKB_CB(skb)->tcp_gso_size = mss_now;
+		TCP_SKB_CB(skb)->tcp_gso_size = mss_now; //用于后面gso分段，即段长度。
 	}
 }
 
@@ -1663,6 +1663,7 @@ EXPORT_SYMBOL(tcp_sync_mss);
 /* Compute the current effective MSS, taking SACKs and IP options,
  * and even PMTU discovery events into account.
  */
+ /* 确定一个skb最多可以容纳多少数据量，即确定tp->xmit_size_goal */
 unsigned int tcp_current_mss(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -1895,6 +1896,7 @@ static inline unsigned int tcp_cwnd_test(const struct tcp_sock *tp,
  * This must be invoked the first time we consider transmitting
  * SKB onto the wire.
  */
+ /* 用MSS初始化skb中的gso字段，返回本skb将会被分割成几个TSO段传输 */
 static int tcp_init_tso_segs(struct sk_buff *skb, unsigned int mss_now)
 {
 	int tso_segs = tcp_skb_pcount(skb);
@@ -2009,10 +2011,12 @@ static int tso_fragment(struct sock *sk, enum tcp_queue tcp_queue,
  * This algorithm is from John Heffner.
  */
  /*
-在段中有FIN标志，或者不处于open拥塞状态，或者TSO段延时超过2个时钟滴答，
-或者拥塞窗口和发送窗口的最小值大于64K或三倍的当前有效MSS，
-在这些情况下会立即发送，而其他情况下会延时发送，这样主要是为了减少软GSO分段的次数，以提高性能。
-*/
+ * 1. 在段中有FIN标志
+ * 2. 不处于open拥塞状态
+ * 3. TSO段延时超过2个时钟滴答
+ * 4. 拥塞窗口和发送窗口的最小值大于64K或三倍的当前有效MSS，
+ * 在这些情况下会立即发送，而其他情况下会延时发送，这样主要是为了减少软GSO分段的次数，以提高性能。
+ */
 static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 				 bool *is_cwnd_limited,
 				 bool *is_rwnd_limited,
@@ -2487,7 +2491,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			skb->skb_mstamp_ns = tp->tcp_wstamp_ns = tp->tcp_clock_cache;
 			list_move_tail(&skb->tcp_tsorted_anchor, &tp->tsorted_sent_queue);
 
-			/* 获取TSO的信息 */
+			/* 用MSS初始化skb中的gso字段，返回本skb将会被分割成几个TSO段传输 */
 			tcp_init_tso_segs(skb, mss_now);
 			goto repair; /* Skip network transmission */
 		}
@@ -2535,7 +2539,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 						      nonagle : TCP_NAGLE_PUSH))))
 				break;
 		} else { 
-			/* 如果需要tso分段, 则坚持是否需要延迟发送。 */
+			/* 如果需要tso分段, 则检查是否需要延迟发送。 */
 			//检查是否可以延时发送，有很多条件判断。详细见函数。
 			//目的是为了减少软GSO分段的次数，以提高性能。
 			if (!push_one &&

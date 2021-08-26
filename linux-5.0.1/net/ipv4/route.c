@@ -2010,7 +2010,7 @@ static int ip_route_input_slow(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	if (res->type != RTN_UNICAST)
 		goto martian_destination;
 
-	/* 这里表示要进行转发 即 skb->input 赋值为 ip_forward() */
+	/* 表示要进行转发 即 skb->input 赋值为 ip_forward() */
 make_route:
 	err = ip_mkroute_input(skb, res, in_dev, daddr, saddr, tos, flkeys);
 out:	return err;
@@ -2169,7 +2169,9 @@ int ip_route_input_rcu(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 		     IN_DEV_MFORWARD(in_dev))
 #endif
 		   ) {
-		   	/* 产生与此报文信息相关多播路由项，添加到路由缓存表中。 */
+		   	/* 产生与此报文信息相关多播路由项，添加到路由缓存表中。
+			 * 这里面 函数ip_local_deliver()被赋值给了dst.input()
+		   	 */
 			err = ip_route_input_mc(skb, daddr, saddr,
 						tos, dev, our);
 		}
@@ -2177,7 +2179,8 @@ int ip_route_input_rcu(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	}
 
 	/* 如果在缓存中没有查到路由信息，则到路由表中处理及创建路由cache，
-		设置回调函数ip_local_deliver, ip_forward, ip_output.
+		设置skb->input回调函数为ip_local_deliver或者ip_forward。
+		设置ip_output.
 	*/
 	return ip_route_input_slow(skb, daddr, saddr, tos, dev, res);
 }

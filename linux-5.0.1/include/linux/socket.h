@@ -282,7 +282,7 @@ struct ucred {
  */
  
 #define MSG_OOB		1 /* 接收或发送带外数据 */
-#define MSG_PEEK	2 /* 查看数据，单并不从系统缓存区移走数据 */
+#define MSG_PEEK	2 /* 查看数据，但是，并不从系统缓存区移走数据 */
 #define MSG_DONTROUTE	4 /* 无需路由查找，目的地位于本地子网 */
 #define MSG_TRYHARD     4       /* Synonym for MSG_DONTROUTE for DECnet */
 #define MSG_CTRUNC	8 /* 指明由于缓存区空间不足，一些控制数据已被丢弃 */
@@ -306,7 +306,7 @@ struct ucred {
 #define MSG_CONFIRM	0x800	/* Confirm path validity */
 #define MSG_RST		0x1000
 
-/* 指示除了来之套接字错误队列的错误外，不接收其他数据。 */
+/* 指示除了来自套接字错误队列的错误外，不接收其他数据。 */
 #define MSG_ERRQUEUE	0x2000	/* Fetch message from error queue */
 
 /* 当另一端终止连接时，请求在基于流的错误套接字上不要发送SIGPIPE信号 */

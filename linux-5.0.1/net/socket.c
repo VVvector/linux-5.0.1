@@ -136,7 +136,7 @@ static ssize_t sock_splice_read(struct file *file, loff_t *ppos,
  *	Socket files have a set of 'special' operations as well as the generic file ones. These don't appear
  *	in the operation structures but are done directly via the socketcall() multiplexor.
  */
-
+/*socket的file ops。*/
 static const struct file_operations socket_file_ops = {
 	.owner =	THIS_MODULE,
 	.llseek =	no_llseek,
@@ -391,6 +391,7 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 	if (!dname)
 		dname = sock->sk ? sock->sk->sk_prot_creator->name : "";
 
+	/* 这里，会调用alloc_file, 且会把socket_file_ops赋值给file->f_op。 */
 	file = alloc_file_pseudo(SOCK_INODE(sock), sock_mnt, dname,
 				O_RDWR | (flags & O_NONBLOCK),
 				&socket_file_ops);
@@ -399,6 +400,7 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 		return file;
 	}
 
+	/* 将申请好的file与sock相互绑定。 */
 	sock->file = file;
 	file->private_data = sock;
 	return file;
@@ -790,13 +792,13 @@ void __sock_recv_ts_and_drops(struct msghdr *msg, struct sock *sk,
 }
 EXPORT_SYMBOL_GPL(__sock_recv_ts_and_drops);
 
+/* tcp: 实际调用inet_recvmsg() - net/ipv4/af_inet.c*/
 static inline int sock_recvmsg_nosec(struct socket *sock, struct msghdr *msg,
 				     int flags)
 {
 	return sock->ops->recvmsg(sock, msg, msg_data_left(msg), flags);
 }
 
-/**/
 int sock_recvmsg(struct socket *sock, struct msghdr *msg, int flags)
 {
 	int err = security_socket_recvmsg(sock, msg, msg_data_left(msg), flags);
@@ -1239,6 +1241,7 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	 *	the protocol is 0, the family is instructed to select an appropriate
 	 *	default.
 	 */
+	/* 申请socket对象 */
 	sock = sock_alloc();
 	if (!sock) {
 		net_warn_ratelimited("socket: no more sockets\n");
@@ -1259,6 +1262,7 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 		request_module("net-pf-%d", family);
 #endif
 
+	/* 获取每个协议族的操作ops */
 	rcu_read_lock();
 	pf = rcu_dereference(net_families[family]);
 	err = -EAFNOSUPPORT;
@@ -1275,12 +1279,12 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	/* Now protected by module ref count */
 	rcu_read_unlock();
 
-	/* 调用相应的af的create， 例如  
-						static const struct net_proto_family inet_family_ops = {
-							.family = PF_INET,
-							.create = inet_create,
-							.owner	= THIS_MODULE,
-						};
+	/* 调用相应的af的create函数， 例如，AF_INET的  
+		static const struct net_proto_family inet_family_ops = {
+			.family = PF_INET,
+			.create = inet_create,
+			.owner	= THIS_MODULE,
+		};
 	*/
 	err = pf->create(net, sock, protocol, kern);
 	if (err < 0)
@@ -1320,6 +1324,7 @@ out_release:
 }
 EXPORT_SYMBOL(__sock_create);
 
+/* socket创建系统调用*/
 int sock_create(int family, int type, int protocol, struct socket **res)
 {
 	return __sock_create(current->nsproxy->net_ns, family, type, protocol, res, 0);
@@ -1560,15 +1565,19 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 	if (SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK))
 		flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
 
+	/* 根据fd查找到监听的socket */
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (!sock)
 		goto out;
 
+	/* 申请并初始化新的socket */
 	err = -ENFILE;
 	newsock = sock_alloc();
 	if (!newsock)
 		goto out_put;
 
+	/* 因为 对所有的AF_INET协议族下的socket来说，它们的ops方法都是一样的，
+	所以，这里可以直接复制过来。*/
 	newsock->type = sock->type;
 	newsock->ops = sock->ops;
 
@@ -1584,6 +1593,8 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 		sock_release(newsock);
 		goto out_put;
 	}
+
+	/* 申请新的file对象，并设置到新socket上 */
 	newfile = sock_alloc_file(newsock, flags, sock->sk->sk_prot_creator->name);
 	if (IS_ERR(newfile)) {
 		err = PTR_ERR(newfile);
@@ -1595,6 +1606,7 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 	if (err)
 		goto out_fd;
 
+	/* 接收连接，实际是inet_accept()。它执行的时候会从握手队列里直接获取创建好的sock。*/
 	err = sock->ops->accept(sock, newsock, sock->file->f_flags, false);
 	if (err < 0)
 		goto out_fd;
@@ -1612,8 +1624,8 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 			goto out_fd;
 	}
 
+	/* 添加新文件到当前进程的打开文件列表 */
 	/* File flags are not inherited via accept() unlike another OSes. */
-
 	fd_install(newfd, newfile);
 	err = newfd;
 
@@ -1627,6 +1639,7 @@ out_fd:
 	goto out_put;
 }
 
+/* accept的系统调用 */
 SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 		int __user *, upeer_addrlen, int, flags)
 {
@@ -1848,6 +1861,8 @@ int __sys_recvfrom(int fd, void __user *ubuf, size_t size, unsigned int flags,
 	err = import_single_range(READ, ubuf, size, &iov, &msg.msg_iter);
 	if (unlikely(err))
 		return err;
+
+	/* 根据用户传入的fd找到socket对象 */
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (!sock)
 		goto out;
@@ -1862,6 +1877,8 @@ int __sys_recvfrom(int fd, void __user *ubuf, size_t size, unsigned int flags,
 	msg.msg_flags = 0;
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
+
+	/* 进一步调用socket层的接收函数 */
 	err = sock_recvmsg(sock, &msg, flags);
 
 	if (err >= 0 && addr != NULL) {
@@ -1876,6 +1893,7 @@ out:
 	return err;
 }
 
+/* tcp接收的系统调用 */
 SYSCALL_DEFINE6(recvfrom, int, fd, void __user *, ubuf, size_t, size,
 		unsigned int, flags, struct sockaddr __user *, addr,
 		int __user *, addr_len)

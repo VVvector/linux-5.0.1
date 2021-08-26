@@ -75,19 +75,28 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	if (thlen < sizeof(*th))
 		goto out;
 
+	/* 检测报文长度至少由tcp头部长度 */
 	if (!pskb_may_pull(skb, thlen))
 		goto out;
 
+	/* 把tcp header移到skb header里，把skb->len存到oldlen中，
+	 * 此时skb->len就只有ip payload的长度（包含TCP首部） 
+	 */
 	oldlen = (u16)~skb->len;
+
+	/* data指向tcp payload， 即不带tcp头部。*/
 	__skb_pull(skb, thlen);
 
+	/* 这里可以看出gso_size的含义就是mss */
 	mss = skb_shinfo(skb)->gso_size;
+
+	/* 如果skb长度小于mss就不需要GSO分片处理了 */
 	if (unlikely(skb->len <= mss))
 		goto out;
 
 	if (skb_gso_ok(skb, features | NETIF_F_GSO_ROBUST)) {
 		/* Packet is from an untrusted source, reset gso_segs. */
-
+		/* 计算出skb按照mss的长度需要分多少片，赋值给gso_segs */
 		skb_shinfo(skb)->gso_segs = DIV_ROUND_UP(skb->len, mss);
 
 		segs = NULL;
@@ -99,6 +108,10 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	/* All segments but the first should have ooo_okay cleared */
 	skb->ooo_okay = 0;
 
+	/* skb_segment是真正的分段实现。
+	 * 每个TCP的GSO分片是包含了TCP头部信息的，这也符合TCP层的分段逻辑。
+	 * 另外注意这里传递给skb_segment做分段时是不带TCP首部的。
+	 */
 	segs = skb_segment(skb, features);
 	if (IS_ERR(segs))
 		goto out;
@@ -124,16 +137,18 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 
 	newcheck = ~csum_fold((__force __wsum)((__force u32)th->check +
 					       (__force u32)delta));
-
+	/* 下面是设置每个分片的tcp头部信息 */
 	while (skb->next) {
 		th->fin = th->psh = 0;
 		th->check = newcheck;
 
+		/* 计算每个分片的校验和 */
 		if (skb->ip_summed == CHECKSUM_PARTIAL)
 			gso_reset_checksum(skb, ~th->check);
 		else
 			th->check = gso_make_checksum(skb, ~th->check);
 
+		/* 重新初始化每个分片的序列号 */
 		seq += mss;
 		if (copy_destructor) {
 			skb->destructor = gso_skb->destructor;

@@ -206,7 +206,7 @@ resubmit:
 			nf_reset(skb);
 		}
 
-		/* 这里会调用ip层之上的 传输层协议*/
+		/* 这里会调用ip层之上的传输层协议*/
 		ret = ipprot->handler(skb);
 		if (ret < 0) {
 			protocol = -ret;
@@ -263,7 +263,7 @@ int ip_local_deliver(struct sk_buff *skb)
 	 */
 	struct net *net = dev_net(skb->dev);
 
-	/* ip层的  defrag 的处理 */
+	/* ip层的  defrag的处理, 即将多个ip分片合成一个完整的ip包。 */
 	if (ip_is_fragment(ip_hdr(skb))) {
 		if (ip_defrag(net, skb, IP_DEFRAG_LOCAL_DELIVER))
 			return 0;
@@ -562,7 +562,6 @@ out:
  */
  
  /* ip层的接收函数 
-
  */
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
 	   struct net_device *orig_dev)

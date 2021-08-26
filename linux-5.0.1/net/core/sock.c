@@ -2327,11 +2327,19 @@ void __sk_flush_backlog(struct sock *sk)
  */
 int sk_wait_data(struct sock *sk, long *timeo, const struct sk_buff *skb)
 {
+	/* 定义一个等待队列，并把当前进程描述符current关联到其.private成员上。 */
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	int rc;
 
+	/* 调用sk_sleep获取sock对象下的wait，并且准备挂起。即
+	 * 将上面定义的新的等待队列wait挂入到sock对象的等待队列上。
+	 * 这样后面当内核收完数据产生就绪事件的时候，就可以查找socket等待队列上的等待项，
+	 * 进而就可以找到回调函数和在等待该socket事件的进程了。
+	 */
 	add_wait_queue(sk_sleep(sk), &wait);
 	sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
+
+	/* 通过调用schedule_timeout()让出CPU，然后进行睡眠。这里就会有进程上下文的切换开销。 */
 	rc = sk_wait_event(sk, timeo, skb_peek_tail(&sk->sk_receive_queue) != skb, &wait);
 	sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
 	remove_wait_queue(sk_sleep(sk), &wait);
@@ -2642,6 +2650,9 @@ static void sock_def_error_report(struct sock *sk)
 	rcu_read_unlock();
 }
 
+/* 注意：这里的唤醒 nr_excluslve=1，即 
+ * 即使是有多个进程都阻塞在同⼀个 socket 上，也只唤醒 1 个进程。其作用是为了避免惊群。
+ */
 static void sock_def_readable(struct sock *sk)
 {
 	struct socket_wq *wq;
@@ -2743,7 +2754,11 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 			af_family_clock_key_strings[sk->sk_family]);
 
 	sk->sk_state_change	=	sock_def_wakeup;
+	/* 注：当软中断上收到数据包时，会通过调用sk_data_ready(即sock_def_readable())来
+	 * 唤醒在sock上等待的进程(这里只唤醒一个休眠的进程)。
+	 */
 	sk->sk_data_ready	=	sock_def_readable;
+
 	sk->sk_write_space	=	sock_def_write_space;
 	sk->sk_error_report	=	sock_def_error_report;
 	sk->sk_destruct		=	sock_def_destruct;

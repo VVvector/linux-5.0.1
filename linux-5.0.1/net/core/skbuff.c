@@ -3477,6 +3477,11 @@ static inline skb_frag_t skb_head_frag_to_page_desc(struct sk_buff *frag_skb)
  *	a pointer to the first in a list of new skbs for the segments.
  *	In case of error it returns ERR_PTR(err).
  */
+
+/* 从该函数看出：分成的小skb并不一定都是线性化的，如果之前的skb存在frags数组或者frag_list，
+ * 则分成的小skb也可能有指向非线性区域。并不用担心网卡不支持分散聚合IO，
+ * 因为之前如果能产生这些非线性数据，就说明网卡一定是支持的。
+ */
 struct sk_buff *skb_segment(struct sk_buff *head_skb,
 			    netdev_features_t features)
 {
@@ -3485,6 +3490,8 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	struct sk_buff *list_skb = skb_shinfo(head_skb)->frag_list;
 	skb_frag_t *frag = skb_shinfo(head_skb)->frags;
 	unsigned int mss = skb_shinfo(head_skb)->gso_size;
+
+	/* mac头+ip头+tcp头；或者mac头+ip头(对于udp传入时，没有将头部偏移过去) */
 	unsigned int doffset = head_skb->data - skb_mac_header(head_skb);
 	struct sk_buff *frag_skb = head_skb;
 	unsigned int offset = doffset;
@@ -3552,6 +3559,8 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 
 normal:
 	headroom = skb_headroom(head_skb);
+
+	/* pos初始化为线性区长度 */
 	pos = skb_headlen(head_skb);
 
 	do {
@@ -3560,6 +3569,12 @@ normal:
 		int hsize;
 		int size;
 
+		/* offset：为分片已处理的长度，len为skb->len减去直到offset的部分。
+		 * 开始时，offset只是mac header + ip header + tcp header的长度，
+		 * len即tcp payload的长度。随着segment增加, offset每次都增加mss长度。
+		 * 因此len的定义是每个segment的payload长度（最后一个segment的payload可能小于一个mss长度）。
+		 * len：为本次要创建的新分片的长度。
+		 */
 		if (unlikely(mss == GSO_BY_FRAGS)) {
 			len = list_skb->len;
 		} else {
@@ -3568,15 +3583,27 @@ normal:
 				len = mss;
 		}
 
+		
+		/* hsize为线性区部分的payload减去offset后的大小，如果hsize小于0，
+		 * 那么说明payload在skb的frags或frag_list中。随着offset一直增长，
+		 * 必定会有hsize一直<0的情况开始出现，除非skb是一个完全linearize化的skb 
+		 */
 		hsize = skb_headlen(head_skb) - offset;
+
+		/* 这种情况说明线性区已经没有tcp payload的部分，需要pull数据过来 */
 		if (hsize < 0)
 			hsize = 0;
+
+		/* 如果不支持NETIF_F_SG或者hsize大于len，那么hsize就为len（本次新分片的长度），
+		 * 此时说明segment的payload还在skb 线性区中。
+		 */
 		if (hsize > len || !sg)
 			hsize = len;
 
-		/* 表示 需要从frags数组 或者frag_list链表中拷贝数据。
-		i >= nfrags表示frags数组中的数据也被拷贝完了。
-		即需要从frag_list链表中拷贝数据。*/
+		/* hsize为0：表示需要从frags数组或者frag_list链表中拷贝数据。
+		 * i >= nfrags表示frags数组中的数据也被拷贝完了。
+		 * 即这里表示需要从frag_list链表中拷贝数据。
+		 */
 		if (!hsize && i >= nfrags && skb_headlen(list_skb) &&
 		    (skb_headlen(list_skb) == len || sg)) {
 			BUG_ON(skb_headlen(list_skb) > len);
@@ -3600,29 +3627,35 @@ normal:
 			}
 
 			/* frag_list的数据不用真的拷贝，只需要拷贝其skb描述符，就可以复用数据区了。 */
-			nskb = skb_clone(list_skb, GFP_ATOMIC);
-			list_skb = list_skb->next;
+			nskb = skb_clone(list_skb, GFP_ATOMIC); //拷贝frag_list中的skb的描述符
+			list_skb = list_skb->next; //指向frag_list的下一个skb元素
 
 			if (unlikely(!nskb))
 				goto err;
 
+			/* 删除本次已分片的数据 */
 			if (unlikely(pskb_trim(nskb, len))) {
 				kfree_skb(nskb);
 				goto err;
 			}
 
 			hsize = skb_end_offset(nskb);
+
+			/* 保证新的skb的headroom有mac header+ip header+tcp/udp+header的大小 */
 			if (skb_cow_head(nskb, doffset + headroom)) {
 				kfree_skb(nskb);
 				goto err;
 			}
 
+			/* 调整truesize，使其包含本次已分片的数据部分长度（hsize）*/
 			nskb->truesize += skb_end_offset(nskb) - hsize;
 			skb_release_head_state(nskb);
 			__skb_push(nskb, doffset);
 
 		/* 数据从线性区或者frags数组中获取 */
 		} else {
+
+			 //注意，每次要拷贝出的数据长度为len，其中hsize位于线性区
 			nskb = __alloc_skb(hsize + doffset + headroom,
 					   GFP_ATOMIC, skb_alloc_rx_flag(head_skb),
 					   NUMA_NO_NODE);
@@ -3640,11 +3673,12 @@ normal:
 			segs = nskb;
 		tail = nskb;
 
+		/* 拷贝skb结构中的成员 */
 		__copy_skb_header(nskb, head_skb);
 
 		skb_headers_offset_update(nskb, skb_headroom(nskb) - headroom);
 		skb_reset_mac_len(nskb);
-
+		
 		skb_copy_from_linear_data_offset(head_skb, -tnl_hlen,
 						 nskb->data - tnl_hlen,
 						 doffset + tnl_hlen);
@@ -3656,6 +3690,8 @@ normal:
 		if (!sg) {
 			if (!nskb->remcsum_offload)
 				nskb->ip_summed = CHECKSUM_NONE;
+
+			/* 注意，每次要拷贝出的数据长度为len，其中hsize位于线性区 */
 			SKB_GSO_CB(nskb)->csum =
 				skb_copy_and_csum_bits(head_skb, offset,
 						       skb_put(nskb, len),
@@ -3667,6 +3703,7 @@ normal:
 
 		nskb_frag = skb_shinfo(nskb)->frags;
 
+		/* 如果hsize不为0，那么拷贝hsize的内容到nskb的线性区中 */
 		skb_copy_from_linear_data_offset(head_skb, offset,
 						 skb_put(nskb, hsize), hsize);
 
@@ -3677,7 +3714,13 @@ normal:
 		    skb_zerocopy_clone(nskb, frag_skb, GFP_ATOMIC))
 			goto err;
 
-		while (pos < offset + len) {
+		 /* 注意：每次要拷贝的数据长度是len，其中hsize是位于线性区中，
+		  * 但是随着线性区数据逐渐被处理，hsize可能不够len，
+		  * 这时剩下的(len-hsize)长度就要从frags数组中拷贝了
+		  */
+		while (pos < offset + len) { 
+
+			 /* 如果把frags数组中的数据拷贝完还不够len长度，则需要从frag_list中拷贝了 */
 			if (i >= nfrags) {
 				i = 0;
 				nfrags = skb_shinfo(list_skb)->nr_frags;
@@ -3713,6 +3756,7 @@ normal:
 			__skb_frag_ref(nskb_frag);
 			size = skb_frag_size(nskb_frag);
 
+			/* pos初始为线性区长度，后来表示已经被拷贝的长度 */
 			if (pos < offset) {
 				nskb_frag->page_offset += offset - pos;
 				skb_frag_size_sub(nskb_frag, offset - pos);
