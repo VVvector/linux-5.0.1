@@ -1195,7 +1195,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	/* 写完首部后，开始写tcp选项。 */
 	tcp_options_write((__be32 *)(th + 1), tp, &opts);
+
+	/* 这里会设置tcp skb的gso type，即 SKB_GSO_TCPV4 */
 	skb_shinfo(skb)->gso_type = sk->sk_gso_type;
+
 	if (likely(!(tcb->tcp_flags & TCPHDR_SYN))) {
 		th->window      = htons(tcp_select_window(sk));
 		tcp_ecn_send(sk, skb, th, tcp_header_size);
@@ -1235,6 +1238,8 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 			      tcp_skb_pcount(skb));
 
 	tp->segs_out += tcp_skb_pcount(skb);
+
+	/* 这里会设置skb的gso信息，分段长度和分段数量。 */
 	/* OK, its time to fill skb_shinfo(skb)->gso_{segs|size} */
 	skb_shinfo(skb)->gso_segs = tcp_skb_pcount(skb);
 	skb_shinfo(skb)->gso_size = tcp_skb_mss(skb);
@@ -1300,6 +1305,9 @@ static void tcp_queue_skb(struct sock *sk, struct sk_buff *skb)
 }
 
 /* Initialize TSO segments for a packet. */
+/* 设置一个tcp skb中的gso信息。
+ * 主要是 tcp_gso_size, tcp_gso_segs
+ */
 static void tcp_set_skb_tso_segs(struct sk_buff *skb, unsigned int mss_now)
 {
 	if (skb->len <= mss_now) {
@@ -1663,7 +1671,7 @@ EXPORT_SYMBOL(tcp_sync_mss);
 /* Compute the current effective MSS, taking SACKs and IP options,
  * and even PMTU discovery events into account.
  */
- /* 确定一个skb最多可以容纳多少数据量，即确定tp->xmit_size_goal */
+ /* 利用SACK, IP options， PMTU等来获取当前有效的MSS。 */
 unsigned int tcp_current_mss(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -1901,10 +1909,16 @@ static int tcp_init_tso_segs(struct sk_buff *skb, unsigned int mss_now)
 {
 	int tso_segs = tcp_skb_pcount(skb);
 
+	/*
+	 * cond1: tso_segs为0，表示skb的gso信息还没有被初始化过。
+	 * cond2: MSS发生了改变，需要重新计算GSO信息。
+	 */
 	if (!tso_segs || (tso_segs > 1 && tcp_skb_mss(skb) != mss_now)) {
 		tcp_set_skb_tso_segs(skb, mss_now);
 		tso_segs = tcp_skb_pcount(skb);
 	}
+
+	/* 返回需要分割的段数 */
 	return tso_segs;
 }
 
@@ -2479,7 +2493,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		}
 	}
 
-	/* 获取最大tso分段 */
+	/* 获取最大的tso分段数量 */
 	max_segs = tcp_tso_segs(sk, mss_now);
 
 	/*不断循环发送队列数据 - sk_write_queue */
@@ -2503,7 +2517,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		/* 初始化tso分段相关 */
 		/* 设置TSO相关信息，包括GSO类型，GSO分段的大小等。这些信息是准备给软件TSO分段使用的。
 			如果网络设备不支持TSO，但又用了TSO功能，则报文在提交给网络设备前，
-			需要进行软件分段，即由代码实现TSO功能。
+			需要进行软件分段，即由代码实现TSO功能。即GSO。
 		*/
 		tso_segs = tcp_init_tso_segs(skb, mss_now);
 		BUG_ON(!tso_segs);

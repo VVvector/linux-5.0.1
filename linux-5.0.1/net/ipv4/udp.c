@@ -1087,7 +1087,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	 * Get and verify the address.
 	 */
 	 /* 2. get the UDP destination address and port */
-	/* 地址通过辅助结构（struct msghdr）传入 */
+	/* 2.1 地址通过辅助结构（struct msghdr）传入 */
 	if (usin) {
 		if (msg->msg_namelen < sizeof(*usin))
 			return -EINVAL;
@@ -1100,7 +1100,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		dport = usin->sin_port;
 		if (dport == 0)
 			return -EINVAL;
-	/* 如果之前 socket 已经建立连接，那 socket 本身就存储了目标地址 */
+	/* 2.2 如果之前 socket 已经建立连接，那 socket 本身就存储了目标地址 */
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
 			return -EDESTADDRREQ;
@@ -1118,7 +1118,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	/* 处理一些辅助信息
 	 * 1. 用户程序可将请求信息组织成struct msghdr类型变量。例如，IP_PKTINFO
-	 * 2. setsockopt 可以在socket 级别设置发送包的IP_TTL和IP_TOS。
+	 * 2. setsockopt可以在socket级别设置发送包的IP_TTL和IP_TOS。
 	 * 而辅助消息允许在每个数据包级别设置 TTL 和 TOS 值。
 	 */
 	/* 4. ancillary messages, via sendmsg */
@@ -1309,7 +1309,7 @@ back_from_confirm:
 
 	/* 10. Slow path for corked UDP sockets with no preexisting corked data */
 	/* 没有被 cork 的数据时的慢路径。
-	 * 如果是使用了UDP corking，但是，之前的数据还没有被cork，则满路径开始：
+	 * 如果是使用了UDP corking，但是，之前的数据还没有被cork，则慢路径开始：
 	 * 1. 对socket加锁。
 	 * 2. 检查应用程序是否有bug，即已经被cork的socket被再次cork的情况检查。
 	 * 3. 设置该UDP flow的一些参数，为corking做准备。

@@ -1354,6 +1354,7 @@ static int ip_setup_cork(struct sock *sk, struct inet_cork *cork,
 	cork->fragsize = ip_sk_use_pmtu(sk) ?
 			 dst_mtu(&rt->dst) : rt->dst.dev->mtu;
 
+	/* 设置udp的gso size，通过cork设置 */
 	cork->gso_size = ipc->gso_size;
 	cork->dst = &rt->dst;
 	cork->length = 0;

@@ -509,7 +509,7 @@ struct skb_shared_info {
 	struct sk_buff	*frag_list;
 	struct skb_shared_hwtstamps hwtstamps;
 
-	/* gso type，例如 SKB_GSO_TCPV4，SKB_GSO_TCPV6，SKB_GSO_UDP，等等 */
+	/* gso type，例如 SKB_GSO_TCPV4，SKB_GSO_TCPV6，SKB_GSO_UDP，SKB_GSO_UDP_L4 等等 */
 	unsigned int	gso_type;
 
 	u32		tskey;

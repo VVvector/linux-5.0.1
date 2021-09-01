@@ -626,6 +626,10 @@ static inline int tcp_bound_to_half_wnd(struct tcp_sock *tp, int pktsize)
 	 * On the other hand, for extremely large MSS devices, handling
 	 * smaller than MSS windows in this way does make sense.
 	 */
+	/*
+	 * max_window为当前已知接收方所拥有的最大窗口值，这里如果参数pktsize超过
+	 * 了接收窗口的一半，则调整其大小最大为接收窗口的一半
+	 */
 	if (tp->max_window > TCP_MSS_DEFAULT)
 		cutoff = (tp->max_window >> 1);
 	else
@@ -957,6 +961,7 @@ static inline int tcp_v4_sdif(struct sk_buff *skb)
 /* Due to TSO, an SKB can be composed of multiple actual
  * packets.  To keep these tracked properly, we use this.
  */
+ /* gso_segs记录了网卡在传输当前skb时应该将其分割成多少个包进行 */
 static inline int tcp_skb_pcount(const struct sk_buff *skb)
 {
 	return TCP_SKB_CB(skb)->tcp_gso_segs;
@@ -973,6 +978,7 @@ static inline void tcp_skb_pcount_add(struct sk_buff *skb, int segs)
 }
 
 /* This is valid iff skb is in write queue and tcp_skb_pcount() > 1. */
+/* gso_size记录了该skb应该按照多大的段被切割，即上次的MSS */
 static inline int tcp_skb_mss(const struct sk_buff *skb)
 {
 	return TCP_SKB_CB(skb)->tcp_gso_size;

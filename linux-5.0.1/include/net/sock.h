@@ -498,7 +498,7 @@ struct sock {
 				sk_protocol  : 8, /* 在某个网络协议族中，该套接字属于哪个协议使用。*/
 				sk_type      : 16; /* 套接字类型，其值为SOCK_XXX形式。eg: SOCK_STREAM */
 #define SK_PROTOCOL_MAX U8_MAX
-	u16			sk_gso_max_segs;
+	u16			sk_gso_max_segs; /* 该sock支持的gso最大分段数 */
 	u8			sk_pacing_shift;
 	unsigned long	        sk_lingertime; /* 关闭套接口前发送剩余数据的时间。参见SO_LINGER选项 */
 	struct proto		*sk_prot_creator; /* 传输层接口 */
@@ -2020,6 +2020,13 @@ bool sk_mc_loop(struct sock *sk);
 
 static inline bool sk_can_gso(const struct sock *sk)
 {
+	/* 实际上检查的就是sk->sk_route_caps是否设定了sk->gso_type能力标记。
+	 * sk_route_caps字段代表的是路由能力；sk_gso_type表示的是L4协议期望底层支持的GSO技术。
+	 * 这两个字段都是在三次握手过程中设定的。
+	 * 客户端在tcp_v4_connect()中完成设定。-- SKB_GSO_TCPV4
+	 * 服务器端在收到客户端传过来的ACK后，即三次握手的最后一步，会新建一个sock并进行初始化
+	 * tcp_v4_syn_recv_sock() -- SKB_GSO_TCPV4
+	 */
 	return net_gso_ok(sk->sk_route_caps, sk->sk_gso_type);
 }
 

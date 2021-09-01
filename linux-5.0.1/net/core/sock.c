@@ -1780,19 +1780,39 @@ void sk_free_unlock_clone(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(sk_free_unlock_clone);
 
+/*
+ * 设备(network interface)和路由是相关的，L4协议会先查路由，所以，设备的能力最终会体现在路由缓存中，
+ * sk_setup_caps()就是根据路由缓存中的设备能力初始化sk_route_caps字段。
+ */
 void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 {
 	u32 max_segs = 1;
 
 	sk_dst_set(sk, dst);
+
+	/* 初始值来源于网络设备中的features字段 */
 	sk->sk_route_caps = dst->dev->features | sk->sk_route_forced_caps;
+
+	/* 如果支持GSO, 那么路由能力中的TSO标记也会设定，因为对于L4协议来讲，
+	 * 延迟分段具体是用软件还是硬件来实现自己并不关心。
+	 */
 	if (sk->sk_route_caps & NETIF_F_GSO)
 		sk->sk_route_caps |= NETIF_F_GSO_SOFTWARE;
+
 	sk->sk_route_caps &= ~sk->sk_route_nocaps;
+
+	/* 对一些特殊常见判断 net dev 是否支持GSO，如TSO, UDP_L4等 */
 	if (sk_can_gso(sk)) {
+		/* 只有使用IPSec时，dst->header_len才不为0，这种情况下不能使用TSO。 */
 		if (dst->header_len && !xfrm_dst_offload_ok(dst)) {
 			sk->sk_route_caps &= ~NETIF_F_GSO_MASK;
 		} else {
+			/*
+			 * 支持GSO时，必须支持SG IO和校验功能，这是因为分段时，需要单独设置每个
+			 * 分段的校验和，这些工作L4是没有办法提前做的。此外，如果不支持SG IO，
+			 * 那么延迟分段将失去意义，因为这时L4必须要保证skb中数据只保存在线性
+			 * 区域，这就不可避免的在发送路径中必须做相应的数据拷贝操作。
+			 */
 			sk->sk_route_caps |= NETIF_F_SG | NETIF_F_HW_CSUM;
 			sk->sk_gso_max_size = dst->dev->gso_max_size;
 			max_segs = max_t(u32, dst->dev->gso_max_segs, 1);

@@ -338,6 +338,9 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 	/* 将目的地址提交到套接字 */
 	/* OK, now commit destination to socket.  */
+	/* 设置GSO类型为TCPV4, 该类型值会体现在每个skb中，底层在分段时，需要
+	 * 根据该类型区分L4协议是哪个，以做不同的处理。
+	 */
 	sk->sk_gso_type = SKB_GSO_TCPV4;
 	sk_setup_caps(sk, &rt->dst);
 	rt = NULL;
@@ -1524,6 +1527,10 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
 	if (!newsk)
 		goto exit_nonewsk;
 
+	/* 同 tcp_v4_connect()中。
+	 * 设置GSO类型为TCPV4, 该类型值会体现在每个skb中，底层在分段时，需要
+	 * 根据该类型区分L4协议是哪个，以做不同的处理。
+	 */
 	newsk->sk_gso_type = SKB_GSO_TCPV4;
 	inet_sk_rx_dst_set(newsk, skb);
 

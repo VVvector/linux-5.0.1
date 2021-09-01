@@ -992,10 +992,17 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
 		return mss_now;
 
 	/* Note : tcp_tso_autosize() will eventually split this later */
+	/* sk->sk_gso_max_size这是从对应的dev->gso_max_size 获取到的。即该sock对应
+	 * 的最大gso size是由device决定。默认是65535。
+	 * 这里表示 65535减去协议层头部（包括选项部分）
+	 */
 	new_size_goal = sk->sk_gso_max_size - 1 - MAX_TCP_HEADER;
+
+	/* 调整 new_size_goal 不能超过对端接收窗口的一半。 */
 	new_size_goal = tcp_bound_to_half_wnd(tp, new_size_goal);
 
 	/* We try hard to avoid divides here */
+	/* 调整返回的skb最大容量为mss的整数倍 */
 	size_goal = tp->gso_segs * mss_now;
 	if (unlikely(new_size_goal < size_goal ||
 		     new_size_goal >= size_goal + mss_now)) {
@@ -1007,11 +1014,17 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
 	return max(size_goal, mss_now);
 }
 
+/* 获取一个skb可以容纳的数据量bytes和获取mss的大小。*/
 static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 {
 	int mss_now;
 
+	/* 获取tcp mss */
 	mss_now = tcp_current_mss(sk);
+
+	/* 计算获取skb能容纳的最大数据量，为MSS的整数倍。
+	 * 后续tcp_sendmsg()在组织skb时，就以size_goal为上界填充数据。
+	 */
 	*size_goal = tcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
 
 	return mss_now;
@@ -1372,7 +1385,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 	copied = 0;
 
 restart:
-	/* 3. 获取当前的MSS, 网络设备支持的最大长度size_goal,
+	/* 3. 获取当前的MSS, 网络设备支持的最大单个skb长度size_goal,
 		如果支持GSO, size_goal会是MSS的整数倍。*/
 	mss_now = tcp_send_mss(sk, &size_goal, flags);
 
