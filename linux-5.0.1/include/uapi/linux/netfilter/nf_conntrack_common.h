@@ -38,6 +38,7 @@ enum ip_conntrack_info {
 #define NF_CT_STATE_BIT(ctinfo)			(1 << ((ctinfo) % IP_CT_IS_REPLY + 1))
 #define NF_CT_STATE_UNTRACKED_BIT		(1 << 6)
 
+/* 连接的状态集合 */
 /* Bitset representing status of connection. */
 enum ip_conntrack_status {
 	/* It's an expected connection: bit 0 set.  This bit never changed */

@@ -17,6 +17,7 @@
 
 struct seq_file;
 
+/* 支持链接跟踪的协议需要实现的方法集，以及其他协议相关字段。 */
 struct nf_conntrack_l4proto {
 	/* L4 Protocol number. */
 	u_int8_t l4proto;
@@ -27,6 +28,7 @@ struct nf_conntrack_l4proto {
 	/* protoinfo nlattr size, closes a hole */
 	u16 nlattr_size;
 
+	/* 从包中提取tuple */
 	/* Try to fill in the third arg: dataoff is offset past network protocol
            hdr.  Return true if possible. */
 	bool (*pkt_to_tuple)(const struct sk_buff *skb, unsigned int dataoff,
@@ -38,6 +40,7 @@ struct nf_conntrack_l4proto {
 	bool (*invert_tuple)(struct nf_conntrack_tuple *inverse,
 			     const struct nf_conntrack_tuple *orig);
 
+	/* 对包进行判决，返回判决结果。 */
 	/* Returns verdict for packet, or -1 for invalid. */
 	int (*packet)(struct nf_conn *ct,
 		      struct sk_buff *skb,

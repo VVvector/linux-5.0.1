@@ -689,7 +689,7 @@ static void skb_entail(struct sock *sk, struct sk_buff *skb)
 
 	skb->csum    = 0;
 
-	/* 该packet的发送 sequence */
+	/* 更新该packet的发送 sequence */
 	tcb->seq     = tcb->end_seq = tp->write_seq;
 
 	/* 设置ack flag */
@@ -703,6 +703,7 @@ static void skb_entail(struct sock *sk, struct sk_buff *skb)
 	/* 更新该socket的 还未发送的data长度 */
 	sk->sk_wmem_queued += skb->truesize;
 	sk_mem_charge(sk, skb->truesize);
+
 	if (tp->nonagle & TCP_NAGLE_PUSH)
 		tp->nonagle &= ~TCP_NAGLE_PUSH;
 
@@ -988,11 +989,15 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 new_size_goal, size_goal;
 
+	/* 这里的larg_allowed表示是否是紧急数据
+	 * 这里表示是紧急数据，就不会做gso，即返回skb大小为mss。
+	 */
 	if (!large_allowed)
 		return mss_now;
 
 	/* Note : tcp_tso_autosize() will eventually split this later */
-	/* sk->sk_gso_max_size这是从对应的dev->gso_max_size 获取到的。即该sock对应
+
+	/* sk->sk_gso_max_size 是从对应的 dev->gso_max_size 获取到的。即该sock对应
 	 * 的最大gso size是由device决定。默认是65535。
 	 * 这里表示 65535减去协议层头部（包括选项部分）
 	 */
@@ -1014,7 +1019,10 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
 	return max(size_goal, mss_now);
 }
 
-/* 获取一个skb可以容纳的数据量bytes和获取mss的大小。*/
+/* gso数据包长度：
+ * 对于紧急数据包或者GSO/TSO都不开启的情况，才不会推迟发送，默认使用当前MSS。
+ * 开启GSO后，用tcp_send_mss()获取一个gso skb的大小(为MSS的整数倍)和MSS分段大小。
+ */
 static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 {
 	int mss_now;
@@ -1280,13 +1288,17 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 }
 
 /* tcp 发送函数
-	1. 要判断该tcp连接的状态。
-	2. 找到该socket的发送队列sk->sk_write_queue，并把用户数据拷贝到发送队列。
-	3. 设置TCP控制块结构，用于构造TCP协议发送发的头信息。
+ *	1. 要判断该tcp连接的状态。
+ *	2. 找到该socket的发送队列sk->sk_write_queue，并把用户数据拷贝到发送队列。
+ *	3. 设置TCP控制块结构，用于构造TCP协议发送发的头信息。
 
-	注：这时不一定会真正开始发送，如果没有达到发送条件的话，很可能
-	    这次调用就直接返回了。
-*/
+ *	注：这时不一定会真正开始发送，如果没有达到发送条件的话，很可能
+ *	    这次调用就直接返回了。
+
+ *	注：
+ *	应用程序send()数据后，会在tcp_sendmsg中尝试在同一个skb，
+ *	保存size_goal大小的数据，然后再通过tcp_push把这些包通过tcp_write_xmit发出去
+ */
 int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -1386,7 +1398,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 
 restart:
 	/* 3. 获取当前的MSS, 网络设备支持的最大单个skb长度size_goal,
-		如果支持GSO, size_goal会是MSS的整数倍。*/
+		如果支持GSO, size_goal会是MSS的整数倍，否则，会等于mss。*/
 	mss_now = tcp_send_mss(sk, &size_goal, flags);
 
 	/* 如果连接有错误，或者不允许发送数据了，则返回-EPIPE */
@@ -1407,7 +1419,9 @@ restart:
 		if (skb)
 			copy = size_goal - skb->len;
 
-		/* 如果skb剩余量小于要发送的用户数据量，则需要重新申请新的skb进行发送。*/
+		/* 如果skb剩余量小于要发送的用户数据量，则需要重新申请新的skb进行发送。
+		 * 也隐含着 数据不能合并到之前的skb做gso了。
+		 */
 		if (copy <= 0 || !tcp_skb_can_collapse_to(skb)) {
 			bool first_skb;
 			int linear;
@@ -1418,6 +1432,9 @@ new_segment:
 			if (!sk_stream_memory_free(sk))
 				goto wait_for_sndbuf;
 
+			/* 这里也会同时处理flush在memory不足而等待的这段时间里，RX方向的收包。
+			 * 将backlog的数据包flush给user。即调用 tcp_v4_do_rcv()
+			 */
 			if (process_backlog && sk_flush_backlog(sk)) {
 				process_backlog = false;
 				goto restart;
@@ -1425,7 +1442,7 @@ new_segment:
 
 			/* 申请一个skb，其线性数据区的大小为：
 				通过select_size()得到线性数区中TCP负荷的大小 + 最大的协议头长度。
-				如果申请失败，就进入等待。*/			
+				如果申请失败，就进入等待。*/
 			first_skb = tcp_rtx_and_write_queues_empty(sk);
 			linear = select_size(first_skb, zc);
 			skb = sk_stream_alloc_skb(sk, linear, sk->sk_allocation,
@@ -1437,15 +1454,19 @@ new_segment:
 
 			/* 这里tcp checksum初始化为CHECKSUM_PARTIAL。
 				1. 在tcp层，就只算伪头部 checksum。
-				2. 后面的数据，放到 /net/core/dev.c中的 xmit_one()中最后确定计算。
+				2. 后面的数据，放到 /net/core/dev.c中的 xmit_one()中做最后确定是否计算。
 				如果网卡支持校验和计算，那么由硬件计算报头和首部的校验和。
 			*/
 			skb->ip_summed = CHECKSUM_PARTIAL;
 
 			/* 更新skb的TCP控制块字段，并把skb加入到sock发送队列的尾部。
-			 * 增加发送队列的大小，减少预分配缓存的大小。
+			 * 增加发送队列 sk_write_queue 的大小，减少预分配缓存的大小。
+			 * 注：
+			 * 如果该tcp sock有TCP_NAGLE_PUSH, 这里会去掉该flag。因为已经进行了聚包GSO。
 			 */
 			skb_entail(sk, skb);
+
+			/* 这里将每次copy的大小设置为size_goal，即GSO支持的大小 */
 			copy = size_goal;
 
 			/* 如果使用了TCP_REPAIR选项，即不为skb设置“发送时间” */
@@ -1468,7 +1489,7 @@ new_segment:
 			/* We have some space in skb head. Superb! */
 			copy = min_t(int, copy, skb_availroom(skb));
 
-			/* 拷贝用户空间的数据到内核空间，同时计算校验和 */
+			/* 拷贝用户空间的数据到skb的线性区，同时计算校验和 */
 			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
 			if (err)
 				goto do_fault;
@@ -1544,6 +1565,8 @@ new_segment:
 
 		/* 更新该skb的结束序号 */
 		TCP_SKB_CB(skb)->end_seq += copy;
+
+		/* 清零tso分段数，让tcp_write_xmit()计算 */
 		tcp_skb_pcount_set(skb, 0);
 
 		/* 已经拷贝到发送队列的数据量 */
@@ -1556,13 +1579,15 @@ new_segment:
 			goto out;
 		}
 
-		/* 如果用户数据没有被拷贝到skb完成，且skb还可用继续填充，或者发送的是带外数据，
+		/* 如果用户数据没有被copy到skb，即skb还可用继续填充，或者发送的是带外数据，
 		 *或者使用了TCP_REPAIR选项，就继续拷贝数据，先不发送。*/
 		if (skb->len < size_goal || (flags & MSG_OOB) || unlikely(tp->repair))
 			continue;
 
 		/* 如果本skb的数据量已经大于了size_goal，就要开始发送数据。 */
-		/* 判断是否需要立即发送，如果待发送的数据量大于对方接收窗口的一半了，就马上发送。*/
+		/* 判断是否需要立即发送：
+		 *	如果待发送的数据量大于对方接收窗口的一半了，就马上发送。
+		 */
 		if (forced_push(tp)) {
 			tcp_mark_push(tp, skb);
 			
@@ -1572,6 +1597,7 @@ new_segment:
 		/*如果sk->sk_write_queue中只有一个skb，就发送一个skb */
 		} else if (skb == tcp_send_head(sk))
 			tcp_push_one(sk, mss_now);
+
 		continue;
 
 		/* 如果队列中还没有足够的缓冲区或者页面，则等到有一定数据量的有效缓冲区后再发送。 */

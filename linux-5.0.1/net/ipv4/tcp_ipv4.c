@@ -2802,6 +2802,8 @@ struct proto tcp_prot = {
 	/*TCP数据发送 */
 	.sendmsg		= tcp_sendmsg,
 	.sendpage		= tcp_sendpage,
+
+	/* tcp的backlog处理函数 */
 	.backlog_rcv		= tcp_v4_do_rcv,
 	.release_cb		= tcp_release_cb,
 

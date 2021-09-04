@@ -649,6 +649,7 @@ static unsigned int nf_nat_manip_pkt(struct sk_buff *skb, struct nf_conn *ct,
 	return NF_ACCEPT;
 }
 
+/* 执行NAT */
 /* Do packet manipulations according to nf_nat_setup_info. */
 unsigned int nf_nat_packet(struct nf_conn *ct,
 			   enum ip_conntrack_info ctinfo,
@@ -677,6 +678,15 @@ unsigned int nf_nat_packet(struct nf_conn *ct,
 }
 EXPORT_SYMBOL_GPL(nf_nat_packet);
 
+/* NAT 的核心函数，在除 NF_INET_FORWARD 之外的其他 hook 点都会被调用。
+* 在这些 hook 点的优先级：Conntrack > NAT > Packet Filtering。
+* 连接跟踪的优先级高于 NAT 是因为 NAT 依赖连接跟踪的结果。
+*
+* 首先查询 conntrack 记录，如果不存在，就意味着无法跟踪这个连接，那就更不可能做 NAT 了，因此直接返回。
+* 如果找到了 conntrack 记录，并且是 IP_CT_RELATED、IP_CT_RELATED_REPLY 或 IP_CT_NEW 状态，
+* 就去获取 NAT 规则。如果没有规则，直接返回 NF_ACCEPT，对包不 做任何改动；如果有规则，
+* 最后执行 nf_nat_packet，这个函数会进一步调用 manip_pkt 完成对包的修改，如果失败，包将被丢弃。
+*/
 unsigned int
 nf_nat_inet_fn(void *priv, struct sk_buff *skb,
 	       const struct nf_hook_state *state)
@@ -687,6 +697,7 @@ nf_nat_inet_fn(void *priv, struct sk_buff *skb,
 	/* maniptype == SRC for postrouting. */
 	enum nf_nat_manip_type maniptype = HOOK2MANIP(state->hook);
 
+	/* conntrack 不存在就做不了 NAT，直接返回，这也是我们为什么说 NAT 依赖 conntrack 的结果 */
 	ct = nf_ct_get(skb, &ctinfo);
 	/* Can't track?  It's not due to stress, or conntrack would
 	 * have dropped it.  Hence it's the user's responsibilty to
@@ -708,6 +719,8 @@ nf_nat_inet_fn(void *priv, struct sk_buff *skb,
 		 */
 		if (!nf_nat_initialized(ct, maniptype)) {
 			struct nf_nat_lookup_hook_priv *lpriv = priv;
+
+			/* 获取所有 NAT 规则 */
 			struct nf_hook_entries *e = rcu_dereference(lpriv->entries);
 			unsigned int ret;
 			int i;
@@ -715,9 +728,11 @@ nf_nat_inet_fn(void *priv, struct sk_buff *skb,
 			if (!e)
 				goto null_bind;
 
+			/* 依次执行 NAT 规则 */
 			for (i = 0; i < e->num_hook_entries; i++) {
 				ret = e->hooks[i].hook(e->hooks[i].priv, skb,
 						       state);
+				/* 任何规则返回非 NF_ACCEPT，就停止当前处理 */
 				if (ret != NF_ACCEPT)
 					return ret;
 				if (nf_nat_initialized(ct, maniptype))

@@ -1671,7 +1671,7 @@ EXPORT_SYMBOL(tcp_sync_mss);
 /* Compute the current effective MSS, taking SACKs and IP options,
  * and even PMTU discovery events into account.
  */
- /* 利用SACK, IP options， PMTU等来获取当前有效的MSS。 */
+ /* 利用SACKs, IP options， PMTU来获取当前有效的MSS。 */
 unsigned int tcp_current_mss(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -2505,7 +2505,9 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			skb->skb_mstamp_ns = tp->tcp_wstamp_ns = tp->tcp_clock_cache;
 			list_move_tail(&skb->tcp_tsorted_anchor, &tp->tsorted_sent_queue);
 
-			/* 用MSS初始化skb中的gso字段，返回本skb将会被分割成几个TSO段传输 */
+			/* 计算本skb将会被分割成几个TSO段传输(skb->len/mss)
+			 * 重新设置tcp_gso_segs
+			 */
 			tcp_init_tso_segs(skb, mss_now);
 			goto repair; /* Skip network transmission */
 		}
@@ -2545,28 +2547,36 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			break;
 		}
 
-		/* 如果不需要tso分段，则坚持是否启用nagle算法。 */
+		/* 表示没有tso分段，则检查是否启用nagle算法。 */
 		if (tso_segs == 1) {
-			//检查nagle算法是否允许发送数据段
+			/* 根据nagle算法，检查是否允许发送数据段 */
 			if (unlikely(!tcp_nagle_test(tp, skb, mss_now,
 						     (tcp_skb_is_last(sk, skb) ?
 						      nonagle : TCP_NAGLE_PUSH))))
 				break;
 		} else { 
-			/* 如果需要tso分段, 则检查是否需要延迟发送。 */
-			//检查是否可以延时发送，有很多条件判断。详细见函数。
-			//目的是为了减少软GSO分段的次数，以提高性能。
+			/* 表示有tso分段, 则检查是否需要延迟发送。
+			 * 检查是否可以延时发送，有很多条件判断。详细见函数。
+			 *目的是为了减少软GSO分段的次数，以提高实时性。
+			 */
 			if (!push_one &&
 			    tcp_tso_should_defer(sk, skb, &is_cwnd_limited,
 						 &is_rwnd_limited, max_segs))
 				break;
 		}
 
+		/* 下面的逻辑是： 不用推迟发送，马上发送的情况 */
 		/* limit为再次分段的段长，初始化为当前MSS。 */
 		limit = mss_now;
 
 		/* 需要分段&&非紧急模式，重新确定分段长度限制。通过mss_now计算limit的值。
         	 * 以发送窗口和拥塞窗口的最小值作为分段段长。
+        	 * 注：
+        	 *  其中 tcp_init_tso_segs(0 会设置skb的gso信息后文分析。我们看到tcp_write_xmit
+        	 * 会调用tso_fragment()进行“tcp分段”。而分段的条件是skb->len > limit。
+        	 * 这里的关键就是limit的值，我们看到在tso_segs > 1时，也就是开启gso的时候，
+        	 * limit的值是由tcp_mss_split_point() 得到的，也就是min(skb->len, window)，
+        	 * 即发送窗口允许的最大值。在没有开启gso时limit就是当前的mss。
         	 */
 		if (tso_segs > 1 && !tcp_urg_mode(tp))
 			limit = tcp_mss_split_point(sk, skb, mss_now,
@@ -2575,10 +2585,12 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 							  max_segs),
 						    nonagle);
 
-		/* 如果SKB中的数据长度大于分段段长，则调用tso_fragment()根据该段长进行分段，如果分段失败，则暂不发送。
+		/* 如果SKB中的数据长度大于分段段长，则调用tso_fragment()根据该段长进行分段，
+		 * 如果分段失败，则暂不发送。
+		 *
 		 * 前面处理中： 根据条件，可能需要对SKB中的报文进行分段处理，分段的报文包括两种：
 		 * 1. 普通的用MSS分段的报文
-		 * 2. 是TSO分段的报文。
+		 * 2. TSO分段的报文。
 
 		 * 能否发送报文主要取决于两个条件：
 	         * 1. 1是报文需完全在发送窗口中，2是拥塞窗口未满。第一种报文，应该不会再分段了，
@@ -2599,7 +2611,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		if (tcp_small_queue_check(sk, skb, 0))
 			break;
 
-		/* 继续发送数据到network layer中去，实际是调用 ip_queue_xmit() */
+		/* 继续发送数据到network layer中去，实际是调用 ip_queue_xmit()。*/
 		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
 			break;
 

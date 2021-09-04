@@ -7,12 +7,13 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 
+/* hook 函数对包进行判断或处理之后，需要返回一个判断结果，指导接下来要对这个包做什么。 */
 /* Responses from hook functions. */
-#define NF_DROP 0
-#define NF_ACCEPT 1
-#define NF_STOLEN 2
-#define NF_QUEUE 3
-#define NF_REPEAT 4
+#define NF_DROP 0 	/* 已丢弃这个包 */
+#define NF_ACCEPT 1	/* 接收这个包，结束判断，继续下一步处理 */
+#define NF_STOLEN 2	/* 临时hold这个包，不用再继续穿越协议栈了。例如：IP分片的缓存(等待重组) */
+#define NF_QUEUE 3	/* 应当将包放到队列 */
+#define NF_REPEAT 4	/* 当前处理函数应当被再次调用 */
 #define NF_STOP 5	/* Deprecated, for userspace nf_queue compatibility. */
 #define NF_MAX_VERDICT NF_STOP
 

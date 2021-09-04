@@ -185,6 +185,7 @@ EXPORT_SYMBOL_GPL(nf_conntrack_max);
 seqcount_t nf_conntrack_generation __read_mostly;
 static unsigned int nf_conntrack_hash_rnd __read_mostly;
 
+/* 根据tuple计算出一个32bit的哈希值 */
 static u32 hash_conntrack_raw(const struct nf_conntrack_tuple *tuple,
 			      const struct net *net)
 {
@@ -661,6 +662,13 @@ static void nf_ct_gc_expired(struct nf_conn *ct)
  * - Caller must take a reference on returned object
  *   and recheck nf_ct_tuple_equal(tuple, &h->tuple)
  */
+/*
+ * 在遍历桶中连接时，在匹配前调用nf_ct_is_expired判断连接是否过期，
+ * 如果过期则调用nf_ct_gc_expired淘汰该连接。这样就保证了大部分过期连接可以得到及时淘汰。
+ * 如果在最坏的情况下，某个桶始终不会被遍历时，那个桶中的连接如何淘汰呢？
+ * 为应对这种情况，内核还有一个补救措施 —— 定义了一个deferable work，gc_worker。
+ * 其周期性（1s）执行，按顺序遍历全局连接表，淘汰过期连接。
+ */
 static struct nf_conntrack_tuple_hash *
 ____nf_conntrack_find(struct net *net, const struct nf_conntrack_zone *zone,
 		      const struct nf_conntrack_tuple *tuple, u32 hash)
@@ -857,6 +865,15 @@ static int nf_ct_resolve_clash(struct net *net, struct sk_buff *skb,
 	return NF_DROP;
 }
 
+/* 确认前面通过 nf_conntrack_in() 创建的新连接（是否被丢弃）。
+ * 如果这个包之后没有被丢弃，那它在经过 POST_ROUTING 时会被 nf_conntrack_confirm() 方法处理。
+ * nf_conntrack_confirm() 完成之后，状态就变为了 IPS_CONFIRMED，并且连接记录从 未确认列表移到正常的列表。
+ *
+ * 之所以把创建一个新 entry 的过程分为创建（new）和确认（confirm）两个阶段 ，
+ * 是因为包在经过 nf_conntrack_in() 之后，到达 nf_conntrack_confirm() 之前 ，
+ * 可能会被内核丢弃。这样会导致系统残留大量的半连接状态记录，在性能和安全性上都 是很大问题。
+ * 分为两步之后，可以加快半连接状态 conntrack entry 的 GC。
+ */
 /* Confirm a connection given skb; places it in hash table */
 int
 __nf_conntrack_confirm(struct sk_buff *skb)
@@ -884,6 +901,11 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 		return NF_ACCEPT;
 
 	zone = nf_ct_zone(ct);
+
+	/* 注：
+	 * 连接跟踪的处理逻辑中需要频繁关闭和打开软中断，此外还有各种锁，
+	 * 这是短连高并发场景下连接跟踪性能损耗的主要原因。
+	 */
 	local_bh_disable();
 
 	do {
@@ -934,9 +956,9 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	/* Timer relative to confirmation time, not original
 	   setting time, otherwise we'd get timer wrap in
 	   weird delay cases. */
-	ct->timeout += nfct_time_stamp;
+	ct->timeout += nfct_time_stamp; // 更新连接超时时间，超时后会被 GC
 	atomic_inc(&ct->ct_general.use);
-	ct->status |= IPS_CONFIRMED;
+	ct->status |= IPS_CONFIRMED; // 设置连接状态为 confirmed
 
 	/* set conntrack timestamp, if enabled. */
 	tstamp = nf_conn_tstamp_find(ct);
@@ -951,7 +973,7 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	 * guarantee that no other CPU can find the conntrack before the above
 	 * stores are visible.
 	 */
-	__nf_conntrack_hash_insert(ct, hash, reply_hash);
+	__nf_conntrack_hash_insert(ct, hash, reply_hash); // 插入到连接跟踪哈希表
 	nf_conntrack_double_unlock(hash, reply_hash);
 	local_bh_enable();
 
@@ -1376,6 +1398,10 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 		return NULL;
 	}
 
+	/*
+	 * 从 conntrack table 中分配一个 entry，如果哈希表满了，会在内核日志中打印
+	 * "nf_conntrack: table full, dropping packet" 信息，通过 `dmesg -T` 能看到
+	 */
 	zone = nf_ct_zone_tmpl(tmpl, skb, &tmp);
 	ct = __nf_conntrack_alloc(net, zone, tuple, &repl_tuple, GFP_ATOMIC,
 				  hash);
@@ -1432,6 +1458,9 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 	if (!exp)
 		__nf_ct_try_assign_helper(ct, tmpl, GFP_ATOMIC);
 
+	/* 这里是将tuple放入unconfirmed list中，但是，最后会在ipv4_confirm()经过层层还是会最终调用到
+	 * __nf_conntrack_confirm()，其负责将conntrack插入到全局表中
+	 */
 	/* Now it is inserted into the unconfirmed list, bump refcount */
 	nf_conntrack_get(&ct->ct_general);
 	nf_ct_add_to_unconfirmed_list(ct);
@@ -1464,6 +1493,7 @@ resolve_normal_ct(struct nf_conn *tmpl,
 	struct nf_conn *ct;
 	u32 hash;
 
+	/* 根据报文skb生成这个方向的tuple */
 	if (!nf_ct_get_tuple(skb, skb_network_offset(skb),
 			     dataoff, state->pf, protonum, state->net,
 			     &tuple, l4proto)) {
@@ -1471,11 +1501,13 @@ resolve_normal_ct(struct nf_conn *tmpl,
 		return 0;
 	}
 
+	/* 通过tuple进行连接的查找，如果没有找到，就用init_conntrack()生成新的连接。 */
 	/* look for tuple match */
 	zone = nf_ct_zone_tmpl(tmpl, skb, &tmp);
 	hash = hash_conntrack_raw(&tuple, state->net);
 	h = __nf_conntrack_find_get(state->net, zone, &tuple, hash);
 	if (!h) {
+		/* 创建一个新的连接记录(conntrack entry)，然后初始化。 */
 		h = init_conntrack(state->net, tmpl, &tuple, l4proto,
 				   skb, dataoff, hash);
 		if (!h)
@@ -1538,6 +1570,9 @@ nf_conntrack_handle_icmp(struct nf_conn *tmpl,
 	return ret;
 }
 
+/* CT连接匹配的入口函数，其会被 netfilter 处理bridge(etables), ipv4和ipv6的hook函数调用。 
+ * 是连接跟踪模块的核心，包进入连接跟踪的地方。
+ */
 unsigned int
 nf_conntrack_in(struct sk_buff *skb, const struct nf_hook_state *state)
 {
@@ -1547,17 +1582,20 @@ nf_conntrack_in(struct sk_buff *skb, const struct nf_hook_state *state)
 	u_int8_t protonum;
 	int dataoff, ret;
 
+	/* 获取skb对应的conntrack_info和连接记录 */
 	tmpl = nf_ct_get(skb, &ctinfo);
-	if (tmpl || ctinfo == IP_CT_UNTRACKED) {
+	if (tmpl || ctinfo == IP_CT_UNTRACKED) { //如果记录存在或者是不需要跟踪的类型
 		/* Previously seen (loopback or untracked)?  Ignore. */
 		if ((tmpl && !nf_ct_is_template(tmpl)) ||
 		     ctinfo == IP_CT_UNTRACKED) {
-			NF_CT_STAT_INC_ATOMIC(state->net, ignore);
-			return NF_ACCEPT;
+			/* 无需跟踪的类型，增加 ignore 计数, conntrack -S 能看到这个计数 */
+			NF_CT_STAT_INC_ATOMIC(state->net, ignore); 
+			return NF_ACCEPT; // 返回 NF_ACCEPT，继续后面的处理
 		}
-		skb->_nfct = 0;
+		skb->_nfct = 0; // 不属于 ignore 类型，计数器置零，准备后续处理
 	}
 
+	/* 根据三层协议获取四层协议号和数据偏移。 */
 	/* rcu_read_lock()ed by nf_hook_thresh */
 	dataoff = get_l4proto(skb, skb_network_offset(skb), state->pf, &protonum);
 	if (dataoff <= 0) {
@@ -1568,6 +1606,7 @@ nf_conntrack_in(struct sk_buff *skb, const struct nf_hook_state *state)
 		goto out;
 	}
 
+	/* 根据四层协议拿到对应的CT 处理ops。 */
 	l4proto = __nf_ct_l4proto_find(protonum);
 
 	if (protonum == IPPROTO_ICMP || protonum == IPPROTO_ICMPV6) {
@@ -1581,6 +1620,8 @@ nf_conntrack_in(struct sk_buff *skb, const struct nf_hook_state *state)
 		if (skb->_nfct)
 			goto out;
 	}
+
+	/* 开始连接跟踪： 提取tuple，创建新连接记录，或者更新已有连接的状态 */
 repeat:
 	ret = resolve_normal_ct(tmpl, skb, dataoff,
 				protonum, l4proto, state);
@@ -1599,6 +1640,9 @@ repeat:
 		goto out;
 	}
 
+	/* 调用nf_conntrack_handle_packet根据不同协议处理报文，更新连接状态。
+	 * 例如：TCP报文就会调用 nf_conntrack_tcp_packet()进行处理，更新timeout等。
+	 */
 	ret = l4proto->packet(ct, skb, dataoff, ctinfo, state);
 	if (ret <= 0) {
 		/* Invalid: inverse of the return code tells
@@ -1624,7 +1668,7 @@ repeat:
 		nf_conntrack_event_cache(IPCT_REPLY, ct);
 out:
 	if (tmpl)
-		nf_ct_put(tmpl);
+		nf_ct_put(tmpl); // 解除对连接记录 tmpl 的引用
 
 	return ret;
 }

@@ -1078,6 +1078,10 @@ static int tcp_packet(struct nf_conn *ct,
 		 (th->fin ? 1 : 0), (th->rst ? 1 : 0),
 		 old_state, new_state);
 
+	/*
+	 * 这里根据不同的TCP状态确定不同的timeout值，然后调用 nf_ct_refresh_acct() 设置到conntrack上。
+	 * 然后，在连接查找匹配时，即____nf_conntrack_find函数中。
+	 */
 	ct->proto.tcp.state = new_state;
 	if (old_state != new_state
 	    && new_state == TCP_CONNTRACK_FIN_WAIT)

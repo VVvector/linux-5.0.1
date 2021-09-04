@@ -1790,11 +1790,16 @@ void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 
 	sk_dst_set(sk, dst);
 
-	/* 初始值来源于网络设备中的features字段 */
+	/* 初始值来源于网络设备中的features字段
+	 * 注：
+	 * 如果设备开启了GSO，sock都会将TSO标志打开，但是，注意这和硬件是否开启TSO无关，
+	 * 硬件的TSO取决于硬件自身特性的支持。
+	 */
 	sk->sk_route_caps = dst->dev->features | sk->sk_route_forced_caps;
 
 	/* 如果支持GSO, 那么路由能力中的TSO标记也会设定，因为对于L4协议来讲，
 	 * 延迟分段具体是用软件还是硬件来实现自己并不关心。
+	 * GSO是默认开启的。
 	 */
 	if (sk->sk_route_caps & NETIF_F_GSO)
 		sk->sk_route_caps |= NETIF_F_GSO_SOFTWARE;

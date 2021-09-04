@@ -28,15 +28,25 @@
 /* The manipulable part of the tuple. */
 struct nf_conntrack_man {
 	union nf_inet_addr u3;
+	/* 协议相关 */
 	union nf_conntrack_man_proto u;
 	/* Layer 3 protocol */
 	u_int16_t l3num;
 };
 
 /* This contains the information to distinguish a connection. */
+/* 定义一个 tuple, 一个tuple定义一个单项flow (unidirectional) 
+ * 为方便 NAT 的实现，内核将 tuple 结构体拆分为 "manipulatable" 和 "non-manipulatable" 两部分。
+ * Tuple 结构体中只有两个字段 src 和 dst，分别保存源和目的信息。src 和 dst 自身也是结构体，能保存不同类型协议的数据。
+ *
+ * 从定义可以看出，连接跟踪模块目前只支持以下六种协议：TCP、UDP、ICMP、DCCP、SCTP、GRE。
+ * 注： ICMP 使用了其头信息中的 ICMP type和 code 字段来 定义 tuple。
+ */
 struct nf_conntrack_tuple {
+	/* 源地址信息 */
 	struct nf_conntrack_man src;
 
+	/* 目的地址信息 */
 	/* These are the parts of the tuple which are fixed. */
 	struct {
 		union nf_inet_addr u3;
@@ -115,9 +125,17 @@ static inline void nf_ct_dump_tuple(const struct nf_conntrack_tuple *t)
 #define NF_CT_DIRECTION(h)						\
 	((enum ip_conntrack_dir)(h)->tuple.dst.dir)
 
+/* 哈希表(conntrack table)中的表项(entry)。
+ * conntrack将活动连接的状态存储在一张哈希表中。
+ * 用hash_conntrack_raw()根据tuple计算出一个32位的哈希值。
+ * 每条连接在哈希表中都对应两项，分别对应两个方向（egress/ingress）
+ */
 /* Connections have two entries in the hash table: one for each way */
 struct nf_conntrack_tuple_hash {
+	/* 指向该哈希对应的连接 struct nf_conn，采用 list 形式是为了解决哈希冲突 */
 	struct hlist_nulls_node hnnode;
+
+	/* N 元组 */
 	struct nf_conntrack_tuple tuple;
 };
 

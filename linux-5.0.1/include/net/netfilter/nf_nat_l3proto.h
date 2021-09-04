@@ -2,6 +2,7 @@
 #ifndef _NF_NAT_L3PROTO_H
 #define _NF_NAT_L3PROTO_H
 
+/* 支持NAT的协议需要实现该结构和方法 */
 struct nf_nat_l3proto {
 	u8	l3proto;
 

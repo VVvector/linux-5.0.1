@@ -447,15 +447,28 @@ static unsigned int ipv4_conntrack_local(void *priv,
 /* Connection tracking may drop packets, but never alters them, so
  * make it the first hook.
  */
+/*
+ * PRE_ROUTING 和 LOCAL_OUT：调用 nf_conntrack_in() 开始连接跟踪，
+ * 正常情况下会创建一条新连接记录，然后将 conntrack entry 放到 unconfirmed list。
+ * 为什么是这两个 hook 点呢？因为它们都是新连接的第一个包最先达到的地方，
+ * PRE_ROUTING 是外部主动和本机建连时包最先到达的地方
+ * LOCAL_OUT 是本机主动和外部建连时包最先到达的地方
+ * POST_ROUTING 和 LOCAL_IN：调用 nf_conntrack_confirm() 将 nf_conntrack_in() 创建的连接移到 confirmed list。
+
+ * 同样要问，为什么在这两个 hook 点呢？因为如果新连接的第一个包没有被丢弃，
+ * 那这 是它们离开 netfilter 之前的最后 hook 点：
+ * 外部主动和本机建连的包，如果在中间处理中没有被丢弃，LOCAL_IN 是其被送到应用（例如 nginx 服务）之前的最后 hook 点
+ * 本机主动和外部建连的包，如果在中间处理中没有被丢弃，POST_ROUTING 是其离开主机时的最后 hook 点
+ */
 static const struct nf_hook_ops ipv4_conntrack_ops[] = {
 	{
-		.hook		= ipv4_conntrack_in,
+		.hook		= ipv4_conntrack_in, // 调用 nf_conntrack_in() 进入连接跟踪
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_PRE_ROUTING,
 		.priority	= NF_IP_PRI_CONNTRACK,
 	},
 	{
-		.hook		= ipv4_conntrack_local,
+		.hook		= ipv4_conntrack_local, // 调用 nf_conntrack_in() 进入连接跟踪
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_OUT,
 		.priority	= NF_IP_PRI_CONNTRACK,
@@ -467,7 +480,7 @@ static const struct nf_hook_ops ipv4_conntrack_ops[] = {
 		.priority	= NF_IP_PRI_CONNTRACK_HELPER,
 	},
 	{
-		.hook		= ipv4_confirm,
+		.hook		= ipv4_confirm, // 调用 nf_conntrack_confirm()
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,
@@ -479,7 +492,7 @@ static const struct nf_hook_ops ipv4_conntrack_ops[] = {
 		.priority	= NF_IP_PRI_CONNTRACK_HELPER,
 	},
 	{
-		.hook		= ipv4_confirm,
+		.hook		= ipv4_confirm, // 调用 nf_conntrack_confirm()
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,

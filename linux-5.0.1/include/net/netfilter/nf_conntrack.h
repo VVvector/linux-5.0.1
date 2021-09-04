@@ -57,6 +57,9 @@ struct nf_conntrack_net {
 #include <net/netfilter/ipv4/nf_conntrack_ipv4.h>
 #include <net/netfilter/ipv6/nf_conntrack_ipv6.h>
 
+/* 定义一个flow 
+ * Netfilter 中每个 flow 都称为一个 connection，即使是对那些非面向连接的协议（例 如 UDP）
+ */
 struct nf_conn {
 	/* Usage count in here is 1 for hash table, 1 per skb,
 	 * plus 1 for any connection(s) we are `master' for
@@ -74,15 +77,17 @@ struct nf_conn {
 #ifdef CONFIG_NF_CONNTRACK_ZONES
 	struct nf_conntrack_zone zone;
 #endif
+
+	/* 哈希表项，数组是因为要记录两个方向的flow。 */
 	/* XXX should I move this to the tail ? - Y.K */
 	/* These are my tuples; original and reply */
 	struct nf_conntrack_tuple_hash tuplehash[IP_CT_DIR_MAX];
 
 	/* Have we seen traffic both ways yet? (bitset) */
-	unsigned long status;
+	unsigned long status; //连接状态
 
 	/* jiffies32 when this ct is considered dead */
-	u32 timeout;
+	u32 timeout; //连接状态定时器
 
 	possible_net_t ct_net;
 
@@ -96,13 +101,14 @@ struct nf_conn {
 	struct nf_conn *master;
 
 #if defined(CONFIG_NF_CONNTRACK_MARK)
-	u_int32_t mark;
+	u_int32_t mark; //对skb进行特殊标记
 #endif
 
 #ifdef CONFIG_NF_CONNTRACK_SECMARK
 	u_int32_t secmark;
 #endif
 
+	/* 用于做扩展业务，动态申请nf_ct_ext, 并追加到conntrack的扩展结构中。 */
 	/* Extensions */
 	struct nf_ct_ext *ext;
 

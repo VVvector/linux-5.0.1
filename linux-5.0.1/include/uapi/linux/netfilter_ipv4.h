@@ -13,6 +13,14 @@
 
 #include <limits.h> /* for INT_MIN, INT_MAX */
 
+/* Netfilter 在内核协议栈的包处理路径上提供了5 个 hook 点。
+ * 用户可以在这些hook点注册自己的处理函数(handlers)。当有数据包经过hook点时，
+ * 就会调用相应的handlers。 与NF_INET_定义相同。
+
+ * hook 优先级：
+ *	每个 hook 点可以注册多个处理函数（handler）。在注册时必须指定这些 handlers 的优先级，
+ *	这样触发 hook 时能够根据优先级依次调用处理函数。
+ */
 /* IP Hooks */
 /* After promisc drops, checksum checks. */
 #define NF_IP_PRE_ROUTING	0

@@ -2018,15 +2018,17 @@ static inline void sock_confirm_neigh(struct sk_buff *skb, struct neighbour *n)
 
 bool sk_mc_loop(struct sock *sk);
 
+/* 实际上检查的就是sk->sk_route_caps是否设定了sk->gso_type能力标记。
+ * sk_route_caps字段代表的是路由能力；sk_gso_type表示的是L4协议期望底层支持的GSO技术。
+ * 这两个字段都是在三次握手过程中设定的。
+ * 客户端在tcp_v4_connect()中完成设定。-- SKB_GSO_TCPV4
+ * 服务器端在收到客户端传过来的ACK后，即三次握手的最后一步，会新建一个sock并进行初始化
+ * tcp_v4_syn_recv_sock() -- SKB_GSO_TCPV4
+ * 注：
+ *  由于对于tcp 在sk_setup_caps()中sk->sk_route_caps也被设置有SKB_GSO_TCPV4，所以整个sk_can_gso成立。
+ */
 static inline bool sk_can_gso(const struct sock *sk)
 {
-	/* 实际上检查的就是sk->sk_route_caps是否设定了sk->gso_type能力标记。
-	 * sk_route_caps字段代表的是路由能力；sk_gso_type表示的是L4协议期望底层支持的GSO技术。
-	 * 这两个字段都是在三次握手过程中设定的。
-	 * 客户端在tcp_v4_connect()中完成设定。-- SKB_GSO_TCPV4
-	 * 服务器端在收到客户端传过来的ACK后，即三次握手的最后一步，会新建一个sock并进行初始化
-	 * tcp_v4_syn_recv_sock() -- SKB_GSO_TCPV4
-	 */
 	return net_gso_ok(sk->sk_route_caps, sk->sk_gso_type);
 }
 
