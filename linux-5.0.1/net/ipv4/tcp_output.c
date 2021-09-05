@@ -148,16 +148,25 @@ static __u16 tcp_advertise_mss(struct sock *sk)
 void tcp_cwnd_restart(struct sock *sk, s32 delta)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+
+	/* 首先赋值为tcp_init_cwnd函数的计算值，其一般情况下等于初始窗口值TCP_INIT_CWND（10），
+	 * 但是，如果在路由项中缓存了初始窗口值，等于缓存值。 */
 	u32 restart_cwnd = tcp_init_cwnd(tp, __sk_dst_get(sk));
 	u32 cwnd = tp->snd_cwnd;
 
 	tcp_ca_event(sk, CA_EVENT_CWND_RESTART);
 
+	/* 慢启动阈值ssthresh等于其当前值与拥塞窗口*3/4两者之间的最大值。 */
 	tp->snd_ssthresh = tcp_current_ssthresh(sk);
+
+	/* 重启动窗口值选择其与当前窗口值两者之间的较小值 */
 	restart_cwnd = min(restart_cwnd, cwnd);
 
+	/* 如果当前拥塞窗口大于重启动窗口，空闲时长每经过RTO时段，将当前拥塞窗口减半。 */
 	while ((delta -= inet_csk(sk)->icsk_rto) > 0 && cwnd > restart_cwnd)
 		cwnd >>= 1;
+
+	/* 拥塞窗口等于拥塞窗口与重启动窗口之间的最大值。 */
 	tp->snd_cwnd = max(cwnd, restart_cwnd);
 	tp->snd_cwnd_stamp = tcp_jiffies32;
 	tp->snd_cwnd_used = 0;
@@ -1105,10 +1114,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	skb->skb_mstamp_ns = tp->tcp_wstamp_ns;
 
 	/* 开始构建TCP的头部：
-		查看数据包是否是一个SYN包（TCPCB_FLAG_SYN），如果是，就调用tcp_syn_options构建SYN数据段的选项数据，
-		包括时间戳、窗口大小、选择回答(SACK）, 否则调用tcp_establishe_options构架常规TCP选项，
-		并返回TCP选项长度。注意：这里仅仅是计算出来具体的选项及其大小，并没有形成最终tcp包
-		中选项的格式。
+	 * 查看数据包是否是一个SYN包（TCPCB_FLAG_SYN），如果是，就调用tcp_syn_options构建SYN数据段的选项数据，
+	 * 包括时间戳、窗口大小、选择回答(SACK）, 否则调用tcp_establishe_options构架常规TCP选项，
+	 * 并返回TCP选项长度。注意：这里仅仅是计算出来具体的选项及其大小，并没有形成最终tcp包
+	 * 中选项的格式。
 	*/
 	inet = inet_sk(sk);
 	tcb = TCP_SKB_CB(skb);
@@ -1273,7 +1282,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
  * 由于数据段需要等到ACK后才能释放，所以 需要在发送队列中长期保留一份skb的备份。
  * 使用场景包括：
 	.来自用户空间的数据包
-	.重传数据包	- tcp_retransmit_skb
+	.重传数据包 - tcp_retransmit_skb
 	.探测路由最大传送单元数据包 - tcp_mtu_probe
 	.发送复位连接数据包 - tcp_send_active_reset
 	.发送连接请求数据包 - tcp_connect
@@ -2524,12 +2533,11 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		tso_segs = tcp_init_tso_segs(skb, mss_now);
 		BUG_ON(!tso_segs);
 
-		/* 获取和检查拥塞窗口大小 */
-		/*
-			如果为0，表示拥塞窗口已满，目前不能发生。
-			拿拥塞窗口和正在网络上传输的包数目相比，如果拥塞窗口还大，
-			则返回拥塞窗口减掉正在网上传输的包数后剩下的大小。
-			目的：判断正在传输的包数目是否超过了拥塞窗口，如果超过了，则不发送。
+		/* 获取和检查拥塞窗口大小：
+		 * 如果为0，表示拥塞窗口已满，目前不能发送。
+		 * 拿拥塞窗口和正在网络上传输的包数目相比，如果拥塞窗口还大，
+		 * 则返回拥塞窗口减掉正在网上传输的包数后剩下的大小。
+		 * 目的：判断正在传输的包数目是否超过了拥塞窗口，如果超过了，则不发送。
 		*/
 		cwnd_quota = tcp_cwnd_test(tp, skb);
 		if (!cwnd_quota) {
@@ -2812,14 +2820,14 @@ void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
 /* Send _single_ skb sitting at the send head. This function requires
  * true push pending frames to setup probe timer etc.
  */
- /* 用于将发送队列首部的单个包发送出去。 */
+ /* 用于将发送队列的首部单个包发送出去。 */
 void tcp_push_one(struct sock *sk, unsigned int mss_now)
 {
 	struct sk_buff *skb = tcp_send_head(sk);
 
 	BUG_ON(!skb || skb->len < mss_now);
 
-	/*继续往下传skb*/
+	/* 继续往下传skb */
 	tcp_write_xmit(sk, mss_now, TCP_NAGLE_PUSH, 1, sk->sk_allocation);
 }
 

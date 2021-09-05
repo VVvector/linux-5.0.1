@@ -218,7 +218,7 @@ struct tcp_sock {
 	 */
 	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
 
-	/* 下一个等待发送的TCP段的序号 */
+	/* 下一个等待发送的TCP段的序号，即序号等于snd_nxt的数据还没有发送 */
  	u32	snd_nxt;	/* Next sequence we send		*/
 	u32	segs_out;	/* RFC4898 tcpEStatsPerfSegsOut
 				 * The total number of segments sent.
@@ -237,9 +237,20 @@ struct tcp_sock {
 				 * total number of DSACK blocks received
 				 */
 
-	/* 滑动窗口左边界， snd_una + snd_wnd滑动窗口右边界 */
-	/* 在输出的段中，最早一个未确认段的序号 */
+	/* 滑动窗口左边界， snd_una + snd_wnd滑动窗口右边界。 */
+	/* 1. 在已发送的数据中，但是还没有被确认的最小序号。注意序号等于snd_una的数据已经发送，
+	 * 最想收到的确认号要大于snd_una。
+	 * 2. 但是，如果发送的所有数据都已经确认，那么snd_una将等于下一个要发送的数据，即snd_una代表
+	 * 的数据还没有发送。在tcp_ack()中更新。
+	 * 
+	 * 更新：
+	 * 1. 客户端：发生在SYN段的发送过程中。tcp_connect_init()，初始化为write_seq
+	 * 2. 服务器：发生在第三次握手的ACK段时。tcp_child_process()->tcp_rcv_state_process()
+	 * 在数据传输过程中，应该在收到ACK后更新snd_una和snd_wnd。如果输入段中携带了ACK，
+	 * 最终都会有tcp_ack()处理确认相关的内容
+	 */
  	u32	snd_una;	/* First byte we want an ack for	*/
+
 	/**
 	 * 最近发送的小包(小于MSS段)的最后一个字节序号，在成功发送段后，如果报文小于MSS，即更新该字段。 
 	 * 主要用来更新是否启用Nagle算法。
@@ -262,10 +273,14 @@ struct tcp_sock {
 	/* 更新发送窗口的那个ACK段的序号，用来判断是否需要更新窗口。如果后续收到的ACK段大于此值，则需要更新。 */
 	u32	snd_wl1;	/* Sequence for window update		*/
 
-	/* 接收方提供的接收窗口大小，即发送方发送窗口大小 */
+	/* 发送方窗口大小，即接收方提供的接收窗口大小
+	 * 对snd_wnd的初始化发生在收到SYN+ACK段时
+	 * 发送窗口是实现流量控制的关键，它影响的只有新数据的发送过程，
+	 * 与重传无关，因为重传的数据一定是在对端接收能力之内。
+	 */
 	u32	snd_wnd;	/* The window we expect to receive	*/
 
-	/* 接收方通告过的最大接收窗口值。 */
+	/* 接收方通告过的最大接收窗口值，即可以代表对端接收缓冲区的最大值 */
 	u32	max_window;	/* Maximal window ever seen from peer	*/
 	u32	mss_cache;	/* Cached effective mss, not including SACKS */
 
@@ -401,8 +416,13 @@ struct tcp_sock {
 	/* 当前接收窗口大小 */
  	u32	rcv_wnd;	/* Current receiver window		*/
 
-	/* 已经加入接收队列中的最后一个字节的序号 */
+	/* 已经加入接收队列中的最后一个字节的序号 
+	 * write/send等写系统调用一旦返回成功，说明数据已被TCP协议接收，这时
+	 * 就要为每个数据分配一个序号，write_seq就是下一个要分配的序号。其初始值
+	 * 由secure_tcp_sequence_number()基于算法生成。注意 等于write_seq的序号还没有被分配。
+	 */
 	u32	write_seq;	/* Tail(+1) of data held in tcp send buffer */
+
 	u32	notsent_lowat;	/* TCP_NOTSENT_LOWAT */
 
 	/* 一般表示已经真正发送出去的最后一个字节序号，有时也表示期望发出去的最后一个字节的序号 */

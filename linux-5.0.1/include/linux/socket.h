@@ -295,6 +295,8 @@ struct ucred {
 
 /* 无阻塞接收或发送，如果接收缓存中有数据，则接收数据并立即返回，如果没有数据，也立即返回，而不做任何等待。 */
 #define MSG_DONTWAIT	0x40	/* Nonblocking io		 */
+
+/* 接收记录结束符 */
 #define MSG_EOR         0x80	/* End of record */
 
 /* 必须一直等待，直到接收到的数据填满用户空间的缓冲区。 */
@@ -322,7 +324,18 @@ struct ucred {
 #define MSG_EOF         MSG_FIN
 #define MSG_NO_SHARED_FRAGS 0x80000 /* sendpage() internal : page frags are not shared */
 
+/* 1. 会发生在sendfile(), splice()接口中。
+ * 2. 可以通过setsockopt()设置SOCK_ZEROCOPY, 然后，通过send(socket, buffer, length, MSG_ZEROCOPY)发送数据。
+ *     然后，通过  status = recvmsg(socket, &message, MSG_ERRORQUEUE)检查结果成功后，才释放buffer。
+ */
 #define MSG_ZEROCOPY	0x4000000	/* Use user data in kernel path */
+
+/*
+ * TCP Fast Open（TFO）是用来加速连续TCP连接的数据交互的TCP协议扩展，原理如下：
+ * 在TCP三次握手的过程中，当用户首次访问Server时，发送SYN包，Server根据用户IP生成Cookie（已加密），
+ * 并与SYN-ACK一同发回Client；当Client随后重连时，在SYN包携带TCP Cookie；如果Server校验合法，
+ * 则在用户回复ACK前就可以直接发送数据；否则按照正常三次握手进行。
+ */
 #define MSG_FASTOPEN	0x20000000	/* Send data in TCP SYN */
 #define MSG_CMSG_CLOEXEC 0x40000000	/* Set close_on_exec for file
 					   descriptor received through

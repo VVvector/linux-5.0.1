@@ -2247,7 +2247,8 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 	}
 
 	pfrag->offset = 0;
-	/* 先申请8 pages大小的frag page buffer*/
+
+	/* 先申请 8 pages大小的frag page buffer */
 	if (SKB_FRAG_PAGE_ORDER) {
 		/* Avoid direct reclaim but allow kswapd to wake */
 		pfrag->page = alloc_pages((gfp & ~__GFP_DIRECT_RECLAIM) |
@@ -2384,7 +2385,10 @@ EXPORT_SYMBOL(sk_wait_data);
 int __sk_mem_raise_allocated(struct sock *sk, int size, int amt, int kind)
 {
 	struct proto *prot = sk->sk_prot;
+
+	/* 增加TCP层的总的可用memory-页为单位。即 全局变量tcp_memory_allocated */
 	long allocated = sk_memory_allocated_add(sk, amt);
+
 	bool charged = true;
 
 	if (mem_cgroup_sockets_enabled && sk->sk_memcg &&
@@ -2473,6 +2477,8 @@ int __sk_mem_schedule(struct sock *sk, int size, int kind)
 	int ret, amt = sk_mem_pages(size);
 
 	sk->sk_forward_alloc += amt << SK_MEM_QUANTUM_SHIFT;
+
+	/* 增加TCP层的memory */
 	ret = __sk_mem_raise_allocated(sk, size, amt, kind);
 	if (!ret)
 		sk->sk_forward_alloc -= amt << SK_MEM_QUANTUM_SHIFT;
@@ -2845,6 +2851,8 @@ EXPORT_SYMBOL(lock_sock_nested);
 void release_sock(struct sock *sk)
 {
 	spin_lock_bh(&sk->sk_lock.slock);
+
+	/* 如果backlog有packet，就会收包。 */
 	if (sk->sk_backlog.tail)
 		__release_sock(sk);
 

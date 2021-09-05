@@ -12,6 +12,10 @@
 # define __nocast	__attribute__((nocast))
 # define __iomem	__attribute__((noderef, address_space(2)))
 # define __must_hold(x)	__attribute__((context(x,1,1)))
+
+/* 用于sparse对代码检测的相互关联的函数定义，一个+1，一个-1。
+ * 如果出现不平衡，sparse就会提示。
+ */
 # define __acquires(x)	__attribute__((context(x,0,1)))
 # define __releases(x)	__attribute__((context(x,1,0)))
 # define __acquire(x)	__context__(x,1)

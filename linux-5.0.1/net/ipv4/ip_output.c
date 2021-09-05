@@ -572,8 +572,9 @@ packet_routed:
 	skb->mark = sk->sk_mark;
 
 	/* 最后处理： 
-		1. 计算校验和
-		2. 调用网络过滤子系统的回调函数，来查看数据包是否有权限调到下一个步骤（dst_output）继续发送 */
+	 * 1. 计算校验和
+	 * 2. 调用网络过滤子系统的回调函数，来查看数据包是否有权限调到下一个步骤（dst_output）继续发送 
+	 */
 	res = ip_local_out(net, sk, skb);
 
 	rcu_read_unlock();

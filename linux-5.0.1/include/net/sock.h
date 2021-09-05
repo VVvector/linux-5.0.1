@@ -410,6 +410,7 @@ struct sock {
 	} sk_backlog;
 #define sk_rmem_alloc sk_backlog.rmem_alloc
 
+	/* 预分配缓存 */
 	int			sk_forward_alloc;
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	unsigned int		sk_ll_usec;
@@ -462,7 +463,9 @@ struct sock {
 	unsigned long		sk_pacing_rate; /* bytes per second */
 	unsigned long		sk_max_pacing_rate;
 
+	/* 上次的skb frag buffer */
 	struct page_frag	sk_frag;
+
 	netdev_features_t	sk_route_caps;
 	netdev_features_t	sk_route_nocaps;
 	netdev_features_t	sk_route_forced_caps;
@@ -1471,6 +1474,7 @@ static inline int sk_mem_pages(int amt)
 	return (amt + SK_MEM_QUANTUM - 1) >> SK_MEM_QUANTUM_SHIFT;
 }
 
+/* sock是否有内存统计，例如, TCP层就会用内存统计 */
 static inline bool sk_has_account(struct sock *sk)
 {
 	/* return true if protocol supports memory accounting */
@@ -2044,7 +2048,7 @@ static inline int skb_do_copy_data_nocache(struct sock *sk, struct sk_buff *skb,
 					   struct iov_iter *from, char *to,
 					   int copy, int offset)
 {
-	/* 需要TCP自己计算校验和，即NIC driver是否有HW checksum offload */
+	/* 需要TCP自己计算校验和，即net dev没有HW checksum offload */
 	if (skb->ip_summed == CHECKSUM_NONE) {
 		__wsum csum = 0;
 
@@ -2067,7 +2071,7 @@ static inline int skb_add_data_nocache(struct sock *sk, struct sk_buff *skb,
 	int err, offset = skb->len;
 
 	
-	/* 拷贝用户空间的数据到内核空间，同时计算校验和 */
+	/* 拷贝用户空间的数据到内核空间，根据skb->ip_summed情况进行校验和的计算。 */
 	err = skb_do_copy_data_nocache(sk, skb, from, skb_put(skb, copy),
 				       copy, offset);
 					   

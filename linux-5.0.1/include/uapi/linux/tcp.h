@@ -106,6 +106,15 @@ enum {
 #define TCP_THIN_LINEAR_TIMEOUTS 16      /* Use linear timeouts for thin streams*/
 #define TCP_THIN_DUPACK         17      /* Fast retrans. after 1 dupack */
 #define TCP_USER_TIMEOUT	18	/* How long for loss retry before timeout */
+
+/*
+ * setsockopt设置TCP_PREPAIR选项
+ * 比如docker等容器在不同的机器之间无缝迁移(可能由于调度，维护，交割等原因)，是常见的需求场景
+ * 但是又希望不能中断服务，因此各种虚拟机和容器的热迁移就得到很多关注。
+ * 进入repair模式的要求:
+ *   1. 需要CAP_NET_ADMIN， 用户命名空间需要有网络管理能力
+ *   2. socket处于CLOSE状态或ESTABLISHED状态
+ */
 #define TCP_REPAIR		19	/* TCP sock is under repair right now */
 #define TCP_REPAIR_QUEUE	20
 #define TCP_QUEUE_SEQ		21
