@@ -169,15 +169,32 @@ enum {
 #define TCPI_OPT_ECN_SEEN	16 /* we received at least one packet with ECT */
 #define TCPI_OPT_SYN_DATA	32 /* SYN-ACK acked data in SYN sent or rcvd */
 
+/*
+ * 在tcp建立连接后，tcp本身有一个状态机的跳转来处理各种丢包，包乱序等异常情况。
+ */
 enum tcp_ca_state {
+	/* Normal state, no dubious events, fast path */
 	TCP_CA_Open = 0,
 #define TCPF_CA_Open	(1<<TCP_CA_Open)
+
+	/* In all the respects it is "Open", but requires a bit more attention.
+	 * It is entered when we see some SACKs or dupacks. It is split of "Open"
+	 * mainly to move some processing from fast path to slow one.
+	 */
 	TCP_CA_Disorder = 1,
 #define TCPF_CA_Disorder (1<<TCP_CA_Disorder)
+
+	/* CWND was reduced due to some Congestion Notification event. It can be ECN,
+	 * ICMP source quench, local device congestion.
+	 */
 	TCP_CA_CWR = 2,
 #define TCPF_CA_CWR	(1<<TCP_CA_CWR)
+
+	/* CWND was reduced, we are fast-retransmitting. */
 	TCP_CA_Recovery = 3,
 #define TCPF_CA_Recovery (1<<TCP_CA_Recovery)
+
+	/* CWND was reduced due to RTO timeout or SACK reneging */
 	TCP_CA_Loss = 4
 #define TCPF_CA_Loss	(1<<TCP_CA_Loss)
 };

@@ -152,6 +152,19 @@ static int tcp_orphan_retries(struct sock *sk, bool alive)
 	return retries;
 }
 
+/*
+ * https://cloud.tencent.com/developer/article/1411873
+ * 因为PMTU可能随着不同的路径而变化，为了避免PMTU变小而导致发送失败，就需要探测MTU。
+ *
+ * MTU探测的工作函数tcp_mtu_probing是在tcp_write_timeout中调用的：
+ * 当TCP重传超过设置的sysctl_tcp_retries1值（/proc/sys/net/ipv4/tcp_retries1）时，
+ * 就会调用tcp_mtu_probing()。当PMTU小于MSS时，TCP报文就会传输失败。
+ * 因为默认情况下，系统都会设置禁止IP分片，这时就需要进行tcp_mtu_probing。
+ *
+ * MTU的下线探测还是比较激进的。首先，取探测下限search_low计算的MSS的一半值，
+ * 然后与系统配置的tcp_base_mss相比，取较小值。这个较小值，不能低于可能的最小值68-tcp_header_len，
+ * 并根据结果重新设置了探测下限。通过这样的方法，内核会探测到真实的PMTU，从而保证TCP报文可以顺利发送。
+ */
 static void tcp_mtu_probing(struct inet_connection_sock *icsk, struct sock *sk)
 {
 	const struct net *net = sock_net(sk);

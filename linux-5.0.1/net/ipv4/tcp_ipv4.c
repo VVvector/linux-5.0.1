@@ -1681,7 +1681,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	}
 
 	/* 基于伪首部累加和进行全包的校验和，判断包是否传输正确 */
-	/*数据包校验和 */
+	/* 数据包校验和 */
 	if (tcp_checksum_complete(skb))
 		goto csum_err;
 
@@ -2126,8 +2126,7 @@ process:
 
 	/* 进程此时没有访问传输控制块 */
 	if (!sock_owned_by_user(sk)) {
-		
-		/* 继续往上传skb，放入sk->sk_receive_queue中 */
+		/* 将skb放入sk->sk_receive_queue中 */
 		ret = tcp_v4_do_rcv(sk, skb);
 	} else if (tcp_add_backlog(sk, skb)) {
 		/* 添加到后备队列成功 sk->sk_backlog */

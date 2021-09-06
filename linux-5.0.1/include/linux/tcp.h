@@ -218,7 +218,7 @@ struct tcp_sock {
 	 */
 	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
 
-	/* 下一个等待发送的TCP段的序号，即序号等于snd_nxt的数据还没有发送 */
+	/* 下一个准备发送的TCP段的序号，即序号等于snd_nxt的数据还没有发送 */
  	u32	snd_nxt;	/* Next sequence we send		*/
 	u32	segs_out;	/* RFC4898 tcpEStatsPerfSegsOut
 				 * The total number of segments sent.

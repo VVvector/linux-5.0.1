@@ -48,6 +48,7 @@
 /* Refresh clocks of a TCP socket,
  * ensuring monotically increasing values.
  */
+/* 更新tcp socket的时间戳 */
 void tcp_mstamp_refresh(struct tcp_sock *tp)
 {
 	u64 val = tcp_clock_ns();
@@ -1114,11 +1115,11 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	skb->skb_mstamp_ns = tp->tcp_wstamp_ns;
 
 	/* 开始构建TCP的头部：
-	 * 查看数据包是否是一个SYN包（TCPCB_FLAG_SYN），如果是，就调用tcp_syn_options构建SYN数据段的选项数据，
-	 * 包括时间戳、窗口大小、选择回答(SACK）, 否则调用tcp_establishe_options构架常规TCP选项，
-	 * 并返回TCP选项长度。注意：这里仅仅是计算出来具体的选项及其大小，并没有形成最终tcp包
-	 * 中选项的格式。
-	*/
+	 * 查看数据包是否是一个SYN包（TCPCB_FLAG_SYN），如果是，就调用 tcp_syn_options() 构建SYN数据段的选项数据，
+	 * 包括时间戳、窗口大小、选择回答(SACK）, 否则调用 tcp_establishe_options() 构建常规TCP选项，
+	 * 并返回TCP选项长度。
+	 * 注意：这里仅仅是计算出来具体的选项及其大小，并没有形成最终tcp包中选项的格式。
+	 */
 	inet = inet_sk(sk);
 	tcb = TCP_SKB_CB(skb);
 	memset(&opts, 0, sizeof(opts));
@@ -1202,7 +1203,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		}
 	}
 
-	/* 写完首部后，开始写tcp选项。 */
+	/* 构建好tcp首部后，开始构建tcp选项。 */
 	tcp_options_write((__be32 *)(th + 1), tp, &opts);
 
 	/* 这里会设置tcp skb的gso type，即 SKB_GSO_TCPV4 */
@@ -1228,7 +1229,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	/* 调用 tcp_v4_send_check() 会进行checksum的判断和计算。
 	 * 这里的checksum 计算, 只进行了伪头部的计算，剩余的推迟到
-	 * 最后sch_generic.c中sch_direct_xmit->validate_xmit_skb计算。
+	 * 最后sch_generic.c中sch_direct_xmit->validate_xmit_skb()计算。
 	 */
 	icsk->icsk_af_ops->send_check(sk, skb);
 
@@ -1260,7 +1261,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 			       sizeof(struct inet6_skb_parm)));
 
 
-	/* 实际会调用 ip_queue_xmit() 函数, 把skb传入网络层。
+	/* 实际会调用 ip_queue_xmit() 函数, 把skb送入网络层。
 	 * tcp_ipv4.c中的  icsk: internet connect socket。
 	 */
 	err = icsk->icsk_af_ops->queue_xmit(sk, skb, &inet->cork.fl);
@@ -1279,16 +1280,16 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 
 /* TCP数据最终都是通过         tcp_transmit_skb() 函数传送给IP层的。主要工作是构建TCP的首部，并将包交付给IP层。
- * 由于数据段需要等到ACK后才能释放，所以 需要在发送队列中长期保留一份skb的备份。
+ * 由于数据段需要等到ACK后才能释放，所以，需要在发送队列中长期保留一份skb的备份。
  * 使用场景包括：
-	.来自用户空间的数据包
-	.重传数据包 - tcp_retransmit_skb
-	.探测路由最大传送单元数据包 - tcp_mtu_probe
-	.发送复位连接数据包 - tcp_send_active_reset
-	.发送连接请求数据包 - tcp_connect
-	.发送回答数据包 - tcp_send_ack
-	.零窗口探测数据包等 - tcp_xmit_probe_skb
-*/
+ *	.来自用户空间的数据发送
+ *	.重传数据包 - tcp_retransmit_skb()
+ *	.探测路由最大传送单元数据包 - tcp_mtu_probe()
+ *	.发送复位连接数据包 - tcp_send_active_reset()
+ *	.发送连接请求数据包 - tcp_connect()
+ *	.发送回答数据包 - tcp_send_ack()
+ *	.零窗口探测数据包等 - tcp_xmit_probe_skb()
+ */
 static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 			    gfp_t gfp_mask)
 {
@@ -1418,6 +1419,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 	if (WARN_ON(len > skb->len))
 		return -EINVAL;
 
+	/* 获取减去指定的第一个skb包大小后，剩余的数据大小 */
 	nsize = skb_headlen(skb) - len;
 	if (nsize < 0)
 		nsize = 0;
@@ -1425,6 +1427,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 	if (skb_unclone(skb, gfp))
 		return -ENOMEM;
 
+	/* 获取第二个skb的buffer，用于存剩余的数据。 */
 	/* Get a new skb... force flag on. */
 	buff = sk_stream_alloc_skb(sk, nsize, gfp, true);
 	if (!buff)
@@ -1448,6 +1451,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 	TCP_SKB_CB(buff)->sacked = TCP_SKB_CB(skb)->sacked;
 	tcp_skb_fragment_eor(skb, buff);
 
+	/* 将要分割的skb，分割成两个skb。 */
 	skb_split(skb, buff, len);
 
 	buff->ip_summed = CHECKSUM_PARTIAL;
@@ -1475,6 +1479,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 			tcp_adjust_pcount(sk, skb, diff);
 	}
 
+	/* 将tso后的第二skb，加入到 sk_write_queue */
 	/* Link BUFF into the send queue. */
 	__skb_header_release(buff);
 	tcp_insert_write_queue_after(skb, buff, sk, tcp_queue);
@@ -1985,10 +1990,12 @@ static int tso_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 	int nlen = skb->len - len;
 	u8 flags;
 
+	/* 如果skb的线性区有数据，就进行tcp fragment处理。 */
 	/* All of a TSO frame must be composed of paged data.  */
 	if (skb->len != skb->data_len)
 		return tcp_fragment(sk, tcp_queue, skb, len, mss_now, gfp);
 
+	/* 如果skb只有非线性区，则用tso分片。 */
 	buff = sk_stream_alloc_skb(sk, 0, gfp, true);
 	if (unlikely(!buff))
 		return -ENOMEM;
@@ -2194,6 +2201,18 @@ static bool tcp_can_coalesce_send_queue_head(struct sock *sk, int len)
  *         1 if a probe was sent,
  *         -1 otherwise
  */
+/*
+ * 作用：用于及时增大MSS，从而可以发送更大的报文。
+ * 与tcp_mtu_probing()--使用MTU Probe来避免PMTU变小而导致发送失败的方法。
+ * 共同完成MTU的调整。
+ *
+ * TCP MTU Probe的原理已经分析完毕，做一个简单的总结：当PMTU变小时，MTU Probe通过丢包发现这种情况，
+ * 从而不断的降低当前MSS值，达到成功发送的目的。当PMTU变大时，利用非PUSH报文，尝试发送更大的TCP数据报文。
+ * 如果成功，则进一步提高探测上限，从而逐步探测到该PMTU可传送的最大TCP报文。
+ *
+ * 当skb数据包不需要push的时候，则可以进行MTU探测。TCP的PUSH标志的含义是尽快将数据包发送出去（对于发送端）。
+ * 反过来，没有PUSH标志的时候，则表示数据包不是特别“紧急”。这时候就可以做点额外的工作，即进行MTU探测。
+ */
 static int tcp_mtu_probe(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -2206,6 +2225,7 @@ static int tcp_mtu_probe(struct sock *sk)
 	int mss_now;
 	int interval;
 
+	/* 合法性检查，即判定哪些情况不合适做MTU探测。 */
 	/* Not currently probing/verifying,
 	 * not in recovery,
 	 * have enough cwnd, and
@@ -2218,6 +2238,7 @@ static int tcp_mtu_probe(struct sock *sk)
 		   tp->rx_opt.num_sacks || tp->rx_opt.dsack))
 		return -1;
 
+	/* 每次使用上限"searchi_high"和下限"search_low"的中间值作为探测报文的大小。 */
 	/* Use binary search for probe_size between tcp_mss_base,
 	 * and current mss_clamp. if (search_high - search_low)
 	 * smaller than a threshold, backoff from probing.
@@ -2240,10 +2261,12 @@ static int tcp_mtu_probe(struct sock *sk)
 		return -1;
 	}
 
+	/* 发送缓存中是否有足够的数据（TCP探测报文不可能"伪造"数据） */
 	/* Have enough data in the send queue to probe? */
 	if (tp->write_seq - tp->snd_nxt < size_needed)
 		return -1;
 
+	/* 发送窗口是否有足够的大小 */
 	if (tp->snd_wnd < size_needed)
 		return -1;
 	if (after(tp->snd_nxt + size_needed, tcp_wnd_end(tp)))
@@ -2260,6 +2283,7 @@ static int tcp_mtu_probe(struct sock *sk)
 	if (!tcp_can_coalesce_send_queue_head(sk, probe_size))
 		return -1;
 
+	/* 构造数据报文并发送 */
 	/* We're allowed to probe.  Build it now. */
 	nskb = sk_stream_alloc_skb(sk, probe_size, GFP_ATOMIC, false);
 	if (!nskb)
@@ -2313,6 +2337,7 @@ static int tcp_mtu_probe(struct sock *sk)
 	}
 	tcp_init_tso_segs(nskb, nskb->len);
 
+	/* 这里数据包发送出去后，至少进行了探测。如果探测失败，即该TCP报文由于丢失了怎么办？ */
 	/* We're ready to send.  If this fails, the probe will
 	 * be resegmented into mss-sized pieces by tcp_write_xmit().
 	 */
@@ -2367,9 +2392,9 @@ static bool tcp_pacing_check(struct sock *sk)
  * TCP Small Queues :
  * 控制进入到 qdisc/devices 中的包的数目。
  * 该机制带来了以下的好处 :
- * - 更好的 RTT 估算和 ACK 调度
- * - 更快地恢复
- * - 高数据速率
+ * 1. 更好地进行RTT估算和ACK调度
+ * 2. 更快速地恢复
+ * 3. 高数据速率
  */
 static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 				  unsigned int factor)
@@ -2461,15 +2486,15 @@ void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type)
  * Returns true, if no segments are in flight and we have queued segments,
  * but cannot send anything now because of SWS or another problem.
  */
- /*
-	将socket的发送队列上的skb发送出去，0表示发送成功，过程如下：
-	1. 检查拥塞窗口大小
-	2. 检查当前报文是否完全处于发送窗口内
-	3. 检查报文是否使用nagle算法发送
-	4. 通过以上检查后的skb发送出去
-	5. 循环检查发送队列上所有未发送的skb
-
-	最后调用：tcp_transmit_skb()进行发送。
+/*
+ * 将socket的发送队列上的skb发送出去，0表示发送成功，过程如下：
+ * 1. 检查拥塞窗口大小
+ * 2. 检查当前报文是否完全处于发送窗口内
+ * 3. 检查报文是否使用nagle算法发送
+ * 4. 通过以上检查后的skb发送出去
+ * 5. 循环检查发送队列上所有未发送的skb
+ * 
+ * 最后调用：tcp_transmit_skb()进行发送。
 */
 
 /* http://sunjiangang.blog.chinaunix.net/uid-9543173-id-3543419.html */
@@ -2488,11 +2513,12 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	/* 该变量用于统计发送的包的数量，初始化为 0 */
 	sent_pkts = 0;
 
+	/* 更新tcp socket记录的时间 */
 	tcp_mstamp_refresh(tp);
 
-	/* 需要发送多个数据段 */
+	/* 不需要立即发送，linux 这里会做mtu探测工作。*/
 	if (!push_one) {
-		/* 进行MTU探测 */
+		/* 进行MTU探测，用于及时增大MSS, 从而可以发送更大的报文。 */
 		/* Do MTU probing. */
 		result = tcp_mtu_probe(sk);
 		if (!result) {
@@ -2502,10 +2528,10 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		}
 	}
 
-	/* 获取最大的tso分段数量 */
+	/* 获取一个skb的最大的tso分段数量 */
 	max_segs = tcp_tso_segs(sk, mss_now);
 
-	/*不断循环发送队列数据 - sk_write_queue */
+	/* 不断循环发送队列数据 - sk_write_queue */
 	while ((skb = tcp_send_head(sk))) {
 		unsigned int limit;
 
@@ -2521,14 +2547,14 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			goto repair; /* Skip network transmission */
 		}
 
-		/* tcp的pacing 功能，有限速 */
+		/* tcp的 pacing 功能，限速 */
 		if (tcp_pacing_check(sk))
 			break;
 
 		/* 初始化tso分段相关 */
-		/* 设置TSO相关信息，包括GSO类型，GSO分段的大小等。这些信息是准备给软件TSO分段使用的。
-			如果网络设备不支持TSO，但又用了TSO功能，则报文在提交给网络设备前，
-			需要进行软件分段，即由代码实现TSO功能。即GSO。
+		/* 设置TSO相关信息，包括GSO类型，GSO分段的大小等。这些信息是准备给GSO分段使用的。
+		 * 如果网络设备不支持TSO，但又用了TSO功能，则报文在提交给网络设备前，
+		 * 需要进行软件分段，即由代码实现TSO功能。即GSO。
 		*/
 		tso_segs = tcp_init_tso_segs(skb, mss_now);
 		BUG_ON(!tso_segs);
@@ -2538,7 +2564,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 * 拿拥塞窗口和正在网络上传输的包数目相比，如果拥塞窗口还大，
 		 * 则返回拥塞窗口减掉正在网上传输的包数后剩下的大小。
 		 * 目的：判断正在传输的包数目是否超过了拥塞窗口，如果超过了，则不发送。
-		*/
+		 */
 		cwnd_quota = tcp_cwnd_test(tp, skb);
 		if (!cwnd_quota) {
 			/* 强制发送一个包进行丢包探测 */
@@ -2565,7 +2591,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		} else { 
 			/* 表示有tso分段, 则检查是否需要延迟发送。
 			 * 检查是否可以延时发送，有很多条件判断。详细见函数。
-			 *目的是为了减少软GSO分段的次数，以提高实时性。
+			 * 目的是为了减少软GSO分段的次数，以提高实时性。
 			 */
 			if (!push_one &&
 			    tcp_tso_should_defer(sk, skb, &is_cwnd_limited,
@@ -2573,19 +2599,22 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 				break;
 		}
 
-		/* 下面的逻辑是： 不用推迟发送，马上发送的情况 */
-		/* limit为再次分段的段长，初始化为当前MSS。 */
+		/* 下面的逻辑是：
+		 * 不用推迟发送，即马上发送的处理 
+		 */
+		/* limit为本次分段的段长，初始化为当前MSS。 */
 		limit = mss_now;
 
-		/* 需要分段&&非紧急模式，重新确定分段长度限制。通过mss_now计算limit的值。
-        	 * 以发送窗口和拥塞窗口的最小值作为分段段长。
-        	 * 注：
-        	 *  其中 tcp_init_tso_segs(0 会设置skb的gso信息后文分析。我们看到tcp_write_xmit
-        	 * 会调用tso_fragment()进行“tcp分段”。而分段的条件是skb->len > limit。
-        	 * 这里的关键就是limit的值，我们看到在tso_segs > 1时，也就是开启gso的时候，
-        	 * limit的值是由tcp_mss_split_point() 得到的，也就是min(skb->len, window)，
-        	 * 即发送窗口允许的最大值。在没有开启gso时limit就是当前的mss。
-        	 */
+		/* 在需要分段并且非紧急模式的条件下，重新确定分段长度限制 - 通过mss_now计算limit的值。
+		 * 以发送窗口和拥塞窗口的最小值作为分段段长。
+		 * 注意：
+		 * 前面 tcp_init_tso_segs()中会设置skb的gso信息，并且，
+		 * 后面会调用tso_fragment()进行“tcp分段”。
+		 * 而分段的条件是skb->len > limit。
+		 * 这里的关键就是limit的值，我们看到在tso_segs > 1时，也就是开启gso的时候，
+		 * limit的值是由tcp_mss_split_point() 得到的，也就是min(skb->len, window)，
+		 * 即发送窗口允许的最大值。在没有开启gso时limit就是当前的mss。
+		 */
 		if (tso_segs > 1 && !tcp_urg_mode(tp))
 			limit = tcp_mss_split_point(sk, skb, mss_now,
 						    min_t(unsigned int,
@@ -2596,10 +2625,10 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		/* 如果SKB中的数据长度大于分段段长，则调用tso_fragment()根据该段长进行分段，
 		 * 如果分段失败，则暂不发送。
 		 *
-		 * 前面处理中： 根据条件，可能需要对SKB中的报文进行分段处理，分段的报文包括两种：
+		 * 前面处理中： 根据不同条件检查，可能需要对SKB中的报文进行分段处理，分段的报文包括两种：
 		 * 1. 普通的用MSS分段的报文
 		 * 2. TSO分段的报文。
-
+		 * 
 		 * 能否发送报文主要取决于两个条件：
 	         * 1. 1是报文需完全在发送窗口中，2是拥塞窗口未满。第一种报文，应该不会再分段了，
 	        	因为在tcp_sendmsg()中创建报文的SKB时已经根据MSS处理了。
@@ -2612,14 +2641,14 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			break;
 
 		/*
-		 * Linux3.6 引入的新机制。在之前的 Linux 实现中，如果 TCP 的窗口很大，那么，
-		 * 可能导致驱动队列中待发送的包的的数目超过队列缓存的大小，因而导致丢包。为了解
-		 * 决该问题， Linux 引入了 TCP 小队列机制。
-		*/
+		 * Linux3.6 引入的新机制。在之前的Linux实现中，如果TCP的窗口很大，那么，
+		 * 可能导致驱动队列中待发送的包的的数目超过队列缓存的大小，因而导致丢包。
+		 * 为了解决该问题，Linux引入了TCP小队列机制。
+		 */
 		if (tcp_small_queue_check(sk, skb, 0))
 			break;
 
-		/* 继续发送数据到network layer中去，实际是调用 ip_queue_xmit()。*/
+		/* TCP header构造等，最终调用ip_queue_xmit()将数据发送到网络层。*/
 		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
 			break;
 
@@ -2814,7 +2843,7 @@ void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
 	/* 将剩余的部分发送出去。 */
 	if (tcp_write_xmit(sk, cur_mss, nonagle, 0,
 			   sk_gfp_mask(sk, GFP_ATOMIC)))
-		tcp_check_probe_timer(sk); // 如果发送失败，检查是否需要启动零窗口探测定时器。
+		tcp_check_probe_timer(sk); /* 如果发送失败，检查是否需要启动零窗口探测定时器。*/
 }
 
 /* Send _single_ skb sitting at the send head. This function requires

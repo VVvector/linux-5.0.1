@@ -5788,21 +5788,19 @@ discard:
  *	tcp_data_queue when everything is OK.
  */
 /*
-	fast path: 
-		复制到用户空间或者按序进入receive_queue的处理路径。
-	
-		原因：
-		TCP协议头预定向算法可以认为在套接字连接期间到达的数据包至少有一半是包含数据段的数据包，
-		而不是ACK段数据包。通过使用TCP协议头预定向，TCP协议底层接收函数事先确定那些数据包符合以上条件，
-		这些数据包就立即放入sk->sk_receive_queue中。
-
-		条件：
-		1. 收到的数据段包含的是数据，而不是ACK。
-		2. 数据段是顺序传输数据中的一个完整数据段，接收顺序正确。
-
-	slow path:
-		对那些乱序包或者别的不符合fast-path要求的包的处理路径。
-	*/
+ * fast path: 
+ *	复制到用户空间或者按序进入sk_receive_queue的处理路径。
+ *	原因：
+ *	TCP协议头预定向算法可以认为在套接字连接期间到达的数据包至少有一半是包含数据段的数据包，
+ *	而不是ACK段数据包。通过使用TCP协议头预定向，TCP协议底层接收函数事先确定那些数据包符合以上条件，
+ *	这些数据包就立即放入sk->sk_receive_queue中。
+ *	条件：
+ *	1. 收到的数据段包含的是数据，而不是纯ACK。
+ *	2. 数据段是顺序传输数据中的一个完整数据段，接收顺序正确。
+ *
+ * slow path:
+ *	对那些乱序包或者别的不符合fast-path要求的包的处理路径。
+ */
 				  
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 {
@@ -5924,7 +5922,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			/* Bulk data transfer: receiver */
 			__skb_pull(skb, tcp_header_len);
 
-			/* 将skb挂入receive队列中 */
+			/* 将skb放入到sk_receive_queue队列中 */
 			eaten = tcp_queue_rcv(sk, skb, &fragstolen);
 
 			tcp_event_data_recv(sk, skb);
@@ -5942,12 +5940,13 @@ no_ack:
 			if (eaten)
 				kfree_skb_partial(skb, fragstolen);
 
-			/*  数据ready，唤醒socket上阻塞掉的进程。 */
+			/* 数据ready，唤醒在本socket上阻塞掉的进程。 */
 			tcp_data_ready(sk);
 			return;
 		}
 	}
 
+	/* 慢路径的处理 */
 slow_path:
 	if (len < (th->doff << 2) || tcp_checksum_complete(skb))
 		goto csum_error;
@@ -5971,7 +5970,7 @@ step5:
 	/* Process urgent data. */
 	tcp_urg(sk, skb, th);
 
-	/* 接收包 */
+	/* 接收包到sk_receive_queue中 */
 	/* step 7: process the segment text */
 	tcp_data_queue(sk, skb);
 
