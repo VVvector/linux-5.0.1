@@ -2210,21 +2210,24 @@ static inline void *pskb_pull(struct sk_buff *skb, unsigned int len)
 /*
  * 我们首先需要知道的是收到的包的数据在 sk_buff 中是如何组织的。数据先会出
  * 现在 sk_buff->data 中，也就是线性数据缓冲区，多余的数据就放在 skb_shinfo(skb)->frag[] 当中，
- * 这些数据存在于所谓的非线性缓冲区当中，这些数据都存在于 unmapped
- * page 当中，这是用于支持驱动的分散/聚集 I/O 的。另外，还有一部分存在于 skb_shinfo(skb)->frag_list 当中，
+ * 这些数据存在于所谓的非线性缓冲区当中，即这些数据都存在于 unmapped page 当中，
+ * 这是用于支持驱动的分散/聚集 I/O 的。另外，还有一部分存在于 skb_shinfo(skb)->frag_list 当中，
  * 这是一个 sk_buff 结构的链表。所以，对 shk_shinfo(skb)->frag_list当中的 sk_buff 中的数据可以进行上述的递归表达。
  *
  * 造成上述的原因是数据可能会分片。
- * 如果数据本身的头部长度就已经大于给定的头部长度了，说明合法。如果给定长度大
- * 于第一个分片的全部长度，显然不合法，如果都不是，那么就需要调用 __pskb_pull_tail
- * 处理剩下的分片了，这里我们就不详细叙述了。
+ * 主要在使用skb_pull之前来检查线性区buffer有没有足够的数据用于 pull。
  */
 static inline int pskb_may_pull(struct sk_buff *skb, unsigned int len)
 {
+	/* 如果给定长度大于skb的线性区数据了，说明合法。 */
 	if (likely(len <= skb_headlen(skb)))
 		return 1;
+
+	/* 如果给定长度大于skb的全部数据，显然不合法 */
 	if (unlikely(len > skb->len))
 		return 0;
+
+	/* 其余情况，即len长度的数据有一部分在非线性区，就需要扩展非线性区，且把非线性区的数据复制到线性区。 */
 	return __pskb_pull_tail(skb, len - skb_headlen(skb)) != NULL;
 }
 
@@ -2593,6 +2596,9 @@ static inline void __skb_trim(struct sk_buff *skb, unsigned int len)
 
 void skb_trim(struct sk_buff *skb, unsigned int len);
 
+/* 针对skb中存在非线性数据的情形，将skb的数据长度裁减到len长度，最终skb->len = len
+ * 多余的数据会被clean掉。
+ */
 static inline int __pskb_trim(struct sk_buff *skb, unsigned int len)
 {
 	if (skb->data_len)

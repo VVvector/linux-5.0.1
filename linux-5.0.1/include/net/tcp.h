@@ -1747,8 +1747,13 @@ void tcp_fastopen_active_detect_blackhole(struct sock *sk, bool expired);
  */
 enum tcp_chrono {
 	TCP_CHRONO_UNSPEC,
+	/* 主动发送数据 */
 	TCP_CHRONO_BUSY, /* Actively sending data (non-empty write queue) */
+
+	/* 由于接收缓存区不足而停止 */
 	TCP_CHRONO_RWND_LIMITED, /* Stalled by insufficient receive window */
+
+	/* 由于发送缓存区不足而停止 */
 	TCP_CHRONO_SNDBUF_LIMITED, /* Stalled by insufficient send buffer */
 	__TCP_CHRONO_MAX,
 };

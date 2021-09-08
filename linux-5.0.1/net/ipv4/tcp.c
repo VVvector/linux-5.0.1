@@ -1462,6 +1462,7 @@ new_segment:
 			 * 注：
 			 * 这里会从TCP层面来判断发送缓存的申请是否合法。即需要判断TCP层面的内存
 			 * 使用量，以及此socket的发送缓存使用量。
+			 * 这里会在数据区的头部预留足够的空间，即可以存放tcp, ip, ethernet的首部。
 			 */
 			first_skb = tcp_rtx_and_write_queues_empty(sk);
 			linear = select_size(first_skb, zc); //2048 - tcp header

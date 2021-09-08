@@ -204,6 +204,7 @@ struct sk_buff *__udp_gso_segment(struct sk_buff *gso_skb,
 	if (gso_skb->len <= sizeof(*uh) + mss)
 		return ERR_PTR(-EINVAL);
 
+	/* 去除掉upd header部分，即这里只对udp payload部分进行segment。 */
 	skb_pull(gso_skb, sizeof(*uh));
 
 	/* clear destructor to avoid skb_segment assigning it to tail */
@@ -228,6 +229,7 @@ struct sk_buff *__udp_gso_segment(struct sk_buff *gso_skb,
 	seg = segs;
 	uh = udp_hdr(seg);
 
+	/* 重新计算checksum */
 	/* compute checksum adjustment based on old length versus new */
 	newlen = htons(sizeof(*uh) + mss);
 	check = csum16_add(csum16_sub(uh->check, uh->len), newlen);
@@ -293,6 +295,7 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 	struct udphdr *uh;
 	struct iphdr *iph;
 
+	/* 检查是否为封装或者tunnel的segment */
 	if (skb->encapsulation &&
 	    (skb_shinfo(skb)->gso_type &
 	     (SKB_GSO_UDP_TUNNEL|SKB_GSO_UDP_TUNNEL_CSUM))) {
@@ -300,12 +303,14 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 		goto out;
 	}
 
+	/* 说明这下面的gso udp只支持 UDP或者UDP_L4的segment */
 	if (!(skb_shinfo(skb)->gso_type & (SKB_GSO_UDP | SKB_GSO_UDP_L4)))
 		goto out;
 
 	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 		goto out;
 
+	/* GSO_UDP_L4: 只对UDP的payload数据部分进行segment，类似tso。 */
 	if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4)
 		return __udp_gso_segment(skb, features);
 
@@ -313,6 +318,11 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 	if (unlikely(skb->len <= mss))
 		goto out;
 
+	/* GSO_UDP: 
+	 * 注意这里传递给skb_segment 做分片是带有udp首部的，分片将udp首部作为普通数据切分，
+	 * 这也意味着对于udp的GSO分片，只有第一片有UDP首部。udp的分段其实和ip的分片没什么区别，
+	 * 只是多一个计算checksum的步骤
+	 */
 	/* Do software UFO. Complete and fill in the UDP checksum as
 	 * HW cannot do checksum of UDP packets sent as multiple
 	 * IP fragments.
@@ -339,10 +349,6 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 
 	/* Fragment the skb. IP headers of the fragments are updated in
 	 * inet_gso_segment()
-	 */
-	/* 注意这里传递给skb_segment 做分片是带有udp首部的，分片将udp首部作为普通数据切分，
-	 * 这也意味着对于udp的GSO分片，只有第一片有UDP首部。udp的分段其实和ip的分片没什么区别，
-	 * 只是多一个计算checksum的步骤
 	 */
 	segs = skb_segment(skb, features);
 out:

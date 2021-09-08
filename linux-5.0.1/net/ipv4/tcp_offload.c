@@ -70,21 +70,21 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	__sum16 newcheck;
 	bool ooo_okay, copy_destructor;
 
+	/* 拿到TCP头部 */
 	th = tcp_hdr(skb);
 	thlen = th->doff * 4;
+	/* 检测报文长度至少由tcp头部长度 */
 	if (thlen < sizeof(*th))
 		goto out;
 
-	/* 检测报文长度至少由tcp头部长度 */
+	/* skb线性区检查，或扩展，使tcp header能在线性区。便于后续处理。 */
 	if (!pskb_may_pull(skb, thlen))
 		goto out;
-
-	/* 把tcp header移到skb header里，把skb->len存到oldlen中，
-	 * 此时skb->len就只有ip payload的长度（包含TCP首部） 
-	 */
 	oldlen = (u16)~skb->len;
 
-	/* data指向tcp payload， 即不带tcp头部。*/
+	/* 把tcp header移到skb header里，把skb->len存到oldlen中，
+	 * 此时skb->len就只有tcp payload的长度（不包含TCP首部） 
+	 */
 	__skb_pull(skb, thlen);
 
 	/* 这里可以看出gso_size的含义就是mss */

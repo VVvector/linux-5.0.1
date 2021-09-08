@@ -100,7 +100,7 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 	iph->tot_len = htons(skb->len);
 
-	/* 计算校验和 */
+	/* 计算ip header的校验和 */
 	/*Calls ip_send_check to compute the checksum to be written in the IP packet header.*/
 	ip_send_check(iph);
 
@@ -114,9 +114,9 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 	skb->protocol = htons(ETH_P_IP);
 
 	/*
-		经过netfilter的 LOCAL_OUT钩子点进行检查过滤，如果通过，则通过dst_output()函数，
-		实际上调用的是IP数据包输出函数 ip_output()函数。
-	*/
+	 * 经过netfilter的 LOCAL_OUT钩子点进行检查过滤，如果通过，则通过dst_output()函数，
+	 * 实际上调用的是IP数据包输出函数 ip_output()函数。
+	 */
 	/*the IP protocol layer will call down into netfilter by calling nf_hook. 
 	The return value of the nf_hook function will be passed back up to ip_local_out.
 	*/
@@ -464,19 +464,18 @@ static void ip_copy_addrs(struct iphdr *iph, const struct flowi4 *fl4)
 
 /* Note: skb->sk can be different from sk, in case of tunnels */
 /*
-	ip层的发送函数，会被传输层作为callback function调用。
-	该函数提供：
-		.路由查找校验
-		.封装IP头和IP选项
-	最后调用 ip_local_out() 发送数据包。
-
-	注：
-	在TCP中，将TCP段打包成IP数据报的方法根据TCP段类型的不同而有多种接口，
-	最常用的就是ip_queue_xmit()，而ip_build_and_send_pkt()和ip_send_unicast_reply()只有在发送特定段时才会调用。
-
-	在UDP中使用的输出接口有ip_append_data()和ip_push_pending_frames()
-
-*/
+ * ip层的发送函数，会被传输层作为callback function调用。
+ * 该函数提供：
+ * 1. 路由查找校验
+ * 2. 封装IP头和IP选项
+ * 最后调用 ip_local_out() 发送数据包。
+ *
+ * 注：
+ * 在TCP中，将TCP段打包成IP数据报的方法根据TCP段类型的不同而有多种接口，
+ * 最常用的就是ip_queue_xmit()，而ip_build_and_send_pkt()和ip_send_unicast_reply()只有在发送特定段时才会调用。
+ * 
+ * 在UDP中使用的输出接口有ip_append_data()和ip_push_pending_frames()
+ */
 int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		    __u8 tos)
 {
@@ -501,9 +500,9 @@ int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		goto packet_routed;
 
 	/* 如果skb中缓存了输出路由缓存项，则需要检查该路由缓存是否过期。
-		如果路由缓存项过期了，则需要重新通过输出网络设备dev，ip目的，源地址等信息
-		查找输出路由缓存项。如果查找到对应的路由缓存项，则将其输出到sock中，否则，将try，最后drop该数据包。
-	*/
+	 * 如果路由缓存项过期了，则需要重新通过输出网络设备dev，ip目的，源地址等信息
+	 * 查找输出路由缓存项。如果查找到对应的路由缓存项，则将其输出到sock中，否则，将try，最后drop该数据包。
+	 */
 	/* Make sure we can route this packet. */
 	rt = (struct rtable *)__sk_dst_check(sk, 0);
 	if (!rt) {
@@ -563,15 +562,16 @@ packet_routed:
 		ip_options_build(skb, &inet_opt->opt, inet->inet_daddr, rt, 0);
 	}
 
+	/* 设置ip id */
 	ip_select_ident_segs(net, skb, sk,
 			     skb_shinfo(skb)->gso_segs ?: 1);
 
-	/* priority， mark设置，可通过sock进行设置。 */
+	/* priority, mark带外信息的设置，即可通过sock进行设置。 */
 	/* TODO : should we use skb->sk here instead of sk ? */
 	skb->priority = sk->sk_priority;
 	skb->mark = sk->sk_mark;
 
-	/* 最后处理： 
+	/* 最后处理：
 	 * 1. 计算校验和
 	 * 2. 调用网络过滤子系统的回调函数，来查看数据包是否有权限调到下一个步骤（dst_output）继续发送 
 	 */

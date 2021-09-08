@@ -6445,10 +6445,12 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		if (queued >= 0)
 			return queued;
 
-		/* 处理紧急数据并检测是否有数据需要发送 */
+		/* 处理紧急数据*/
 		/* Do step6 onward by hand. */
 		tcp_urg(sk, skb, th);
 		__kfree_skb(skb);
+
+		/* 检测是否有数据需要发送  */
 		tcp_data_snd_check(sk);
 		return 0;
 	}

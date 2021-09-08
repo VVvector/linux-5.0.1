@@ -1450,6 +1450,12 @@ EXPORT_SYMBOL(__pskb_copy_fclone);
  *	reloaded after call to this function.
  */
 
+/*
+ * 重新分配一个线性数据缓冲区，该缓冲区大小在原缓冲区的
+ * 基础上，将尾部扩大nhead或者ntail字节，或者得到一份新的数据缓冲区拷贝，它保证该
+ * skb是没有克隆过，且数据缓冲区是私有的，即skb->cloned = 0且
+  * skb_shareinfo(skb)->dataref = 1.
+ */
 int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
 		     gfp_t gfp_mask)
 {
@@ -1772,14 +1778,22 @@ int ___pskb_trim(struct sk_buff *skb, unsigned int len)
 	int i;
 	int err;
 
+	/* 若该skb被克隆过，那么对数据缓冲区获取一份私有的拷贝，因为该函数
+	 * 会对数据缓冲区进行修改，因此要确保数据缓冲区是独占的 
+	 */
 	if (skb_cloned(skb) &&
 	    unlikely((err = pskb_expand_head(skb, 0, 0, GFP_ATOMIC))))
 		return err;
 
+	/* offset 是线性数据缓冲区的长度，len是要裁减到的长度，offset大于等于len，
+	 * 说明线性缓冲区有一部分数据是多余的，而非线性缓冲区的数据都是多余的，因此
+	 * 需要把非线性缓冲区释放掉。
+	 */
 	i = 0;
 	if (offset >= len)
 		goto drop_pages;
 
+	/* 对unmapped page进行trim */
 	for (; i < nfrags; i++) {
 		int end = offset + skb_frag_size(&skb_shinfo(skb)->frags[i]);
 
@@ -1788,23 +1802,27 @@ int ___pskb_trim(struct sk_buff *skb, unsigned int len)
 			continue;
 		}
 
-		skb_frag_size_set(&skb_shinfo(skb)->frags[i++], len - offset);
+		skb_frag_size_set(&skb_shinfo(skb)->frags[i++], len - offset); /* 修改长度，部分多余 */
 
 drop_pages:
-		skb_shinfo(skb)->nr_frags = i;
+		skb_shinfo(skb)->nr_frags = i;  /* 更新unmapped page个数 */
 
 		for (; i < nfrags; i++)
-			skb_frag_unref(skb, i);
+			skb_frag_unref(skb, i);  /* 释放掉 */
 
+		/* 整个frag_list中的所有skb的数据都是多余...全部释放 */
 		if (skb_has_frag_list(skb))
 			skb_drop_fraglist(skb);
 		goto done;
 	}
 
+	/* unmapped page中的数据都有效，对frag_list中的数据进行trim */
 	for (fragp = &skb_shinfo(skb)->frag_list; (frag = *fragp);
 	     fragp = &frag->next) {
 		int end = offset + frag->len;
 
+		/* 该skb是共享的，则克隆一个，将克隆的加入到链表中 */
+		    /* 为何要这样？因为接下来可能会对该skb进行修改... */
 		if (skb_shared(frag)) {
 			struct sk_buff *nfrag;
 
@@ -1823,16 +1841,23 @@ drop_pages:
 			continue;
 		}
 
+		/* 该skb有部分数据多余...调用pskb_trim对该skb进行trim.相当于是递归了.. */
 		if (end > len &&
 		    unlikely((err = pskb_trim(frag, len - offset))))
 			return err;
 
+		/* frag_list链中若还有skb，则这些skb包含的都是多余的数据，释放掉 */
 		if (frag->next)
 			skb_drop_list(&frag->next);
 		break;
 	}
 
+	/* trim 完成了... */
 done:
+	/* 若trim到的长度大于线性数据缓冲区的长度，则非线性数据缓冲区的长度要减小
+	 * 不管if 如何。skb->len的长度最终都一定是len...为啥还用两个语句呢？ 不像内核
+	 * 抠门的风格啊！
+	 */
 	if (len > skb_headlen(skb)) {
 		skb->data_len -= skb->len - len;
 		skb->len       = len;
@@ -1888,6 +1913,7 @@ EXPORT_SYMBOL(pskb_trim_rcsum_slow);
  *
  * It is pretty complicated. Luckily, it is called only in exceptional cases.
  */
+ /* http://blog.chinaunix.net/uid-22577711-id-3220155.html */
 void *__pskb_pull_tail(struct sk_buff *skb, int delta)
 {
 	/* If skb has not enough free space at tail, get new one
@@ -1896,15 +1922,33 @@ void *__pskb_pull_tail(struct sk_buff *skb, int delta)
 	 */
 	int i, k, eat = (skb->tail + delta) - skb->end;
 
+	/*
+	 * eat > 0 说明skb的线性缓冲区尾部没有足够空闲空间，或者如果skb是被克隆过的。那
+	 * 么pskb_expand_head会重新分配一个线性数据缓冲区，该缓冲区大小在原缓冲区的
+	 * 基础上，将尾部扩大eat + 128字节，或者得到一份新的数据缓冲区拷贝，它保证该
+	 * skb是没有克隆过，且数据缓冲区是私有的，即skb->cloned = 0且
+	 * skb_shareinfo(skb)->dataref = 1.
+	 * 首先分析eat > 0 的情况下要扩展线性缓冲区尾部的理由很直接，因为尾部空间不
+	 * 足以容纳将要从其他地方拷贝来的数据。
+	 * skb是被克隆的情况下，需要一个私有的数据缓冲区，这是因为skb被克隆时，数
+	 * 据缓冲区是被共享的，而接下来需要从其他地方拷贝数据到线性缓冲区，也就是对
+	 * 缓冲区进行了修改，因此，需要一份私有的数据缓冲区。
+	 */
 	if (eat > 0 || skb_cloned(skb)) {
 		if (pskb_expand_head(skb, 0, eat > 0 ? eat + 128 : 0,
 				     GFP_ATOMIC))
 			return NULL;
 	}
 
+	/*
+	 * 从skb的线性数据区以及可能从非线性数据区，甚至可能从skb的frag_list链中拷贝
+	 * 总长度为delta的数据到skb_tail_pointer(skb)。这个函数也比较复杂，它甚至还递归！
+	 * 单独分析。
+	 */
 	BUG_ON(skb_copy_bits(skb, skb_headlen(skb),
 			     skb_tail_pointer(skb), delta));
 
+	/* 清理重复的数据 */
 	/* Optimization: no fragments, no reasons to preestimate
 	 * size of pulled pages. Superb.
 	 */
@@ -1996,11 +2040,13 @@ pull_pages:
 			k++;
 		}
 	}
+	/* 更新现在剩余的非线性区中的frag数量 */
 	skb_shinfo(skb)->nr_frags = k;
 
+	/* 更新skb相关字段 */
 end:
-	skb->tail     += delta;
-	skb->data_len -= delta;
+	skb->tail     += delta; //更新线性区数据
+	skb->data_len -= delta; //更新非线性区数据
 
 	if (!skb->data_len)
 		skb_zcopy_clear(skb, false);
@@ -3478,7 +3524,8 @@ static inline skb_frag_t skb_head_frag_to_page_desc(struct sk_buff *frag_skb)
  *	In case of error it returns ERR_PTR(err).
  */
 
-/* 从该函数看出：分成的小skb并不一定都是线性化的，如果之前的skb存在frags数组或者frag_list，
+/* 从该函数看出：
+ * 分成的小skb并不一定都是线性化的，如果之前的skb存在frags数组或者frag_list，
  * 则分成的小skb也可能有指向非线性区域。并不用担心网卡不支持分散聚合IO，
  * 因为之前如果能产生这些非线性数据，就说明网卡一定是支持的。
  */
@@ -3491,10 +3538,16 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	skb_frag_t *frag = skb_shinfo(head_skb)->frags;
 	unsigned int mss = skb_shinfo(head_skb)->gso_size;
 
-	/* mac头+ip头+tcp头；或者mac头+ip头(对于udp传入时，没有将头部偏移过去) */
+	/* 得到内层报头的长度：
+	 * 对于TSO: mac头+ip头+tcp头
+	 * 对于GSO_UDP：mac头 + ip头 
+	 * 对于GSO_UDP_L4: mac头 + ip头 + udp头
+	 */
 	unsigned int doffset = head_skb->data - skb_mac_header(head_skb);
 	struct sk_buff *frag_skb = head_skb;
 	unsigned int offset = doffset;
+
+	/* 得到外层报头的长度，非封装报文该值为0，是支持封装报文GSO的基础 */
 	unsigned int tnl_hlen = skb_tnl_header_len(head_skb);
 	unsigned int partial_segs = 0;
 	unsigned int headroom;
@@ -3507,6 +3560,7 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	int pos;
 	int dummy;
 
+	/* 将skb data推到mac header处，即报文移到内层报文的mac头 */
 	__skb_push(head_skb, doffset);
 	proto = skb_network_protocol(head_skb, &dummy);
 	if (unlikely(!proto))

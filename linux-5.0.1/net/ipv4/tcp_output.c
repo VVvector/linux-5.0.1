@@ -1072,7 +1072,7 @@ static void tcp_update_skb_after_send(struct sock *sk, struct sk_buff *skb,
  */
  
  /* https://blog.csdn.net/city_of_skey/article/details/84723087 */
-  
+
 static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 			      int clone_it, gfp_t gfp_mask, u32 rcv_nxt)
 {
@@ -1091,14 +1091,14 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	BUG_ON(!skb || !tcp_skb_pcount(skb));
 	tp = tcp_sk(sk);
 
-	/* 查看clone_it是否要克隆Socket Buffer，应用Socket Buffer可能正被其他进程使用，就要克隆一个份。 */
+	/* 查看是否要克隆待发送的数据包 */
 	if (clone_it) {
 		TCP_SKB_CB(skb)->tx.in_flight = TCP_SKB_CB(skb)->end_seq
 			- tp->snd_una;
 		oskb = skb;
 
 		tcp_skb_tsorted_save(oskb) {
-			/* 这里收到的skb可能是原始skb的克隆，也可能是来自重传引擎的一份拷贝。*/
+			/* 如果已经被克隆的skb，则 进行复制skb。否则 克隆一份。*/
 			if (unlikely(skb_cloned(oskb)))
 				skb = pskb_copy(oskb, gfp_mask);
 			else
@@ -1143,7 +1143,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	 * tp->pachets_out确定发送队列中是否为空，阻塞控制计算方法：
 	 * 传送队列上的数据包 + 必须快速重传数据包 - 留在网络上的数据包，
 	 * 如果等于0表示不会阻塞，这时发送时间标志。
-	*/
+	 */
 	/* if no packet is in qdisc/device queue, then allow XPS to select
 	 * another queue. We can be called from tcp_tsq_handler()
 	 * which holds one reference to sk.
@@ -1218,6 +1218,8 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		 */
 		th->window	= htons(min(tp->rcv_wnd, 65535U));
 	}
+
+	/* 通过TCP MD5签名来保护BGP会话操作相关 */
 #ifdef CONFIG_TCP_MD5SIG
 	/* Calculate the MD5 hash, as we have all we need now */
 	if (md5) {
@@ -1249,7 +1251,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	tp->segs_out += tcp_skb_pcount(skb);
 
-	/* 这里会设置skb的gso信息，分段长度和分段数量。 */
+	/* 这里会设置skb的gso信息，即分段长度和分段数量。 */
 	/* OK, its time to fill skb_shinfo(skb)->gso_{segs|size} */
 	skb_shinfo(skb)->gso_segs = tcp_skb_pcount(skb);
 	skb_shinfo(skb)->gso_size = tcp_skb_mss(skb);
@@ -1280,7 +1282,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 
 /* TCP数据最终都是通过         tcp_transmit_skb() 函数传送给IP层的。主要工作是构建TCP的首部，并将包交付给IP层。
- * 由于数据段需要等到ACK后才能释放，所以，需要在发送队列中长期保留一份skb的备份。
+ * 由于数据段需要等到ACK后才能释放，因此，在发送前会根据参数确定是克隆还是复制一份SKB用于发送。
  * 使用场景包括：
  *	.来自用户空间的数据发送
  *	.重传数据包 - tcp_retransmit_skb()
@@ -2496,9 +2498,7 @@ void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type)
  * 
  * 最后调用：tcp_transmit_skb()进行发送。
 */
-
 /* http://sunjiangang.blog.chinaunix.net/uid-9543173-id-3543419.html */
-
 static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			   int push_one, gfp_t gfp)
 {
@@ -2648,7 +2648,12 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		if (tcp_small_queue_check(sk, skb, 0))
 			break;
 
-		/* TCP header构造等，最终调用ip_queue_xmit()将数据发送到网络层。*/
+		/* 构造TCP header等，最终调用ip_queue_xmit()将数据发送到网络层。
+		 * 注意：
+		 * 这里clone_it传入的是1，因为 TCP发送方在接收方确认收到数据之前，始终在发送队列中
+		 * 保留一份SKB的备份。要实现这种备份，用克隆SKB的方法是最有效的。先创建一个纯数据
+		 * 区的TCP包，然后标识该SKB已被克隆，最后 TCP发送引擎用克隆的SKB来建立TCP和IPv4首部。
+		 */
 		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
 			break;
 
@@ -2660,9 +2665,9 @@ repair:
 		tcp_event_new_data_sent(sk, skb);
 
 		
-      		/* 更新struct tcp_sock中的snd_sml字段。snd_sml表示最近发送的小包(小于MSS的段)的最后一个字节序号，
-        	 * 在发送成功后，如果报文小于MSS，即更新该字段，主要用来判断是否启动nagle算法
-        	 */
+		/* 更新struct tcp_sock中的snd_sml字段。snd_sml表示最近发送的小包(小于MSS的段)的最后一个字节序号，
+		 * 在发送成功后，如果报文小于MSS，即更新该字段，主要用来判断是否启动nagle算法
+		 */
 		tcp_minshall_update(tp, mss_now, skb);
 
 		/* 更新发送数据段数量 */
@@ -2678,7 +2683,7 @@ repair:
 	else
 		tcp_chrono_stop(sk, TCP_CHRONO_RWND_LIMITED);
 
-	/* 本次有数据发送，拥塞相关数据更新 */
+	/* 本次有数据发送，则对tcp拥塞窗口相关数据更新 */
 	if (likely(sent_pkts)) {
 		if (tcp_in_cwnd_reduction(sk))
 			tp->prr_out += sent_pkts;
@@ -2693,7 +2698,9 @@ repair:
 		return false;
 	}
 
-	/* 本次无数据发送，已发出未确认的数据段不为0，或者发送队列为空，认为成功。*/
+	/* 如果本次没有数据发送，则根据已发送但未确认的报文数packets_out和sk_write_queue返回。
+	 * 如果packets_out不为零且sk_write_queue为不为空，都视为有数据发出，因此，返回成功。
+	 */
 	return !tp->packets_out && !tcp_write_queue_empty(sk);
 }
 

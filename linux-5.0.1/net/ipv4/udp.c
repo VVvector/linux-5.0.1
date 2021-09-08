@@ -1002,8 +1002,9 @@ int udp_cmsg_send(struct sock *sk, struct msghdr *msg, u16 *gso_size)
 }
 EXPORT_SYMBOL_GPL(udp_cmsg_send);
 
-/*udp的send函数*/
-/*UDP sock发送flow，从user space的sendto()调用到该函数。*/
+/* udp的send函数:
+ * UDP sock发送flow，从user space的send/sendto(), sendmsg/sendmmsg()等调用到该函数。
+ */
 int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct inet_sock *inet = inet_sk(sk);
@@ -1044,11 +1045,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		2. Pass MSG_MORE as one of the flags when calling send, sendto, or sendmsg from your program.
 		These options are documented in the UDP man page and the send / sendto / sendmsg man page, respectively.
 	*/
-	/* croked feature： kernel会把用户层多次传下来的数据进行一个打包，
-	 * 然后再调用send()接口一次性往下传 （需要用户设定）。 提高效率。
+	/* croked feature：
+	 * kernel会把用户层多次传下来的数据进行一个打包，
+	 * 然后，再调用send()接口一次性往下传 （需要用户设定）。 提高效率。
 	 *
 	 * 这个函数指针将在__ip_append_data()函数中解析用户层传入的数据，
-	 * 然后，将用户数据拷贝到内核buffer skb_buff中。
+	 * 然后，将用户数据拷贝到内核buffer-skb_buff中。
 	 */
 	getfrag = is_udplite ? udplite_getfrag : ip_generic_getfrag;
 
@@ -1086,7 +1088,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	/*
 	 * Get and verify the address.
 	 */
-	 /* 2. get the UDP destination address and port */
+	/* 2. get the UDP destination address and port */
 	/* 2.1 地址通过辅助结构（struct msghdr）传入 */
 	if (usin) {
 		if (msg->msg_namelen < sizeof(*usin))
@@ -1100,6 +1102,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		dport = usin->sin_port;
 		if (dport == 0)
 			return -EINVAL;
+
 	/* 2.2 如果之前 socket 已经建立连接，那 socket 本身就存储了目标地址 */
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
@@ -1116,7 +1119,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	ipcm_init_sk(&ipc, inet);
 	ipc.gso_size = up->gso_size;
 
-	/* 处理一些辅助信息
+	/* 处理一些辅助信息:
 	 * 1. 用户程序可将请求信息组织成struct msghdr类型变量。例如，IP_PKTINFO
 	 * 2. setsockopt可以在socket级别设置发送包的IP_TTL和IP_TOS。
 	 * 而辅助消息允许在每个数据包级别设置 TTL 和 TOS 值。
@@ -1284,6 +1287,7 @@ back_from_confirm:
 	/* 将处理 UDP cork 和 uncorked 情况。 */
 	/* Lockless fast path for the non-corking case. */
 	/* 9. Fast path for uncorked UDP sockets: Prepare data for transmit */
+
 	/* uncorked UDP sockets 快速路径：准备待发送数据 */
 	if (!corkreq) {
 		struct inet_cork cork;
