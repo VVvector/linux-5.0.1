@@ -322,6 +322,7 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	if (err)
 		goto failure;
 
+	/* 设置socket的tx hash */
 	sk_set_txhash(sk);
 
 	/*
@@ -338,8 +339,10 @@ int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 	/* 将目的地址提交到套接字 */
 	/* OK, now commit destination to socket.  */
+
 	/* 设置GSO类型为TCPV4, 该类型值会体现在每个skb中，底层在分段时，需要
 	 * 根据该类型区分L4协议是哪个，以做不同的处理。
+	 * 即在发送端发起connect连接或三次握手建立完成（tcp_v4_syn_recv_sock），会开启GSO。
 	 */
 	sk->sk_gso_type = SKB_GSO_TCPV4;
 	sk_setup_caps(sk, &rt->dst);

@@ -73,6 +73,7 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	/* 拿到TCP头部 */
 	th = tcp_hdr(skb);
 	thlen = th->doff * 4;
+
 	/* 检测报文长度至少由tcp头部长度 */
 	if (thlen < sizeof(*th))
 		goto out;
@@ -110,7 +111,7 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 
 	/* skb_segment是真正的分段实现。
 	 * 每个TCP的GSO分片是包含了TCP头部信息的，这也符合TCP层的分段逻辑。
-	 * 另外注意这里传递给skb_segment做分段时是不带TCP首部的。
+	 * 另外注意这里传递给skb_segment做分段时是不带TCP首部的，即只对tcp payload做segment。
 	 */
 	segs = skb_segment(skb, features);
 	if (IS_ERR(segs))

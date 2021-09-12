@@ -596,6 +596,7 @@ struct netdev_queue {
  * read-mostly part
  */
 	struct net_device	*dev;
+	/* 该txq对应的qdisc */
 	struct Qdisc __rcu	*qdisc;
 	struct Qdisc		*qdisc_sleeping;
 #ifdef CONFIG_SYSFS
@@ -1963,6 +1964,7 @@ struct net_device {
 /*
  * Cache lines mostly used on transmit path
  */
+ 	/* 存放netdev所有的txq */
 	struct netdev_queue	*_tx ____cacheline_aligned_in_smp;
 	unsigned int		num_tx_queues;
 	unsigned int		real_num_tx_queues;
@@ -4494,6 +4496,13 @@ netdev_features_t passthru_features_check(struct sk_buff *skb,
 					  netdev_features_t features);
 netdev_features_t netif_skb_features(struct sk_buff *skb);
 
+/*
+ * 这个函数可以认为是检验是否具有tso能力，主要的调用地方有两个:
+ * 1、tcp层connect或三次握手完成时调用，这个调用流程里，如果开启GSO，则features同时会置上TSO，
+ * 而GSO默认都是开启的，因此tcp层调用这个接口，会返回true
+ * 2、dev层将skb发送给驱动前调用，判断是否需要做TSO，这个调用流程里，features直接等于dev->features，
+ * 如果网卡没有TSO能力，则features不会有TSO的标志，那这个函数就会返回false
+ */
 static inline bool net_gso_ok(netdev_features_t features, int gso_type)
 {
 	netdev_features_t feature = (netdev_features_t)gso_type << NETIF_F_GSO_SHIFT;

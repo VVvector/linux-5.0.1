@@ -2871,7 +2871,7 @@ static u16 skb_tx_hash(const struct net_device *dev,
 	u16 qoffset = 0;
 	u16 qcount = dev->real_num_tx_queues;
 
-	/*如果有多个tc,即多队列， 例如 mqprio*/
+	/* 如果有多个tc,即多队列， 例如 mqprio */
 	if (dev->num_tc) {
 		u8 tc = netdev_get_prio_tc_map(dev, skb->priority);
 
@@ -3038,9 +3038,10 @@ struct sk_buff *skb_mac_gso_segment(struct sk_buff *skb,
 	if (unlikely(!type))
 		return ERR_PTR(-EINVAL);
 
+	/* 去掉vlan和mac header部分，即下面处理的就是ip layer的数据了。 */
 	__skb_pull(skb, vlan_depth);
 
-	/* 调用上层的gso分段函数, 例如，inet_gso_segment()*/
+	/* 调用上层的gso分段函数, 例如，inet_gso_segment()，ipv6_gso_segment()*/
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, &offload_base, list) {
 		if (ptype->type == type && ptype->callbacks.gso_segment) {
@@ -3050,7 +3051,7 @@ struct sk_buff *skb_mac_gso_segment(struct sk_buff *skb,
 	}
 	rcu_read_unlock();
 
-	/* 把skb->data再次指向mac header */
+	/* 再把mac header还原回去 */
 	__skb_push(skb, skb->data - skb_mac_header(skb));
 
 	return segs;
@@ -3087,6 +3088,7 @@ struct sk_buff *__skb_gso_segment(struct sk_buff *skb,
 {
 	struct sk_buff *segs;
 
+	/* 检查是否需要做checksum，一般情况下，这里不需要做checksum。 */
 	if (unlikely(skb_needs_check(skb, tx_path))) {
 		int err;
 
@@ -3100,6 +3102,7 @@ struct sk_buff *__skb_gso_segment(struct sk_buff *skb,
 	 * support segmentation on this frame without needing additional
 	 * work.
 	 */
+	/* tunnel相关的gso */
 	if (features & NETIF_F_GSO_PARTIAL) {
 		netdev_features_t partial_features = NETIF_F_GSO_ROBUST;
 		struct net_device *dev = skb->dev;
@@ -3118,7 +3121,7 @@ struct sk_buff *__skb_gso_segment(struct sk_buff *skb,
 	skb_reset_mac_header(skb);
 	skb_reset_mac_len(skb);
 
-	/* 调用上层的gso offload函数，对skb进行gso处理。 */
+	/* 调用上层的gso offload函数，对skb进行gso处理，返回segment后的segs。 */
 	segs = skb_mac_gso_segment(skb, features);
 
 	if (unlikely(skb_needs_check(skb, tx_path) && !IS_ERR(segs)))
@@ -3187,6 +3190,7 @@ static netdev_features_t net_mpls_features(struct sk_buff *skb,
 }
 #endif
 
+/* 协调，即检查各features */
 static netdev_features_t harmonize_features(struct sk_buff *skb,
 	netdev_features_t features)
 {
@@ -3227,6 +3231,7 @@ static netdev_features_t gso_features_check(const struct sk_buff *skb,
 {
 	u16 gso_segs = skb_shinfo(skb)->gso_segs;
 
+	/* 如果skb的gso_segs大于net dev所支持的最大segs，表示该skb不应该由HW进行gso offload。 */
 	if (gso_segs > dev->gso_max_segs)
 		return features & ~NETIF_F_GSO_MASK;
 
@@ -3242,6 +3247,7 @@ static netdev_features_t gso_features_check(const struct sk_buff *skb,
 	/* Make sure to clear the IPv4 ID mangling feature if the
 	 * IPv4 header has the potential to be fragmented.
 	 */
+	/* 如果该skb是TCPV4 GSO， 且没有置Don't Frag, 则要去掉TSO_MANGLEID,即ip id是可能被修改的。*/
 	if (skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4) {
 		struct iphdr *iph = skb->encapsulation ?
 				    inner_ip_hdr(skb) : ip_hdr(skb);
@@ -3268,6 +3274,12 @@ netdev_features_t netif_skb_features(struct sk_buff *skb)
 	if (skb->encapsulation)
 		features &= dev->hw_enc_features;
 
+	/* 如果该skb有vlan tag，则查看netdev是否支持vlan_ctag和vlan_stag.
+	 * vlan ctag: vlan customers tag，为用户的私网VLAN tag，设备依靠该Tag在私网中传输报文。
+	 * vlan stag: vlan service tag, 为运营商分配给用户的公网VLAN tag，设备依靠该Tag在公网中传输QinQ报文。
+	 * QinQ: 802.1q in 802.1q的简称，是基于IEEE 802.1q技术的一种比较简单的二层VPN协议。
+	 * VPN: virtual private networks 虚拟专用网络，用于在公用网络上建立专用网络，进行加密通讯。
+	 */
 	if (skb_vlan_tagged(skb))
 		features = netdev_intersect_features(features,
 						     dev->vlan_features |
@@ -3280,6 +3292,7 @@ netdev_features_t netif_skb_features(struct sk_buff *skb)
 	else
 		features &= dflt_features_check(skb, dev, features);
 
+	/* 协调各features */
 	return harmonize_features(skb, features);
 }
 EXPORT_SYMBOL(netif_skb_features);
@@ -3338,6 +3351,9 @@ out:
 static struct sk_buff *validate_xmit_vlan(struct sk_buff *skb,
 					  netdev_features_t features)
 {
+	/* 如果skb有vlan tag，且netdev不支持vlan tag offload，软件
+	 * 就要报vlan tag添加到payload data中。
+	 */
 	if (skb_vlan_tag_present(skb) &&
 	    !vlan_hw_offload_capable(features, skb->vlan_proto))
 		skb = __vlan_hwaccel_push_inside(skb);
@@ -3360,8 +3376,10 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 {
 	netdev_features_t features;
 
-	/* 获取该skb对于的net device feature */
+	/* 获取该skb对应的net device的features, 用于后续判断。 */
 	features = netif_skb_features(skb);
+
+	/* 检查是否需要将vlan header加入到skb payload data中 */
 	skb = validate_xmit_vlan(skb, features);
 	if (unlikely(!skb))
 		goto out_null;
@@ -3370,7 +3388,10 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 	if (unlikely(!skb))
 		goto out_null;
 
-	/* 查看该skb和netdev是否开启了gso，则进行gso操作 */
+	/* 1. 查看该skb是否是gso packet
+	 * 2. 查看netdev是否支持gso HW offload，例如，TSO, UDP_L4
+	 * 如果skb是gso packet，且netdev不支持gso HW offload，则会进行SW gso处理。
+	 */
 	if (netif_needs_gso(skb, features)) {
 		struct sk_buff *segs;
 
@@ -3383,6 +3404,7 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 		if (IS_ERR(segs)) {
 			goto out_kfree_skb;
 		} else if (segs) {
+			/* 是否掉gso之前的skb */
 			consume_skb(skb);
 			skb = segs;
 		}
@@ -3413,6 +3435,7 @@ static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device 
 		}
 	}
 
+	/* XFRM offload相关 */
 	skb = validate_xmit_xfrm(skb, features, again);
 
 	return skb;
@@ -3430,18 +3453,20 @@ struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *d
 
 	for (; skb != NULL; skb = next) {
 		next = skb->next;
-		/* 把这个skb从list中拿了下来 */
+
 		skb_mark_not_on_list(skb);
 
-		/* 将gso返回的多个skb buff用链表串起来， */
 		/* in case skb wont be segmented, point to itself */
 		skb->prev = skb;
 
-		/* 验证要发送的skb数据包， 例如 gso,   checksum */
+		/* 验证要发送的skb数据包， 例如 gso处理,   checksum
+		 * 这里也可能返回一个skb list
+		 */
 		skb = validate_xmit_skb(skb, dev, again);
 		if (!skb)
 			continue;
 
+		/* 将gso返回的多个skb buff用链表串起来， */
 		if (!head)
 			head = skb;
 		else
@@ -3465,6 +3490,7 @@ static void qdisc_pkt_len_init(struct sk_buff *skb)
 	/* To get more precise estimation of bytes sent on wire,
 	 * we add to pkt_len the headers size of all segments
 	 */
+	/* 为了更精确的预估发送的数据，这里会加上所有分片的头部长度。 */
 	if (shinfo->gso_size)  {
 		unsigned int hdr_len;
 		u16 gso_segs = shinfo->gso_segs;
@@ -3509,6 +3535,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 
 	qdisc_calculate_pkt_len(skb, q);
 
+	/* 不需要锁的qdisc的enqueue操作 */
 	if (q->flags & TCQ_F_NOLOCK) {
 		if (unlikely(test_bit(__QDISC_STATE_DEACTIVATED, &q->state))) {
 			__qdisc_drop(skb, &to_free);
@@ -3533,14 +3560,15 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 	if (unlikely(contended))
 		spin_lock(&q->busylock);
 
-	/* 保证多核之间的竞态 */
+	/* 拿到qdisc的锁，保证多核之间的竞态能够正常运行 */
 	spin_lock(root_lock);
-	
+
+	/* 如果该qdisc是为激活状态，就直接drop掉skb。 */
 	if (unlikely(test_bit(__QDISC_STATE_DEACTIVATED, &q->state))) {
 		__qdisc_drop(skb, &to_free);
 		rc = NET_XMIT_DROP;
 
-	/* 如果该qdisc允许bypass 且 qdisc skb为空，且，第一次进入qdisc */
+	/* 如果该qdisc允许bypass 且qdisc中没有skb，且是第一次进入qdisc，就直接发送数据到netdev。 */
 	} else if ((q->flags & TCQ_F_CAN_BYPASS) && !qdisc_qlen(q) &&
 		   qdisc_run_begin(q)) {
 		/*
@@ -3551,7 +3579,7 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 
 		qdisc_bstats_update(q, skb);
 
-		/* 直接发送数据出去 */
+		/* 直接发送数据到netdev */
 		if (sch_direct_xmit(skb, q, dev, txq, root_lock, true)) {
 			if (unlikely(contended)) {
 				spin_unlock(&q->busylock);
@@ -3563,15 +3591,17 @@ static inline int __dev_xmit_skb(struct sk_buff *skb, struct Qdisc *q,
 		qdisc_run_end(q);
 		rc = NET_XMIT_SUCCESS;
 
-	/* 先enqueue skb，在dequeue这样发送 */
+	/* 否则，先enqueue skb，在dequeue skb发送到netdev */
 	} else {
 		rc = q->enqueue(skb, q, &to_free) & NET_XMIT_MASK;
+
+		/* 表示qdisc正在运行，就不重复执行qdisc */
 		if (qdisc_run_begin(q)) {
 			if (unlikely(contended)) {
 				spin_unlock(&q->busylock);
 				contended = false;
 			}
-			/* 发送数据包 */
+			/* 发送数据包到netdev */
 			__qdisc_run(q);
 			qdisc_run_end(q);
 		}
@@ -3704,10 +3734,10 @@ static int __get_xps_queue_idx(struct net_device *dev, struct sk_buff *skb,
 #endif
 
 /*
-这个函数是这个patch的核心，它的流程也很简单，就是通过当前的cpu id获得对应的xps_maps,
-然后，如果当前的cpu和队列是1:1对应则返回对应的队列id，
-否则计算skb的hash值，根据这个hash来得到在xps_maps 中的queue的位置，从而返回queue id.
-*/
+ * 这个函数是这个patch的核心，它的流程也很简单，就是通过当前的cpu id获得对应的xps_maps,
+ * 然后，如果当前的cpu和队列是1:1对应则返回对应的队列id，
+ * 否则计算skb的hash值，根据这个hash来得到在xps_maps 中的queue的位置，从而返回queue id.
+ */
 
 static int get_xps_queue(struct net_device *dev, struct net_device *sb_dev,
 			 struct sk_buff *skb)
@@ -3724,13 +3754,13 @@ static int get_xps_queue(struct net_device *dev, struct net_device *sb_dev,
 	if (!static_key_false(&xps_rxqs_needed))
 		goto get_cpus_map;
 
-	/*拿到dev的xps_rxqs_map*/
+	/* 拿到dev的xps_rxqs_map */
 	dev_maps = rcu_dereference(sb_dev->xps_rxqs_map);
 	if (dev_maps) {
-		/*获取skb->sk 的 sk_rx_queue_mapping*/
+		/* 获取skb->sk 的 sk_rx_queue_mapping */
 		int tci = sk_rx_queue_get(sk);
 
-		/*获取分配的skb queue index*/
+		/* 获取分配的skb queue index */
 		if (tci >= 0 && tci < dev->num_rx_queues)
 			queue_index = __get_xps_queue_idx(dev, skb, dev_maps,
 							  tci);
@@ -3770,20 +3800,18 @@ u16 dev_pick_tx_cpu_id(struct net_device *dev, struct sk_buff *skb,
 }
 EXPORT_SYMBOL(dev_pick_tx_cpu_id);
 
-/*XPS算法或者skb_tx_hash算法，得到skb对应的tx queue。*/
-/*XPS: 根据CPU来选择对应的队列，而这个CPU map可以通过sysctl来设置：
-	/sys/class/net/ethx/queues/tx-n/xps_cpus 
-	xps_cpus:是一个cpu掩码，表示当前队列对应的cpu。
-*/
-/*
-xps主要就是提高多对列下的数据包发送吞吐量，具体来说就是提高了发送的局部性。按照作者的benchmark，能够提高20%.
-原理很简单:
-	1. 就是根据当前skb对应的hash值(如果当前socket有hash，那么就使用当前socket的)来散列到xps_cpus这个掩码所设置的cpu上，
-		也就是cpu和队列是一个1对1，或者1对多的关系，这样一个队列只可能对应一个cpu，从而提高了传输结构的局部性。
-	2. 没有xps之前的做法是这样的，当前的cpu根据一个skb的4元组hash来选择队列发送数据，也就是说cpu和队列是一个多对多的关系，
-		而这样自然就会导致传输结构的cache line bouncing
-
-*/
+/* XPS算法或者skb_tx_hash算法，得到skb对应的tx queue。
+ * XPS: 根据CPU来选择对应的队列，而这个CPU map可以通过sysctl来设置：
+ * /sys/class/net/ethx/queues/tx-n/xps_cpus 
+ * xps_cpus:是一个cpu掩码，表示当前队列对应的cpu。
+ *
+ * XPS主要就是提高多txq下的数据包发送吞吐量，具体来说就是提高了发送的局部性。按照作者的benchmark，能够提高20%.
+ * 原理很简单:
+ * 1. 根据当前skb对应的hash值(如果当前socket设置了hash，那么就使用当前socket的) 来散列到xps_cpus这个掩码所设置的cpu上，
+ * 也就是cpu和队列是一个1对1，或者1对多的关系，这样一个队列只可能对应一个cpu，从而提高了传输结构的局部性。
+ * 2. 没有xps之前的做法是这样的，当前的cpu根据一个skb的4元组hash来选择队列发送数据，也就是说cpu和队列是一个多对多的关系，
+ * 而这样自然就会导致传输结构的cache line bouncing
+ */
 static u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
 			    struct net_device *sb_dev)
 {
@@ -3792,20 +3820,26 @@ static u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
 
 	sb_dev = sb_dev ? : dev;
 
-	/*ooo_okay: 由传输层负责适当地设置， 例如：TCP在已经ack了连接的所有数据时可以设置ooo_key*/
-	/*ooo_okay：数据流中没有未完成的数据包; 或者，为非法值； 则可以重新选择发送队列*/
+	/* ooo_okay: 表示数据流中没有未完成的数据包，由传输层负责适当地设置，
+	 * 例如：TCP在已经ack了连接的所有数据时可以设置ooo_key。
+	 *
+	 * 设置了ooo_okay，获取txq id为非法值，则可以重新选择发送队列
+	 */
 	if (queue_index < 0 || skb->ooo_okay ||
 	    queue_index >= dev->real_num_tx_queues) {
 
-		/*通过XPS算法获取发送队列索引。
-		XPS: Transmit Packet Steering； */
+		/* 通过XPS算法获取发送队列索引。
+		 * XPS: Transmit Packet Steering；
+		 */
 		int new_index = get_xps_queue(dev, sb_dev, skb);
 
-		/*使用默认算法，优先使用rx对应的tx队列，否则使用hash的方式映射*/
+		/* 如果没有enable XPS算法来选择txq，则使用默认算法，
+		 * 优先使用rx对应的tx队列，否则使用hash的方式映射。
+		 */
 		if (new_index < 0)
 			new_index = skb_tx_hash(dev, sb_dev, skb);
 
-		/*更新sk_tx_queue_mapping*/
+		/* 更新sk_tx_queue_mapping */
 		if (queue_index != new_index && sk &&
 		    sk_fullsock(sk) &&
 		    rcu_access_pointer(sk->sk_dst_cache))
@@ -3814,7 +3848,7 @@ static u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb,
 		queue_index = new_index;
 	}
 
-	/*返回发送队列*/
+	/* 返回发送队列id */
 	return queue_index;
 }
 
@@ -3824,6 +3858,9 @@ struct netdev_queue *netdev_pick_tx(struct net_device *dev,
 {
 	int queue_index = 0;
 
+	/* 获取该skb的sender_cpu，因为没人赋值，即表示为初始值0。
+	 * 所以，这里会被赋值为当前cpu。
+	 */
 #ifdef CONFIG_XPS
 	u32 sender_cpu = skb->sender_cpu - 1;
 
@@ -3831,24 +3868,29 @@ struct netdev_queue *netdev_pick_tx(struct net_device *dev,
 		skb->sender_cpu = raw_smp_processor_id() + 1;
 #endif
 
+	/* 如果netdev不止一个txq，则需要按照一定的规则进行选择。 */
 	if (dev->real_num_tx_queues != 1) {
 		const struct net_device_ops *ops = dev->netdev_ops;
 
-		/*如果dirver实现了自己的ndo_slect_queue，则调用driver的ops去拿到queue id。*/
+		/* 如果netdev dirver实现了自己的ndo_slect_queue()，则调用driver的ops去拿到queue id。*/
 		if (ops->ndo_select_queue)
 			queue_index = ops->ndo_select_queue(dev, skb, sb_dev,
 							    __netdev_pick_tx);
 
-		/*否则，采用系统的算法       XPS 或者 skb_tx_hash*/
+		/* 否则，采用系统的算法       XPS 或者 skb_tx_hash */
 		else
 			queue_index = __netdev_pick_tx(dev, skb, sb_dev);
 
-		/* 简单检查一下 是否无效 */
+		/* 检查选择出的txq id是否无效, 并进行修正。
+		 * 这里如果发现是非法值，就设置为txq0。
+		 */
 		queue_index = netdev_cap_txqueue(dev, queue_index);
 	}
 
-	/*修改queue mapping*/
+	/* 设置skb所属的txq id */
 	skb_set_queue_mapping(skb, queue_index);
+
+	/* 根据txq id获取该netdev txq */
 	return netdev_get_tx_queue(dev, queue_index);
 }
 
@@ -3894,12 +3936,16 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 	/* Disable soft irqs for various locks below. Also
 	 * stops preemption for RCU.
 	 */
-	/*关闭软中断*/
+	/* 关闭软中断- 同时也关闭了抢占 */
 	rcu_read_lock_bh();
 
+	/* 更新skb的priority，可从socket和cgroup中获取priority的设定。 */
 	skb_update_prio(skb);
 
+	/* 更新skb的长度，如果是gso skb，会预先加上每个分片的header长度。 */
 	qdisc_pkt_len_init(skb);
+
+	/* 这里ubuntu会默认enable的。即ingress流控 */
 #ifdef CONFIG_NET_CLS_ACT
 	skb->tc_at_ingress = 0;
 # ifdef CONFIG_NET_EGRESS
@@ -3918,23 +3964,27 @@ static int __dev_queue_xmit(struct sk_buff *skb, struct net_device *sb_dev)
 	else
 		skb_dst_force(skb);
 
-	/*取出net device的tx queue*/
+	/* 获取该skb所属的netdev tx queue */
 	txq = netdev_pick_tx(dev, skb, sb_dev);
 
-	/* 拿到txq对应的qdisc */
+	/* 拿到txq对应的qdisc，说明每个txq都可能设置不同的qdisc。
+	 * 这里因为有多个读者，所有用rcu来保护。
+	 */
 	q = rcu_dereference_bh(txq->qdisc);
 
 	trace_net_dev_queue(skb);
 
-	/*如果这个设备启动了TC, 就对skb进行Qos处理。
-		一般是先调用该qdisc的enqueue方法将skb压入队列，
-		然后，调用该qdisc的dequeue方法从队列中取出数据包；
-		然后 调用网卡驱动的发送函数发送数据。
-	*/
+	/* 如果这个设备启动了TC, 就对skb进行QoS处理。
+	 * 一般是先调用该qdisc的enqueue方法将skb压入队列，
+	 * 然后，调用该qdisc的dequeue方法从队列中取出数据包；
+	 * 然后 调用网卡驱动的发送函数发送数据。
+	 */
 	if (q->enqueue) {
 		rc = __dev_xmit_skb(skb, q, dev, txq);
 		goto out;
 	}
+
+	/* 下面是处理没有设置qdisc的设备，例如lo，tun等虚拟网卡 */
 
 	/* The device has no queue. Common case for software devices:
 	 * loopback, all the sorts of tunnels...
@@ -3996,7 +4046,12 @@ out:
 	return rc;
 }
 
-/*该函数是网络设备驱动的传输入口*/
+/* 该函数是网络设备子系统的传输入口
+ * 在链路层，每个数据包通过邻居子系统后，都由dev_queue_xmit()来进行输出，然后，根据输出网络设备
+ * 的排队规程qdisc来确定是否通过QoS之后发送，还是直接调用网卡驱动注册的发送函数dev.ndo_start_xmit()
+ * 把数据包发送出去。在启用QoS的情况下，首先，将待发送的数据包enqueue到QoS队列中，然后，调用dequeue
+ * 或者切换到NET_TX 软中断中dequeue，再调用dev.ndo_start_xmit()将数据发送到网络设备中。
+ */
 int dev_queue_xmit(struct sk_buff *skb)
 {
 	return __dev_queue_xmit(skb, NULL);

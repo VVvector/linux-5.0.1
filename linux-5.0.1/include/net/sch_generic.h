@@ -142,6 +142,7 @@ static inline bool qdisc_is_running(struct Qdisc *qdisc)
 	return (raw_read_seqcount(&qdisc->running) & 1) ? true : false;
 }
 
+/* 该qdisc是否是刚开始运行 */
 static inline bool qdisc_run_begin(struct Qdisc *qdisc)
 {
 	if (qdisc->flags & TCQ_F_NOLOCK) {
@@ -153,6 +154,7 @@ static inline bool qdisc_run_begin(struct Qdisc *qdisc)
 	/* Variant of write_seqcount_begin() telling lockdep a trylock
 	 * was attempted.
 	 */
+	 /* 顺序锁 */
 	raw_write_seqcount_begin(&qdisc->running);
 	seqcount_acquire(&qdisc->running.dep_map, 0, 1, _RET_IP_);
 	return true;

@@ -1474,7 +1474,7 @@ new_segment:
 			process_backlog = true;
 
 			/* 这里tcp checksum初始化为CHECKSUM_PARTIAL。
-			 * 1. 在tcp层，就只算伪头部 checksum。
+			 * 1. 表示协议栈只做ip头和伪头部的checksum，payload需要硬件帮忙做。
 			 * 2. 后面的数据，放到 /net/core/dev.c中的 xmit_one()中做最后确定是否计算。
 			 * 如果网卡支持校验和计算，那么由硬件计算报头和首部的校验和。
 			 */

@@ -223,7 +223,7 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate,
 	struct sk_buff *skb = NULL;
 
 	/* 表示该qdisc中，上次的gso_skb没有发送完成。即 需要继续发送该gso_skb。
-	 * 且不需要再次检查gso，checksum这些了。validate = false。
+	 * 所有，就不需要再次检查gso，checksum这些了。validate = false。
 	 */
 	*packets = 1;
 	if (unlikely(!skb_queue_empty(&q->gso_skb))) {
@@ -314,13 +314,14 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 	if (root_lock)
 		spin_unlock(root_lock);
 
-	/*  这里需要验证     该skb是否是开启了gso或者checksum offload 
-	 * 注意：这里要进行gso和hw checksum 的检查或处理。
+	/* 这里需要验证     该skb是否是开启了gso或者checksum offload 
+	 * 注意：这里要进行gso和hw checksum 的检查或处理; 或者做GSO处理。
 	 */
 	/* Note that we validate skb (GSO, checksum, ...) outside of locks */
 	if (validate)
 		skb = validate_xmit_skb_list(skb, dev, &again);
 
+	/* XFRM: transform，linux网络子系统安全性模块 */
 #ifdef CONFIG_XFRM_OFFLOAD
 	if (unlikely(again)) {
 		if (root_lock)
@@ -332,7 +333,7 @@ bool sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 #endif
 
 	if (likely(skb)) {
-		/* 有spinlock保护，所有这里看出ndo_start_xmit()是不能阻塞的。 */ 
+		/* 有spinlock保护，所有这里看出dev.ndo_start_xmit()是不能sleep的。 */ 
 		HARD_TX_LOCK(dev, txq, smp_processor_id());
 		if (!netif_xmit_frozen_or_stopped(txq))
 			skb = dev_hard_start_xmit(skb, dev, txq, &ret);
@@ -388,7 +389,11 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 	bool validate;
 
 	/* Dequeue packet */
-	/* 从qdisc中取出一个skb */
+	/* 从qdisc中取出一个skb，如果还有上次没发送完的GSO数据包，则将其取出，否则
+	 * 从qdisc队列中取出待发送的数据包。
+	 *
+	 * 这里的skb也可能是一个skb list。
+	 */
 	skb = dequeue_skb(q, &validate, packets);
 	if (unlikely(!skb))
 		return false;
@@ -399,6 +404,7 @@ static inline bool qdisc_restart(struct Qdisc *q, int *packets)
 	dev = qdisc_dev(q);
 	txq = skb_get_tx_queue(dev, skb);
 
+	/* 发送数据包，会有锁保护，以保证一个txq只有一个cpu核调用该函数进行发送。 */
 	return sch_direct_xmit(skb, q, dev, txq, root_lock, validate);
 }
 

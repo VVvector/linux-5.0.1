@@ -2575,6 +2575,7 @@ static inline bool sk_fullsock(const struct sock *sk)
 static inline struct sk_buff *sk_validate_xmit_skb(struct sk_buff *skb,
 						   struct net_device *dev)
 {
+	/* ubuntu默认打开的 */
 #ifdef CONFIG_SOCK_VALIDATE_XMIT
 	struct sock *sk = skb->sk;
 

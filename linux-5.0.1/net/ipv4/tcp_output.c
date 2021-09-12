@@ -1920,7 +1920,9 @@ static inline unsigned int tcp_cwnd_test(const struct tcp_sock *tp,
  * This must be invoked the first time we consider transmitting
  * SKB onto the wire.
  */
- /* 用MSS初始化skb中的gso字段，返回本skb将会被分割成几个TSO段传输 */
+ /* 该函数会设置gso_size和分段个数gso_segs，其中gso_size为mss值。
+  * 这两个参数用于告诉硬件或者软件gso做segment时使用，需要拆分成的数据包个数和分片长度。
+  */
 static int tcp_init_tso_segs(struct sk_buff *skb, unsigned int mss_now)
 {
 	int tso_segs = tcp_skb_pcount(skb);

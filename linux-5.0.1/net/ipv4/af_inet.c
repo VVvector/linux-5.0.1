@@ -1342,7 +1342,7 @@ void inet_sk_state_store(struct sock *sk, int newstate)
 
 /* ip层GSO操作只是提供接口给链路层来访问传输层(tcp,udp),
  * 因此IP层实现的接口只是根据分段数据报获取对应的传输层接口，
- * 并对完成GSO分段后的IP数据报重新计算校验和。
+ * 并对完成GSO分段后的IP数据报重新计算校验和和分配seq序列号。
  */
 struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 				 netdev_features_t features)
@@ -1360,7 +1360,7 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	skb_reset_network_header(skb);
 	nhoff = skb_network_header(skb) - skb_mac_header(skb);
 
-	/* 分段数据至少大于IP首部长度 */
+	/* 保证segment分段数据buffer至少大于IP首部长度，便于后续对ip header的处理（20bytes） */
 	if (unlikely(!pskb_may_pull(skb, sizeof(*iph))))
 		goto out;
 
@@ -1373,12 +1373,12 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	id = ntohs(iph->id);
 	proto = iph->protocol;
 
-	/* 再次通过首部中的长度字段检测skb长度是否有效 */
+	/* 再次保证skb的ip header部分都在线性区（因为有可能还有ip header扩展部分） */
 	/* Warning: after this point, iph might be no longer valid */
 	if (unlikely(!pskb_may_pull(skb, ihl)))
 		goto out;
 
-	/* 注意：这里已经将data偏移到了传送层头部了，去掉了IP头 */
+	/* 注意：这里已经将data偏移到了传输层头部了，即去掉了IP头 */
 	__skb_pull(skb, ihl);
 
 	encap = SKB_GSO_CB(skb)->encap_level > 0;
@@ -1400,8 +1400,9 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 			goto out;
 	}
 
-	/* 根据协议字段取得上层的协议接口 */
+	/* 根据协议字段取得上层的协议offload接口 */
 	ops = rcu_dereference(inet_offloads[proto]);
+
 	/* 调用上册协议的GSO处理函数, 例如: tcp_gso_segment(), udp4_ufo_fragment() */
 	if (likely(ops && ops->callbacks.gso_segment))
 		segs = ops->callbacks.gso_segment(skb, features);
@@ -1415,7 +1416,7 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	/* 开始处理分段后的skb:
 	 * UDP经过GSO分片后每个分片的IP头部id是一样的，这个符合IP分片的逻辑，
 	 * 但是为什么TCP的GSO分片，IP头部的id会依次加1呢？
-	 * 原因是： tcp建立三次握手的过程中产生合适的mss（具体的处理机制参见TCP/IP详解P257），
+	 * 原因是：tcp建立三次握手的过程中产生合适的mss（具体的处理机制参见TCP/IP详解P257），
 	 * 这个mss肯定是<=网络层的最大路径MTU，然后tcp数据封装成ip数据包通过网络层发送，
 	 * 当服务器端传输层接收到tcp数据之后进行tcp重组。
 	 * 所以正常情况下tcp产生的ip数据包在传输过程中是不会发生分片的！
@@ -1428,17 +1429,18 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 
 		/* 对于UDP进行的IP分片的头部处理逻辑 */
 		if (udpfrag) {
-			/* ip头部偏移字段单位为8字节 */
+			/* 设置offset，因为ip frag_off的非最后一个fragment，都应该是8的倍数，所有这里左移3bits。*/
 			iph->frag_off = htons(offset >> 3);
 
-			/* 设置分片标识 */
+			/* 设置分片标识，非最后一个fragment，应该设置IP_MF。 */
 			if (skb->next)
 				iph->frag_off |= htons(IP_MF);
 
 			offset += skb->len - nhoff - ihl;
 			tot_len = skb->len - nhoff;
+
+		/* 如果还是gso skb，就需要做相关处理，例如：gso_partial */
 		} else if (skb_is_gso(skb)) {
-			/* 对于TCP报，分片后IP头部中id加1 */
 			if (!fixedid) {
 				iph->id = htons(id);
 				id += skb_shinfo(skb)->gso_segs;
@@ -1450,6 +1452,8 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 					  skb->head - (unsigned char *)iph;
 			else
 				tot_len = skb->len - nhoff;
+
+		/* 对于TCP，根据SKB_GSO_TCP_FIXEDID决定是否在分片后IP头部中id加1 */
 		} else {
 			if (!fixedid)
 				iph->id = htons(id++);
@@ -1458,11 +1462,13 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 
 		iph->tot_len = htons(tot_len);
 
-		/* ip checksum计算 */
+		/* 进行ip checksum计算 */
 		ip_send_check(iph);
 		if (encap)
 			skb_reset_inner_headers(skb);
+
 		skb->network_header = (u8 *)iph - skb->head;
+
 		skb_reset_mac_len(skb);
 	} while ((skb = skb->next));
 

@@ -890,7 +890,7 @@ struct sk_buff {
 	sk_buff_data_t		end;
 	unsigned char		*head,
 				*data;
-	unsigned int		truesize; /* 数据包的实际长度，结构长度与数据块长度之和。 */
+	unsigned int		truesize; /* 数据包的实际长度，skb结构长度与数据块长度之和。 */
 	refcount_t		users;
 
 #ifdef CONFIG_SKB_EXTENSIONS
@@ -2278,6 +2278,7 @@ static inline int skb_availroom(const struct sk_buff *skb)
  *	Increase the headroom of an empty &sk_buff by reducing the tail
  *	room. This is only allowed for an empty buffer.
  */
+ /* 调整header room，即预留一部分给协议header使用。 */
 static inline void skb_reserve(struct sk_buff *skb, int len)
 {
 	skb->data += len;
@@ -3050,6 +3051,7 @@ static inline int skb_cow(struct sk_buff *skb, unsigned int headroom)
  *	you only need to push on some header and do not need to modify
  *	the data.
  */
+ /* 扩展skb data的headroom部分 */
 static inline int skb_cow_head(struct sk_buff *skb, unsigned int headroom)
 {
 	return __skb_cow(skb, headroom, skb_header_cloned(skb));

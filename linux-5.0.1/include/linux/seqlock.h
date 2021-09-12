@@ -45,6 +45,10 @@
  * updating starting before the write_seqcountbeqin() and ending
  * after the write_seqcount_end().
  */
+/*
+ * 顺序锁(seqlock)是对读写锁的一种优化,提高了读锁和写锁的独立性。写锁不会被读锁阻塞，
+ * 读锁也不会被写锁阻塞。写锁会被写锁阻塞。
+ */
 typedef struct seqcount {
 	unsigned sequence;
 #ifdef CONFIG_DEBUG_LOCK_ALLOC

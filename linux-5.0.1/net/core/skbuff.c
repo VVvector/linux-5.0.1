@@ -2602,7 +2602,9 @@ __wsum skb_checksum(const struct sk_buff *skb, int offset,
 EXPORT_SYMBOL(skb_checksum);
 
 /* Both of above in one bottle. */
-
+/* 将 skb 从offset处开始拷贝len个字节的数据到 to 中，
+ * 并对offset到offset+len之间的数据进行checksum计算。
+ */
 __wsum skb_copy_and_csum_bits(const struct sk_buff *skb, int offset,
 				    u8 *to, int len, __wsum csum)
 {
@@ -2612,6 +2614,7 @@ __wsum skb_copy_and_csum_bits(const struct sk_buff *skb, int offset,
 	int pos = 0;
 
 	/* Copy header. */
+	/* 首先拷贝的数据在线性区，即线性区有要拷贝的数据。 */
 	if (copy > 0) {
 		if (copy > len)
 			copy = len;
@@ -2624,6 +2627,7 @@ __wsum skb_copy_and_csum_bits(const struct sk_buff *skb, int offset,
 		pos	= copy;
 	}
 
+	/* 拷贝非线性区frags[]数据，即非线性区还有要拷贝的数据。 */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		int end;
 
@@ -2660,6 +2664,7 @@ __wsum skb_copy_and_csum_bits(const struct sk_buff *skb, int offset,
 		start = end;
 	}
 
+	/* 拷贝非线性区frag_list中的数据，即要拷贝的数据在非线性区frag_list中。 */
 	skb_walk_frags(skb, frag_iter) {
 		__wsum csum2;
 		int end;
@@ -3528,6 +3533,9 @@ static inline skb_frag_t skb_head_frag_to_page_desc(struct sk_buff *frag_skb)
  * 分成的小skb并不一定都是线性化的，如果之前的skb存在frags数组或者frag_list，
  * 则分成的小skb也可能有指向非线性区域。并不用担心网卡不支持分散聚合IO，
  * 因为之前如果能产生这些非线性数据，就说明网卡一定是支持的。
+ *
+ * 本函数会将gso的skb安装MSS长度进行分段处理，对线性区数据，直接拷贝到分段skb的线性区，
+ * 对非线性区数据，直接将frags指针指向分段的skb的frags。
  */
 struct sk_buff *skb_segment(struct sk_buff *head_skb,
 			    netdev_features_t features)
@@ -3538,10 +3546,9 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	skb_frag_t *frag = skb_shinfo(head_skb)->frags;
 	unsigned int mss = skb_shinfo(head_skb)->gso_size;
 
-	/* 得到内层报头的长度：
-	 * 对于TSO: mac头+ip头+tcp头
-	 * 对于GSO_UDP：mac头 + ip头 
-	 * 对于GSO_UDP_L4: mac头 + ip头 + udp头
+	/* TSO: mac header + ip header + tcp header
+	 * GSO_UDP: mac header + ip header
+	 * GSO_UDP_L4: mac header + ip header + upd header
 	 */
 	unsigned int doffset = head_skb->data - skb_mac_header(head_skb);
 	struct sk_buff *frag_skb = head_skb;
@@ -3566,6 +3573,7 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	if (unlikely(!proto))
 		return ERR_PTR(-EINVAL);
 
+	/* 再次检查dev是否支持SG和checksum offload */
 	sg = !!(features & NETIF_F_SG);
 	csum = !!can_checksum_protocol(features, proto);
 
@@ -3611,6 +3619,7 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 			partial_segs = 0;
 	}
 
+	/* 开始正常的进行skb data分片 */
 normal:
 	headroom = skb_headroom(head_skb);
 
@@ -3623,11 +3632,13 @@ normal:
 		int hsize;
 		int size;
 
-		/* offset：为分片已处理的长度，len为skb->len减去直到offset的部分。
-		 * 开始时，offset只是mac header + ip header + tcp header的长度，
-		 * len即tcp payload的长度。随着segment增加, offset每次都增加mss长度。
+		/* offset：为分片已处理的长度，即要分片的起始位置。
+		 * len：为skb->len减去直到offset的部分，即还未被分片的数据长度。
+		 *
+		 * 随着segment片数的增加, offset每次都增加mss长度。
 		 * 因此len的定义是每个segment的payload长度（最后一个segment的payload可能小于一个mss长度）。
-		 * len：为本次要创建的新分片的长度。
+		 * 
+		 * 这里主要是确定每个分片数据的长度。
 		 */
 		if (unlikely(mss == GSO_BY_FRAGS)) {
 			len = list_skb->len;
@@ -3637,26 +3648,26 @@ normal:
 				len = mss;
 		}
 
-		
-		/* hsize为线性区部分的payload减去offset后的大小，如果hsize小于0，
+		/* hsize为线性区数据减去offset后的大小，即线性区待分片数据长度。
+		* 如果hsize小于0，
 		 * 那么说明payload在skb的frags或frag_list中。随着offset一直增长，
-		 * 必定会有hsize一直<0的情况开始出现，除非skb是一个完全linearize化的skb 
+		 * 必定会有hsize小于0的情况开始出现，除非skb是一个完全linearize化的skb 
 		 */
 		hsize = skb_headlen(head_skb) - offset;
 
-		/* 这种情况说明线性区已经没有tcp payload的部分，需要pull数据过来 */
+		/* 说明线性区数据已经分片完成，接下来要对非线性区进行分片了。 */
 		if (hsize < 0)
 			hsize = 0;
 
-		/* 如果不支持NETIF_F_SG或者hsize大于len，那么hsize就为len（本次新分片的长度），
-		 * 此时说明segment的payload还在skb 线性区中。
+		/* 如果不支持NETIF_F_SG 或者 hsize大于len，那么hsize就为len（本次新分片的长度），
+		 * 此时说明segment的payload还在skb的线性区中。
 		 */
 		if (hsize > len || !sg)
 			hsize = len;
 
-		/* hsize为0：表示需要从frags数组或者frag_list链表中拷贝数据。
+		/* 1. hsize为0：表示需要从frags数组或者frag_list链表中拷贝数据。
 		 * i >= nfrags表示frags数组中的数据也被拷贝完了。
-		 * 即这里表示需要从frag_list链表中拷贝数据。
+		 * 这里表示需要从frag_list链表中拷贝数据，下面是clone一个skb，用于存分配数据。
 		 */
 		if (!hsize && i >= nfrags && skb_headlen(list_skb) &&
 		    (skb_headlen(list_skb) == len || sg)) {
@@ -3695,7 +3706,9 @@ normal:
 
 			hsize = skb_end_offset(nskb);
 
-			/* 保证新的skb的headroom有mac header+ip header+tcp/udp+header的大小 */
+			/* 扩展分片skb线性区的header部分，
+			 * 用于后面拷贝源gso skb的header部分，包括mac header + ip header + tcp/udp+header。
+			 */
 			if (skb_cow_head(nskb, doffset + headroom)) {
 				kfree_skb(nskb);
 				goto err;
@@ -3706,10 +3719,9 @@ normal:
 			skb_release_head_state(nskb);
 			__skb_push(nskb, doffset);
 
-		/* 数据从线性区或者frags数组中获取 */
+		/* 2. 数据从线性区或者frags数组中获取，新分配一个skb，用于存分片数据。 */
 		} else {
-
-			 //注意，每次要拷贝出的数据长度为len，其中hsize位于线性区
+			 /* 注意：这里有预留出要拷贝出的数据buffer和header部分。 */
 			nskb = __alloc_skb(hsize + doffset + headroom,
 					   GFP_ATOMIC, skb_alloc_rx_flag(head_skb),
 					   NUMA_NO_NODE);
@@ -3721,18 +3733,29 @@ normal:
 			__skb_put(nskb, doffset);
 		}
 
+		/* 3. 开始进行分片skb处理，包括：
+		 *  1. 将分片skb用链表串起来
+		 *  2. 拷贝源gso skb的header部分，包括mac header, ip header, tcp/udp header等。
+		 *  3.从源gso skb拷贝len长度的payload数据到分片skb中（线性区数据直接拷贝，非线性区数据移动指针指向）
+		 */
+
+		/* 记录每一次分片，并用skb链表串起来。 */
 		if (segs)
 			tail->next = nskb;
 		else
 			segs = nskb;
 		tail = nskb;
 
-		/* 拷贝skb结构中的成员 */
+		/* 只拷贝skb结构中的成员 */
 		__copy_skb_header(nskb, head_skb);
 
 		skb_headers_offset_update(nskb, skb_headroom(nskb) - headroom);
 		skb_reset_mac_len(nskb);
-		
+
+		/* 拷贝原skb线性区的 header数据 到新的分片的skb中。
+		 * 这里可以看出，每个分配的skb都会拷贝gso skb的header部分 doffset。
+		 * 即分片前的header部分。可能会有mac header + ip header + tcp/upd header。
+		 */
 		skb_copy_from_linear_data_offset(head_skb, -tnl_hlen,
 						 nskb->data - tnl_hlen,
 						 doffset + tnl_hlen);
@@ -3740,12 +3763,15 @@ normal:
 		if (nskb->len == len + doffset)
 			goto perform_csum_check;
 
-		/* 如果不支持NETIF_F_SG, 说明frags数组中没有数据，只考虑从线性区中拷贝数据。 */
+		/* 开始从源gso skb中拷贝分片数据到分片skb中。 */
+		/* 不支持NETIF_F_SG：说明frags数组中没有数据，只考虑从线性区中拷贝数据。 */
 		if (!sg) {
 			if (!nskb->remcsum_offload)
 				nskb->ip_summed = CHECKSUM_NONE;
 
-			/* 注意，每次要拷贝出的数据长度为len，其中hsize位于线性区 */
+			/* 将head_skb从offset处开始拷贝len个字节的数据到nskb中，
+			 * 并对offset到offset+len之间的数据进行checksum计算。
+			 */
 			SKB_GSO_CB(nskb)->csum =
 				skb_copy_and_csum_bits(head_skb, offset,
 						       skb_put(nskb, len),
@@ -3755,9 +3781,10 @@ normal:
 			continue;
 		}
 
+		/* 支持NETIF_F_SG：skb的数据可能会在frags非线性区的拷贝情况。 */
 		nskb_frag = skb_shinfo(nskb)->frags;
 
-		/* 如果hsize不为0，那么拷贝hsize的内容到nskb的线性区中 */
+		/* 如果hsize不为0，即要拷贝hsize的内容在head_skb的线性区中，就直接操作skb线性区就好。 */
 		skb_copy_from_linear_data_offset(head_skb, offset,
 						 skb_put(nskb, hsize), hsize);
 
@@ -3768,12 +3795,11 @@ normal:
 		    skb_zerocopy_clone(nskb, frag_skb, GFP_ATOMIC))
 			goto err;
 
-		 /* 注意：每次要拷贝的数据长度是len，其中hsize是位于线性区中，
-		  * 但是随着线性区数据逐渐被处理，hsize可能不够len，
-		  * 这时剩下的(len-hsize)长度就要从frags数组中拷贝了
-		  */
+		/* 注意：每次要拷贝的数据长度是len，其中hsize是位于线性区中，
+		 * 但是随着线性区数据逐渐被处理，hsize可能不够len，
+		 * 这时剩下的(len-hsize)长度就要从frags数组中拷贝了
+		 */
 		while (pos < offset + len) { 
-
 			 /* 如果把frags数组中的数据拷贝完还不够len长度，则需要从frag_list中拷贝了 */
 			if (i >= nfrags) {
 				i = 0;
@@ -3836,6 +3862,7 @@ skip_fraglist:
 		nskb->len += nskb->data_len;
 		nskb->truesize += nskb->data_len;
 
+		/* checksum的检查和设置 */
 perform_csum_check:
 		if (!csum) {
 			if (skb_has_shared_frag(nskb) &&
@@ -3858,6 +3885,7 @@ perform_csum_check:
 	 */
 	segs->prev = tail;
 
+	/* GSO PARTIAL 的处理，与封装包有关 */
 	if (partial_segs) {
 		struct sk_buff *iter;
 		int type = skb_shinfo(head_skb)->gso_type;

@@ -265,6 +265,7 @@ struct sk_buff *__udp_gso_segment(struct sk_buff *gso_skb,
 	uh->len = newlen;
 	uh->check = check;
 
+	/* checksum的处理 */
 	if (seg->ip_summed == CHECKSUM_PARTIAL)
 		gso_reset_checksum(seg, ~check);
 	else

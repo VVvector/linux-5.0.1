@@ -1806,14 +1806,16 @@ void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 
 	sk->sk_route_caps &= ~sk->sk_route_nocaps;
 
-	/* 对一些特殊常见判断 net dev 是否支持GSO，如TSO, UDP_L4等 */
+	/* 对一些特殊常见判断 netdev 是否支持GSO，如TSO, UDP_L4等，正常情况下返回true。
+	 * 即如果协议层检查支持gso，会同时开启分散聚合，csum校验的能力。
+	 */
 	if (sk_can_gso(sk)) {
 		/* 只有使用IPSec时，dst->header_len才不为0，这种情况下不能使用TSO。 */
 		if (dst->header_len && !xfrm_dst_offload_ok(dst)) {
 			sk->sk_route_caps &= ~NETIF_F_GSO_MASK;
 		} else {
 			/*
-			 * 支持GSO时，必须支持SG IO和校验功能，这是因为分段时，需要单独设置每个
+			 * 支持GSO时，网卡必须支持SG IO和校验功能，这是因为分段时，需要单独设置每个
 			 * 分段的校验和，这些工作L4是没有办法提前做的。此外，如果不支持SG IO，
 			 * 那么延迟分段将失去意义，因为这时L4必须要保证skb中数据只保存在线性
 			 * 区域，这就不可避免的在发送路径中必须做相应的数据拷贝操作。
