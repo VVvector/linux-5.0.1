@@ -620,6 +620,7 @@ void __sock_tx_timestamp(__u16 tsflags, __u8 *tx_flags)
 EXPORT_SYMBOL(__sock_tx_timestamp);
 
 /* the sendmsg function registered to this socket ops structure is inet_sendmsg.*/
+/* 实际调用 inet_sendmsg() */
 static inline int sock_sendmsg_nosec(struct socket *sock, struct msghdr *msg)
 {
 	int ret = sock->ops->sendmsg(sock, msg, msg_data_left(msg));
@@ -1785,14 +1786,15 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 	struct iovec iov;
 	int fput_needed;
 
-	//初始化消息头
+	/* 初始化消息头 */
 	err = import_single_range(WRITE, buff, len, &iov, &msg.msg_iter);
 	if (unlikely(err))
 		return err;
 
 	/* 通过文件描述符fd，找到对应的socket实例。
-	以fd为索引，从当前进程的文件描述符files_struct实例中找到对应的file实例，
-	然后，从file实例的private_data成员中获取socket实例。*/
+	 * 以fd为索引，从当前进程的文件描述符files_struct实例中找到对应的file实例，
+	 * 然后，从file实例的private_data成员中获取socket实例。
+	 */
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (!sock)
 		goto out;
@@ -1802,7 +1804,7 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 	msg.msg_controllen = 0;
 	msg.msg_namelen = 0;
 
-	//把套接字地址从用户空间拷贝到内核空间
+	/* 把套接字地址从用户空间拷贝到内核空间 */
 	if (addr) {
 		err = move_addr_to_kernel(addr, addr_len, &address);
 		if (err < 0)
@@ -1811,12 +1813,12 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 		msg.msg_namelen = addr_len;
 	}
 
-	//非阻塞io
+	/* 非阻塞io */
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
 	msg.msg_flags = flags;
 	
-	/*调用统一的发送入口函数 */
+	/* 调用统一的发送入口函数 */
 	err = sock_sendmsg(sock, &msg);
 
 out_put:
@@ -1825,7 +1827,7 @@ out:
 	return err;
 }
 
-/*在user space调用 sendto()发生upd数据时，系统会调用该系统调用。*/
+/* 在user space调用 sendto()发送upd数据时，系统会调用该系统调用。*/
 SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len,
 		unsigned int, flags, struct sockaddr __user *, addr,
 		int, addr_len)

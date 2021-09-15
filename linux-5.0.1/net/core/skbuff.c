@@ -3536,6 +3536,7 @@ static inline skb_frag_t skb_head_frag_to_page_desc(struct sk_buff *frag_skb)
  *
  * 本函数会将gso的skb安装MSS长度进行分段处理，对线性区数据，直接拷贝到分段skb的线性区，
  * 对非线性区数据，直接将frags指针指向分段的skb的frags。
+ * 另外会拷贝源gso skb的header部分，即mac header，ip header, (tcp/upd header)等。
  */
 struct sk_buff *skb_segment(struct sk_buff *head_skb,
 			    netdev_features_t features)

@@ -5800,14 +5800,14 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	int same_flow;
 	int grow;
 
-	/*判断 NIC设备是否支持gro*/
+	/* 判断 NIC设备是否支持gro */
 	if (netif_elide_gro(skb->dev))
 		goto normal;
 
 	/* 链路层判断 该skb是否属于某个已有的gro */
 	gro_head = gro_list_prepare(napi, skb);
 
-	/*开始遍历对应的协议表，包括ip等*/
+	/* 开始遍历对应的协议表，包括ip等 */
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, head, list) {
 
@@ -5820,8 +5820,10 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 		skb_reset_mac_len(skb);
 		NAPI_GRO_CB(skb)->same_flow = 0;
 
-		/* 表示说如果网卡driver已经用skb list来组织数据，即网卡支持gro hw offload。就立即flush，不再做gro. */
-		NAPI_GRO_CB(skb)->flush = skb_is_gso(skb) || skb_has_frag_list(skb); //如果是gso或者有frag list，则需要flush到stack。
+		/* 表示说如果网卡driver已经用skb list来组织数据，即网卡支持gro hw offload。就立即flush，不再做gro.
+		 * 如果是gso或者有frag list，则需要flush到stack。
+		 */
+		NAPI_GRO_CB(skb)->flush = skb_is_gso(skb) || skb_has_frag_list(skb); 
 		NAPI_GRO_CB(skb)->free = 0;
 		NAPI_GRO_CB(skb)->encap_mark = 0;
 		NAPI_GRO_CB(skb)->recursion_counter = 0;
@@ -5846,11 +5848,11 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 			NAPI_GRO_CB(skb)->csum_valid = 0;
 		}
 
-		/*每一层协议都实现了自己的gro回调函数，gro_receive和gro_complete，
-		gro系统会根据协议来调用对应回调函数，其中gro_receive是将输入skb尽量合并到我们gro_list中。
-		而gro_complete则是当我们需要提交gro合并的数据包到协议栈时被调用的。*/
-		
-		/*调用个协议注册的gro接收函数：inet_gro_recive， ipv6_gro_receive*/
+		/* 每一层协议都实现了自己的gro回调函数，gro_receive和gro_complete，
+		 * gro系统会根据协议来调用对应回调函数，其中gro_receive是将输入skb尽量合并到我们gro_list中。
+		 * 而gro_complete则是当我们需要提交gro合并的数据包到协议栈时被调用的。
+		 * 调用个协议注册的gro接收函数：inet_gro_recive， ipv6_gro_receive
+		 */
 		pp = INDIRECT_CALL_INET(ptype->callbacks.gro_receive,
 					ipv6_gro_receive, inet_gro_receive,
 					gro_head, skb);
@@ -5858,7 +5860,7 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	}
 	rcu_read_unlock();
 
-	/*如果没有实现offload callback，则也直接走normal处理*/
+	/* 如果没有实现offload callback，则也直接走normal处理 */
 	if (&ptype->list == head)
 		goto normal;
 
@@ -5868,7 +5870,7 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 		goto ok;
 	}
 
-	/*########到达这里， 说明gro_receive已经都调用过了，则可以进行后续处理。*/
+	/* ########到达这里， 说明gro_receive已经都调用过了，则可以进行后续处理。*/
 
 	same_flow = NAPI_GRO_CB(skb)->same_flow;
 	ret = NAPI_GRO_CB(skb)->free ? GRO_MERGED_FREE : GRO_MERGED;
@@ -5896,8 +5898,9 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 		napi->gro_hash[hash].count++;
 	}
 
-	/*########到达这里，说明skb对应的gro list是一个新的skb，也就是说当前的gro list并不存在可以和skb合并的数据包，
-	因此，此时将这个skb插入到gro_list的头部。即建立了一个新的gro skb*/
+	/* ########到达这里，说明skb对应的gro list是一个新的skb，也就是说当前的gro list并不存在可以和skb合并的数据包，
+	 * 因此，此时将这个skb插入到gro_list的头部。即建立了一个新的gro skb。
+	 */
 	NAPI_GRO_CB(skb)->count = 1;
 	NAPI_GRO_CB(skb)->age = jiffies;
 	NAPI_GRO_CB(skb)->last = skb;
@@ -5905,9 +5908,9 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	list_add(&skb->list, gro_head);
 	ret = GRO_HELD;
 
-	/*处理frag0的部分，以及不支持gro的处理。
-		skb_headlen：线性区长度。
-	*/
+	/* 处理frag0的部分，以及不支持gro的处理。
+	 * skb_headlen：线性区长度。
+	 */
 pull:
 	grow = skb_gro_offset(skb) - skb_headlen(skb);
 	if (grow > 0)

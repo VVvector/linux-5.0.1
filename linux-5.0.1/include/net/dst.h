@@ -447,6 +447,17 @@ static inline void dst_set_expires(struct dst_entry *dst, int timeout)
 
 /* Output packet to network from transport.  */
 /* eg. ip_output() */
+/* 目的（路由）缓存
+ * dst 代码在 Linux 内核中实现协议无关的目标缓存。
+ * 此函数只是查找关联到这个 skb 的 dst 条目，然后调用 output 方法。
+ * 看起来很简单，但是 output 方法之前是如何关联到 dst 条目的？
+ *
+ * 首先很重要的一点，目标缓存条目是以多种不同方式添加的。到目前为止，
+ * 我们已经在代码中看到的一种方法是从 udp_sendmsg 调用ip_route_output_flow()。
+ * ip_route_output_flow() 函数调用__ip_route_output_key，后者进而调用__mkroute_output。
+ * __mkroute_output 函数创建路由和目标缓存条目。当它执行创建操作时，它会判断哪个 output 方法适合此 dst。
+ * 大多数时候，这个函数是 ip_output。
+ */
 static inline int dst_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	return skb_dst(skb)->output(net, sk, skb);

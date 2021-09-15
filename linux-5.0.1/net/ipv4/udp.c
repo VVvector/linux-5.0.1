@@ -894,21 +894,20 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
 		goto csum_partial;
 	}
 
-	/* 计算upd checksum */
+	/* 1. 计算upd_lite的checksum */
 	if (is_udplite)  				 /*     UDP-Lite      */
 		csum = udplite_csum(skb);
 
-	/* 不进行udp的checksum计算，可由用户层设定 */
+	/* 2. 如果 socket 校验和选项被关闭（setsockopt 带 SO_NO_CHECK 参数），它将被标记为校验和关闭 */
 	else if (sk->sk_no_check_tx) {			 /* UDP csum off */
-
 		skb->ip_summed = CHECKSUM_NONE;
 		goto send;
 
-	/* 硬件进行tx checksum 计算, 因为 硬件可能不包含 伪头部的 checksum，所以叫做 partial */
+	/* 3. 硬件进行tx checksum 计算, 因为 硬件可能不包含 伪头部的 checksum，所以叫做 partial */
 	} else if (skb->ip_summed == CHECKSUM_PARTIAL) { /* UDP hardware csum */
 csum_partial:
 
-		/* 该函数 并不一定能够利用硬件的校验和计算功能。
+		/* 该函数并不一定能够利用硬件的校验和计算功能。
 		 * 对于存在skb分片的数据包，就需要软件进行计算。
 		 */
 		udp4_hwcsum(skb, fl4->saddr, fl4->daddr);
@@ -926,7 +925,9 @@ csum_partial:
 		uh->check = CSUM_MANGLED_0;
 
 send:
-	/* 调用network layer的API，将数据传入netwrok layer。 */
+	/* 调用network layer的API，将数据传入netwrok layer。
+	 * 它只是调用 ip_local_out() ，如果失败，就更新相应错误计数。
+	 */
 	err = ip_send_skb(sock_net(sk), skb); 
 	if (err) {
 		if (err == -ENOBUFS && !inet->recverr) {
@@ -1004,7 +1005,24 @@ EXPORT_SYMBOL_GPL(udp_cmsg_send);
 
 /* udp的send函数:
  * UDP sock发送flow，从user space的send/sendto(), sendmsg/sendmmsg()等调用到该函数。
+ *
+ * croked(软木塞) feature：
+ * kernel会把用户层多次传下来的数据进行一个打包，
+ * 然后，再调用send()接口一次性往下传 （需要用户设定），目的是提高效率。
+ * 使用方法：
+ * 1. 用setsockopt()系统调用对socket设置 UDP_CORK。
+ * 2. 在发送数据时（send/sendto/sendmsg），传入MSG_MORE flag。
+ *
+ * UDP_lite: 和udp类似，适应于网络的差错率比较大，但是，应用对轻微差错不敏感的情况，例如，实时视频播放等。
+ * 传统UDP是对其负载payload进行完整的校验，只要其中一位发生了变化，整个数据包就可能被丢弃，在某些
+ * 情况下，丢掉这个包的代价是非常大的。
+ * 但是，在UDP_lite协议中，一个数据包需不需要对其负载进行校验，或者校验多少，都是由用户控制的。并且，UDP_lite
+ * 是用UDP协议的length字段表示其checksum coverage的，所以，当UDP_lite的checksum coverage字段等于整个UDP数据包
+ * (udp header + payload)的长度时，UDP_lite产生的包也和传统的UDP包一样。
+ * 事实上，linux对UDP_lite的支持也就是通过在原来的UDP协议的基础上添加了一个setsockopt选项来实现控制
+ * 发送和接收的checksum coverage的。
  */
+
 int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
 	struct inet_sock *inet = inet_sk(sk);
@@ -1045,19 +1063,16 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		2. Pass MSG_MORE as one of the flags when calling send, sendto, or sendmsg from your program.
 		These options are documented in the UDP man page and the send / sendto / sendmsg man page, respectively.
 	*/
-	/* croked feature：
-	 * kernel会把用户层多次传下来的数据进行一个打包，
-	 * 然后，再调用send()接口一次性往下传 （需要用户设定）。 提高效率。
-	 *
-	 * 这个函数指针将在__ip_append_data()函数中解析用户层传入的数据，
-	 * 然后，将用户数据拷贝到内核buffer-skb_buff中。
+
+	/* getfrag()这个函数指针将在__ip_append_data()函数中解析用户层传入的数据，
+	 * 然后，将用户数据拷贝到内核的skb_buff中。
 	 */
 	getfrag = is_udplite ? udplite_getfrag : ip_generic_getfrag;
 
 	/* 1. UDP corking */
 	fl4 = &inet->cork.fl.u.ip4;
 
-	/* up->pending 以确定 socket 当前是否已被塞住(corked)，如果是，
+	/* 确定 socket 当前是否已被塞住(corked)，如果是，
 	 * 则直接跳到 do_append_data 进行数据追加(append)。 
 	 */
 	if (up->pending) {
@@ -1081,6 +1096,10 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	/* 
 	 * 获取UDP destination address和port。
 	 * 两种方法：
+	 * 1. 如果之前socket已经建立连接，那socket本身就存储了目标地址。
+	 * 2. 地址通过辅助结构(struct msghdr)传入
+	 */
+	/*
 	 * 1. The socket itself has the destination address stored because the socket was connected at some point.
 	 * 2. The address is passed in via an auxiliary structure, as we saw in the kernel code for sendto.
 	 */
@@ -1117,6 +1136,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	/* 3. 设置ipcm结构，用于后续传递信息给 ip_append_data()*/
 	ipcm_init_sk(&ipc, inet);
+
 	ipc.gso_size = up->gso_size;
 
 	/* 处理一些辅助信息:
@@ -1126,9 +1146,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	 */
 	/* 4. ancillary messages, via sendmsg */
 	if (msg->msg_controllen) {
+		/* 这里会解析 SOL_UDP, UDP_SEGMENT 消息来获取gso udp_l4 的分段大小。*/
 		err = udp_cmsg_send(sk, msg, &ipc.gso_size);
 		if (err > 0)
-			/* 解析辅助信息。 */
+			/* 解析辅助信息。例如，IP_PKTINFO, IP_TTL, IP_TOS等。
+			 * 并存放在ipc相关栏位中，供后面flow使用。
+			 */
 			err = ip_cmsg_send(sk, msg, &ipc,
 					   sk->sk_family == AF_INET6);
 		if (unlikely(err < 0)) {
@@ -1137,6 +1160,8 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		}
 		if (ipc.opt)
 			free = 1;
+
+		/* 传递一个未初始化的辅助数据，将会把这个 socket 标记为“未建立连接的” */
 		connected = 0;
 	}
 
@@ -1173,10 +1198,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		}
 	}
 
+	/* 检查是否设置了源记录路由(source record route - SRR) IP选项。
+	 * SRR有两种类型：宽松源记录路由和严格源记录路由。如果设置了此选项，
+	 * 则会记录第一跳地址并将其保存到faddr中，并将socket标记位“未连接”。
+	 */
 	saddr = ipc.addr;
 	ipc.addr = faddr = daddr;
-
-	/* 检查是否设置了源记录路由(source record route - SRR) IP选项。 */
 	if (ipc.opt && ipc.opt->opt.srr) {
 		if (!daddr) {
 			err = -EINVAL;
@@ -1186,8 +1213,15 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/* 处理TOS IP 选项。这可从辅助信息中获取，也可以从socket当前值中获取。*/
+	/* 处理TOS IP选项。这可从辅助信息中获取，也可以从socket当前值中获取。*/
 	tos = get_rttos(&ipc, inet);
+
+	/* 继续检查：
+	 * 1. 是否使用setsockopt在socket上设置了SO_DONTROUT
+	 * 2. 是否调用sendto或sendmsg时指定了MSG_DONTROUTE标志
+	 * 3. 是否设置了is_stricrout，即需要严格的SRR
+	 * 任何一个为真，tos字段的ROT_ONLINK将置1，并将socket视作“未连接”。
+	 */
 	if (sock_flag(sk, SOCK_LOCALROUTE) ||
 	    (msg->msg_flags & MSG_DONTROUTE) ||
 	    (ipc.opt && ipc.opt->opt.is_strictroute)) {
@@ -1195,7 +1229,11 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		connected = 0;
 	}
 
-	/* 多播或者组播处理，用户可通过IP_PKTINFO辅助信息来指定发送包的源地址或者设备号。*/
+	/* 多播或者组播处理，用户可通过IP_PKTINFO辅助信息来指定发送包的源地址或者设备号。
+	 * 如果目标地址是多播地址：
+	 * 1. 将多播设备device的索引设置为发送这个packet的设备索引。
+	 * 2. packet的源地址将设置为multicast源地址。
+	 */
 	/* 6. Multicase or unicase? */
 	if (ipv4_is_multicast(daddr)) {
 		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
@@ -1215,13 +1253,12 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		if (ipc.oif != inet->uc_index &&
 		    ipc.oif == l3mdev_master_ifindex_by_index(sock_net(sk),
 							      inet->uc_index)) {
-
 			/* 表示目标地址不是一个组播地址，而是一个单播地址。 */
 			ipc.oif = inet->uc_index;
 		}
 	}
 
-	/* 7. Routing 路由， 这里表示快速路径(fast path)，即如果socket已连接，则直接尝试获取路由。*/
+	/* 7. Routing 路由，这里表示快速路径(fast path)，即如果socket已连接，则直接尝试获取路由。*/
 	if (connected)
 		rt = (struct rtable *)sk_dst_check(sk, 0);
 
@@ -1241,17 +1278,17 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 				   faddr, saddr, dport, inet->inet_sport,
 				   sk->sk_uid);
 
-		/* socket 及其 flow 实例会传递给安全子系统，这样SELinux或SMACK)这样的系统就可以在
-		 * flow 实例上设置安全 ID。 
+		/* 然后，socket 及其 flow 实例会传递给安全子系统，这样SELinux或SMACK)这样的系统就可以在
+		 * flow 实例上设置安全 ID。
 		 */
 		/* systems like SELinux or SMACK can set a security id value on the flow structure */
 		security_sk_classify_flow(sk, flowi4_to_flowi(fl4));
 
-		/* 调用IP路由接口，创建一个路由实例。 */
+		/* 接下来，调用IP路由接口，创建一个路由实例。 */
 		/* the IP routing code to generate a routing structure */
 		rt = ip_route_output_flow(net, fl4, sk);
 
-		/* 如果创建路由实例失败，并且返回码是 ENETUNREACH,则 OUTNOROUTES 计数器将会加 1。 */
+		/* 如果创建路由实例失败，并且返回码是 ENETUNREACH, 则 OUTNOROUTES 计数器将会加 1。 */
 		if (IS_ERR(rt)) {
 			err = PTR_ERR(rt);
 			rt = NULL;
@@ -1271,32 +1308,46 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			sk_dst_set(sk, dst_clone(&rt->dst));
 	}
 
-	/* 阻止ARP缓存过期 */
 	/* 8. Prevent the ARP cache from going stale with MSG_CONFIRM */
-	/* 如果调用send, sendto, sendmsg的时候有指定了MSG_CONFIRM, 则做ARP确认处理。
-	 * 该标志提示系统去确认一下 ARP 缓存条目是否仍然有效，防止其被垃圾回收。 
+	/* 阻止ARP缓存过期：
+	 * 如果调用send, sendto, sendmsg的时候有指定了MSG_CONFIRM, 则做ARP确认处理。
+	 * 该标志提示系统去确认一下 ARP 缓存条目是否仍然有效，防止其被垃圾回收。
 	 */
 	if (msg->msg_flags & MSG_CONFIRM)
 		goto do_confirm;
 
+
+	/* 将处理 UDP cork 和 uncorked 情况。 */
 back_from_confirm:
 	saddr = fl4->saddr;
 	if (!ipc.addr)
 		daddr = ipc.addr = fl4->daddr;
 
-	/* 将处理 UDP cork 和 uncorked 情况。 */
 	/* Lockless fast path for the non-corking case. */
 	/* 9. Fast path for uncorked UDP sockets: Prepare data for transmit */
 
-	/* uncorked UDP sockets 快速路径：准备待发送数据 */
+	/* uncorked UDP sockets 快速路径：准备待发送数据。
+	 * 如果不需要corking，数据就可以封装到一个struct sk_buff实例中，并传递给udp_send_skb，
+	 * 离IP协议层更近了一步，这是通过调用ip_make_skb()来完成的。
+	 * 注意：
+	 * 先前通过调用 ip_route_output_flow() 生成的路由条目也会一起传进来，
+	 * 它将保存到 skb 里，稍后在 IP 协议层中被使用。
+	 */
 	if (!corkreq) {
 		struct inet_cork cork;
 
 		/* 
-		 * 将创建一个skb，需考虑到MTU, UDP corking, UFO, Fragmentation(如果
-		 * 硬件不支持UFO, 但是，要传输大于MTU的数据，则需要软件做分片)。
-		 * 并把用户数据打包到skb中，有数据拷贝，并添加ip header。
-		 * 所有的data在一个ip packet中，因为 udp是有边界的协议。
+		 * 将创建一个skb，需考虑到很多事情：
+		 * 1. MTU
+		 * 2. UDP corking（如果启用）
+		 * 3. UDP Fragmentation offloading (UFO) - 已废弃。
+		 * 4. Fragmentation分片：如果硬件不支持UFO, 但是，要传输大于MTU的数据，则需要软件做分片。
+		 *
+		 * 然后，把用户数据打包到skb中，有数据拷贝，并添加ip header。
+		 * 所有的data在一个ip packet中，因为udp是有边界的协议。
+		 * 
+		 * 在构建skb的时候，ip_make_skb()依赖的底层代码需要使用一个corking变量和一个queue变量，
+		 * skb将通过queue变量传入。如果socket未被cork，则会传入一个假的corking变量和一个空队列。
 		 */
 		/* the data can be packed into a struct sk_buff */
 		skb = ip_make_skb(sk, fl4, getfrag, msg, ulen,
@@ -1312,8 +1363,7 @@ back_from_confirm:
 	}
 
 	/* 10. Slow path for corked UDP sockets with no preexisting corked data */
-	/* 没有被 cork 的数据时的慢路径。
-	 * 如果是使用了UDP corking，但是，之前的数据还没有被cork，则慢路径开始：
+	 /* 如果是使用了UDP corking，但是，之前的数据还没有被cork，则慢路径开始：
 	 * 1. 对socket加锁。
 	 * 2. 检查应用程序是否有bug，即已经被cork的socket被再次cork的情况检查。
 	 * 3. 设置该UDP flow的一些参数，为corking做准备。
@@ -1346,19 +1396,20 @@ do_append_data:
 			     corkreq ? msg->msg_flags|MSG_MORE : msg->msg_flags);
 
 	/* flushing corked socket */
-	/* 如果出现错误（错误为非零），则调用 udp_flush_pending_frames，这将取消
+	/* 检查append data的返回值:
+	* 1. 如果出现错误（错误为非零），则调用 udp_flush_pending_frames()，这将取消
 	 * cork 并从 socket 的发送队列中删除所有数据 
 	 */
 	if (err)
 		udp_flush_pending_frames(sk);
 
-	/* 如果在未指定 MSG_MORE 的情况下发送此数据，则调用 udp_push_pending_frames，
+	/* 2. 如果在未指定 MSG_MORE 的情况下发送此数据，则调用 udp_push_pending_frames()，
 	 * 它将数据传递到更下面的网络IP层 
 	 */
 	else if (!corkreq)
 		err = udp_push_pending_frames(sk);
 
-	/* 如果发送队列为空，请将 socket 标记为不再 cork */
+	/* 3. 如果发送队列为空，请将 socket 标记为不再 cork */
 	else if (unlikely(skb_queue_empty(&sk->sk_write_queue)))
 		up->pending = 0;
 	release_sock(sk);
@@ -1366,6 +1417,7 @@ do_append_data:
 	/* 如果追加操作完成并且有更多数据要进入 cork，则代码将做一些清理工作，并返回追加数据的长度。 */
 out:
 	ip_rt_put(rt);
+
 out_free:
 	if (free)
 		kfree(ipc.opt);
@@ -1391,7 +1443,7 @@ out_free:
 	/* dst_confirm 处理只是在相应的缓存条目上设置一个标记位，稍
 	 * 后当查询邻居缓存并找到条目时将检查该标志，我们后面一些会看到。
 	 * 此功能通常用于 UDP 网络应用程序，以减少不必要的 ARP 流量。
-
+	 *
 	 * 确认缓存条目后，跳回 back_from_confirm 标签。
 	 */
 do_confirm:

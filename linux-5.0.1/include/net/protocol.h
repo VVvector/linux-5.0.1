@@ -80,6 +80,7 @@ struct net_offload {
 	unsigned int		 flags;	/* Flags used by IPv6 for now */
 };
 /* This should be set for any extension header which is compatible with GSO. */
+/* 即不受GSO影响的ipv6扩展头部，例如：IPPROTO_ROUTING， IPPROTO_DSTOPTS */
 #define INET6_PROTO_GSO_EXTHDR	0x1
 
 /* This is used to register socket interfaces for IP protocols.  */

@@ -32,13 +32,17 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 	int tnl_hlen;
 	int err;
 
+	/* 分配数据有效性检查 */
 	mss = skb_shinfo(skb)->gso_size;
 	if (unlikely(skb->len <= mss))
 		goto out;
 
+	/* 隧道封装类型的segment */
 	if (skb->encapsulation && skb_shinfo(skb)->gso_type &
 	    (SKB_GSO_UDP_TUNNEL|SKB_GSO_UDP_TUNNEL_CSUM))
 		segs = skb_udp_tunnel_segment(skb, features, true);
+
+	/* 常规GSO_UDP, GSO_UDP_L4 的skb分片处理 */
 	else {
 		const struct ipv6hdr *ipv6h;
 		struct udphdr *uh;
@@ -49,8 +53,14 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 		if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 			goto out;
 
+		/* UDP L4 类型的segment，即类似TSO，只对payload进行分片，每个分片都有UDP header。
+		 * 分片长度由上层user通过socketopt进行设置。
+		 */
 		if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4)
 			return __udp_gso_segment(skb, features);
+
+
+		/* 下面是老的UFO 分片，即类似于ip分片，只有第一个分片有UDP header。 */
 
 		/* Do software UFO. Complete and fill in the UDP checksum as HW cannot
 		 * do checksum of UDP packets sent as multiple IP fragments.
@@ -75,6 +85,10 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 		if (!skb->encap_hdr_csum)
 			features |= NETIF_F_HW_CSUM;
 
+		/* 下面是对ipv6分片的处理，这里只是会插入第一个ipv6分片的扩展header，
+		 * 其余的分片skb的ipv6和扩展header会在skb_segment()中复制源skb的相关header，
+		 * 然后，ipv6相关栏位会在ipv6_gso_segment()中被填充。(例如，分片offset，长度，MF flag等)
+		 */
 		/* Check if there is enough headroom to insert fragment header. */
 		tnl_hlen = skb_tnl_header_len(skb);
 		if (skb->mac_header < (tnl_hlen + frag_hdr_sz)) {
@@ -105,6 +119,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 		fptr->reserved = 0;
 		fptr->identification = ipv6_proxy_select_ident(dev_net(skb->dev), skb);
 
+		/* 对udp packet进行分片操作。 */
 		/* Fragment the skb. ipv6 header and the remaining fields of the
 		 * fragment header are updated in ipv6_gso_segment()
 		 */

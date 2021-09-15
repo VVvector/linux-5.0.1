@@ -47,12 +47,14 @@ static struct sk_buff *tcp6_gso_segment(struct sk_buff *skb,
 {
 	struct tcphdr *th;
 
+	/* 常规合法性检查 */
 	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV6))
 		return ERR_PTR(-EINVAL);
 
 	if (!pskb_may_pull(skb, sizeof(*th)))
 		return ERR_PTR(-EINVAL);
 
+	/* 检查是否有checksum hw offload，如果没有，就要计算伪头部。 */
 	if (unlikely(skb->ip_summed != CHECKSUM_PARTIAL)) {
 		const struct ipv6hdr *ipv6h = ipv6_hdr(skb);
 		struct tcphdr *th = tcp_hdr(skb);
@@ -66,6 +68,7 @@ static struct sk_buff *tcp6_gso_segment(struct sk_buff *skb,
 		__tcp_v6_send_check(skb, &ipv6h->saddr, &ipv6h->daddr);
 	}
 
+	/* 进行TSO 操作 */
 	return tcp_gso_segment(skb, features);
 }
 static const struct net_offload tcpv6_offload = {

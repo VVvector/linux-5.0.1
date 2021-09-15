@@ -45,6 +45,7 @@ static int ipv6_gso_pull_exthdrs(struct sk_buff *skb, int proto)
 		struct ipv6_opt_hdr *opth;
 		int len;
 
+		/* 查看到需要做gso的扩展头部或上层协议，例如， TCP, UDP等。就会跳出给循环。 */
 		if (proto != NEXTHDR_HOP) {
 			ops = rcu_dereference(inet6_offloads[proto]);
 
@@ -55,17 +56,21 @@ static int ipv6_gso_pull_exthdrs(struct sk_buff *skb, int proto)
 				break;
 		}
 
+		/* 因为ipv6扩展头部要求8字节对齐，所有这检查至少要大于8字节。 */
 		if (unlikely(!pskb_may_pull(skb, 8)))
 			break;
 
 		opth = (void *)skb->data;
 		len = ipv6_optlen(opth);
 
+		/* 根据实际的扩展头部长度进行线性区检查或扩展（将非线性区部分的头部信息拷贝到线性区）。 */
 		if (unlikely(!pskb_may_pull(skb, len)))
 			break;
 
 		opth = (void *)skb->data;
 		proto = opth->nexthdr;
+
+		/* 跳到next header处 */
 		__skb_pull(skb, len);
 	}
 
@@ -84,9 +89,10 @@ static struct sk_buff *ipv6_gso_segment(struct sk_buff *skb,
 	u8 *prevhdr;
 	int offset = 0;
 	bool encap, udpfrag;
-	int nhoff;
+	int nhoff; //network header offset
 	bool gso_partial;
 
+	/* gso skb有效性检查 */
 	skb_reset_network_header(skb);
 	nhoff = skb_network_header(skb) - skb_mac_header(skb);
 	if (unlikely(!pskb_may_pull(skb, sizeof(*ipv6h))))
@@ -97,12 +103,15 @@ static struct sk_buff *ipv6_gso_segment(struct sk_buff *skb,
 		features &= skb->dev->hw_enc_features;
 	SKB_GSO_CB(skb)->encap_level += sizeof(*ipv6h);
 
+	/* 移动到ip header之后，即传输层offload segment从传输层header开始。 */
 	ipv6h = ipv6_hdr(skb);
 	__skb_pull(skb, sizeof(*ipv6h));
 	segs = ERR_PTR(-EPROTONOSUPPORT);
 
+	/* 查找并跳转到需要做gso的ipv6 next header处 */
 	proto = ipv6_gso_pull_exthdrs(skb, ipv6h->nexthdr);
 
+	/* 检查隧道封装或UFO */
 	if (skb->encapsulation &&
 	    skb_shinfo(skb)->gso_type & (SKB_GSO_IPXIP4 | SKB_GSO_IPXIP6))
 		udpfrag = proto == IPPROTO_UDP && encap &&
@@ -111,6 +120,7 @@ static struct sk_buff *ipv6_gso_segment(struct sk_buff *skb,
 		udpfrag = proto == IPPROTO_UDP && !skb->encapsulation &&
 			  (skb_shinfo(skb)->gso_type & SKB_GSO_UDP);
 
+	/* 调用传输层的segment offload函数进行分片处理。 */
 	ops = rcu_dereference(inet6_offloads[proto]);
 	if (likely(ops && ops->callbacks.gso_segment)) {
 		skb_reset_transport_header(skb);
@@ -122,6 +132,7 @@ static struct sk_buff *ipv6_gso_segment(struct sk_buff *skb,
 
 	gso_partial = !!(skb_shinfo(segs)->gso_type & SKB_GSO_PARTIAL);
 
+	/* 重新填充每一个skb的ipv6 header，即每一个上层分段后的skb，至少都保留mac header + ip header。 */
 	for (skb = segs; skb; skb = skb->next) {
 		ipv6h = (struct ipv6hdr *)(skb_mac_header(skb) + nhoff);
 		if (gso_partial && skb_is_gso(skb))
@@ -129,17 +140,21 @@ static struct sk_buff *ipv6_gso_segment(struct sk_buff *skb,
 				      SKB_GSO_CB(skb)->data_offset +
 				      skb->head - (unsigned char *)(ipv6h + 1);
 		else
-			payload_len = skb->len - nhoff - sizeof(*ipv6h);
+			payload_len = skb->len - nhoff - sizeof(*ipv6h); //即去除mac header len和ipv6 header len的长度。
+
 		ipv6h->payload_len = htons(payload_len);
 		skb->network_header = (u8 *)ipv6h - skb->head;
 		skb_reset_mac_len(skb);
 
+		/* 如果是GSO_UDP，即ip分片，需要用ipv6 fragment */
 		if (udpfrag) {
 			int err = ip6_find_1stfragopt(skb, &prevhdr);
 			if (err < 0) {
 				kfree_skb_list(segs);
 				return ERR_PTR(err);
 			}
+
+			/* 获取到frag extheader处 */
 			fptr = (struct frag_hdr *)((u8 *)ipv6h + err);
 			fptr->frag_off = htons(offset);
 			if (skb->next)
@@ -147,6 +162,7 @@ static struct sk_buff *ipv6_gso_segment(struct sk_buff *skb,
 			offset += (ntohs(ipv6h->payload_len) -
 				   sizeof(struct frag_hdr));
 		}
+
 		if (encap)
 			skb_reset_inner_headers(skb);
 	}

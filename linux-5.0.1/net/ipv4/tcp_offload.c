@@ -78,7 +78,7 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	if (thlen < sizeof(*th))
 		goto out;
 
-	/* skb线性区检查，或扩展，使tcp header能在线性区。便于后续处理。 */
+	/* skb线性区检查或扩展，使tcp header能在线性区。便于后续处理。 */
 	if (!pskb_may_pull(skb, thlen))
 		goto out;
 	oldlen = (u16)~skb->len;
@@ -112,6 +112,7 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	/* skb_segment是真正的分段实现。
 	 * 每个TCP的GSO分片是包含了TCP头部信息的，这也符合TCP层的分段逻辑。
 	 * 另外注意这里传递给skb_segment做分段时是不带TCP首部的，即只对tcp payload做segment。
+	 * 但是，形成的segment skb是有和源skb相同的header部分的。
 	 */
 	segs = skb_segment(skb, features);
 	if (IS_ERR(segs))
@@ -124,6 +125,7 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	 * the frame into an MSS multiple and possibly a remainder, both
 	 * cases return a GSO skb. So update the mss now.
 	 */
+	/* GSO PARTIAL 和 GRO FRAG_LIST两种类型的segment会有如下情况。 */
 	if (skb_is_gso(segs))
 		mss *= skb_shinfo(segs)->gso_segs;
 
@@ -138,7 +140,8 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 
 	newcheck = ~csum_fold((__force __wsum)((__force u32)th->check +
 					       (__force u32)delta));
-	/* 下面是设置每个分片的tcp头部信息 */
+
+	/* 下面是设置每个分片skb的tcp头部信息 */
 	while (skb->next) {
 		th->fin = th->psh = 0;
 		th->check = newcheck;

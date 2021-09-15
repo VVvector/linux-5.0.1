@@ -111,11 +111,23 @@ int __ip_local_out(struct net *net, struct sock *sk, struct sk_buff *skb)
 	if (unlikely(!skb))
 		return 0;
 
+	/* 设置skb协议字段 */
 	skb->protocol = htons(ETH_P_IP);
 
 	/*
 	 * 经过netfilter的 LOCAL_OUT钩子点进行检查过滤，如果通过，则通过dst_output()函数，
 	 * 实际上调用的是IP数据包输出函数 ip_output()函数。
+	 */
+	/*
+	 * nf_hook 只是一个 wrapper，它调用 nf_hook_thresh，首先检查是否有为这个协议族和hook 类型
+	 *（这里分别为 NFPROTO_IPV4 和 NF_INET_LOCAL_OUT）安装的过滤器，然后将返回到 IP 协议层，
+	 * 避免深入到 netfilter 或更下面，比如 iptables 和conntrack。
+	 *
+	 * 请记住：
+	 * 如果你有非常多或者非常复杂的 netfilter 或 iptables 规则，那些规则将在触发sendmsg 系统调的
+	 * 用户进程的上下文中执行。如果对这个用户进程设置了 CPU 亲和性，相应的 CPU 将花费系统时间（system time）
+	 * 处理出站（outbound）iptables 规则。如果你在做性能回归测试，那可能要考虑根据系统的负载，
+	 * 将相应的用户进程绑到到特定的 CPU，或者是减少 netfilter/iptables 规则的复杂度，以减少对性能测试的影响。
 	 */
 	/*the IP protocol layer will call down into netfilter by calling nf_hook. 
 	The return value of the nf_hook function will be passed back up to ip_local_out.
@@ -233,6 +245,7 @@ static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *s
 	}
 
 	rcu_read_lock_bh();
+
 	/* 获取下一跳 */
 	nexthop = (__force u32) rt_nexthop(rt, ip_hdr(skb)->daddr);
 
@@ -314,8 +327,9 @@ static int ip_finish_output_gso(struct net *net, struct sock *sk,
 
 
 /* 根据网络配置确定是否需要对数据包进行重路由，是否需要对数据包分割，最后，
-调用ip_finish_output2()与邻居子系统接口，将数据包目标地址中的IP地址转换成
-目标主机的MAC地址。*/
+ * 调用ip_finish_output2()与邻居子系统接口，将数据包目标地址中的IP地址转换成
+ * 目标主机的MAC地址。
+ */
 static int ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	unsigned int mtu;
@@ -327,6 +341,9 @@ static int ip_finish_output(struct net *net, struct sock *sk, struct sk_buff *sk
 		return ret;
 	}
 
+	/* 如果内核启用了 netfilter 和数据包转换（XFRM - transformer数据加密相关），
+	 * 则更新 skb 的标志并通过 dst_output() 将其发回。
+	 */
 #if defined(CONFIG_NETFILTER) && defined(CONFIG_XFRM)
 	/* Policy lookup after SNAT yielded a new policy */
 	if (skb_dst(skb)->xfrm) {
@@ -430,7 +447,7 @@ int ip_mc_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
 }
 
-/* dst_output()实际会调用到该接口。*/
+/* 在tcp/udp ipv4情况下，dst_output()实际会调用到该接口。*/
 int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	struct net_device *dev = skb_dst(skb)->dev;
@@ -438,10 +455,16 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 	IP_UPD_PO_STATS(net, IPSTATS_MIB_OUT, skb->len);
 
 	/* 设置发送数据包输出网络设备，数据包协议，调用网络过滤子系统回调函数过滤数据包，
-	如果通过安全检查，调用ip_finish_output()发送数据包。*/
+	 * 如果通过安全检查，调用ip_finish_output()发送数据包。*/
 	skb->dev = dev;
 	skb->protocol = htons(ETH_P_IP);
 
+	/*
+	 * 通过调用NF_HOOK_COND将控制权交给netfilter。
+	 * NF_HOOK_COND 通过检查传入的条件来工作。在这里条件是!(IPCB(skb)->flags & IPSKB_REROUTED。
+	 * 如果此条件为真，则 skb 将发送给 netfilter。如果 netfilter 允许包通过，okfn 回调函数将被调用。
+	 * 在这里，okfn 是 ip_finish_output。
+	 */
 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
 			    net, sk, skb, NULL, dev,
 			    ip_finish_output,
@@ -957,6 +980,17 @@ csum_page(struct page *page, int offset, int copy)
  * (CORK flag设置的情况下)如果是小数据包，并且开启了聚合，就会将若干个数据包整合。
  *
  * https://blog.csdn.net/minghe_uestc/article/details/7836920?utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromMachineLearnPai2%7Edefault-1.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromMachineLearnPai2%7Edefault-1.control
+ *
+ * 1. 如果 socket 是 corked，则从 ip_append_data 调用此函数；
+ * 2. 如果 socket 未被 cork，则从ip_make_skb 调用此函数。
+ * 在任何一种情况下，函数都将分配一个新缓冲区来存储传入的数据，或者将数据附加到现有数据中。
+ * 这种工作的方式围绕 socket 的发送队列。等待发送的现有数据（例如，如果 socket 被 cork）将在队列中有一个对应条目，
+ * 可以被追加数据。
+ *
+ * 1. 在 cork 的情况下，__ip_append_data 的返回值向上传递。数据位于发送队列中，
+ * 直到udp_sendmsg 确定是时候调用 udp_push_pending_frames 来完成 skb，后者会进一步调用udp_send_skb。
+ * 2. 在 unorked 情况下，持有 skb 的 queue 被作为参数传递给上面描述的__ip_make_skb，
+ * 在那里它被出队并通过 udp_send_skb 发送到更底层。
  */
 static int __ip_append_data(struct sock *sk,
 			    struct flowi4 *fl4,
@@ -1059,7 +1093,7 @@ static int __ip_append_data(struct sock *sk,
 	 */
 	/* 判断输出队列是否为空，如果为空，就申请新的skb，
 	 * 不为空，就直接使用追加到上传的skb中。
-	*/
+	 */
 	if (!skb)
 		goto alloc_new_skb;
 
@@ -1577,7 +1611,7 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 		goto out;
 
 	/* 下面是将多个skb，采用frag_list的方式来合成一个大的skb。
-	 * 该skb只有一个udp, ip header。
+	 * 该skb只有一个udp header和ip header。
 	 * 所以，要将其余的skb的header部分去掉。
 	 */
 	tail_skb = &(skb_shinfo(skb)->frag_list);
@@ -1725,9 +1759,10 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 	if (flags & MSG_PROBE)
 		return NULL;
 
-	/* 初始化一个新的tx        skb list，用于后续管理用户拷贝的skb。 */
+	/* 栈变量，初始化一个新的 tx            skb list，用于后续管理用户拷贝的skb。 */
 	__skb_queue_head_init(&queue);
 
+	/* 这里的cork变量也是上层传入的一个栈变量，里面会承载一些ipc，rtable等信息，给到下层api使用。 */
 	cork->flags = 0;
 	cork->addr = 0;
 	cork->opt = NULL;
@@ -1735,7 +1770,9 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 	if (err)
 		return ERR_PTR(err);
 
-	/* 申请新的skb buffer，并拷贝user data。 */
+	/* 会申请新的skb buffer，并拷贝user data，并把该skb添加到传入的queue中。
+	 * 如果追加数据失败，则调用__ip_flush_pending_frames()丢弃数据并向上返回错误。
+	 */
 	err = __ip_append_data(sk, fl4, &queue, cork,
 			       &current->task_frag, getfrag,
 			       from, length, transhdrlen, flags);
@@ -1747,7 +1784,7 @@ struct sk_buff *ip_make_skb(struct sock *sk,
 		return ERR_PTR(err);
 	}
 
-	/* 将发送队列中的所有skb组织成一个IP报文。 */
+	/* 如果追加数据成功，则将skb出队，并添加IP选项，并返回一个准备好传递给更底层发送的skb。 */
 	return __ip_make_skb(sk, fl4, &queue, cork);
 }
 

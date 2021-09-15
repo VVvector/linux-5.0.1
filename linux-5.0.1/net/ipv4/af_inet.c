@@ -179,10 +179,9 @@ static int inet_autobind(struct sock *sk)
 	lock_sock(sk);
 	inet = inet_sk(sk);
 
-	//如果还没有分配本地端口
+	/* 如果还没有分配本地端口 */
 	if (!inet->inet_num) {
-
-		//SOCK_STREAM套接字的TCP操作函数集为tcp_prot, 其中，端口绑定函数为inet_csk_get_port()
+		/* SOCK_STREAM套接字的TCP操作函数集为tcp_prot, 其中，端口绑定函数为inet_csk_get_port() */
 		if (sk->sk_prot->get_port(sk, 0)) {
 			release_sock(sk);
 			return -EAGAIN;
@@ -811,29 +810,30 @@ int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 }
 EXPORT_SYMBOL(inet_getname);
 
-/* TCP/UDP/RAW 的发送函数都是先调用这个。 */
+/* AF_INET协议族提供的通用发送函数，例如，TCP/UDP/RAW socket的发送函数都是先调用这个。 */
 int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
 
-	/*RPS（Receive Packet Steering）主要是把软中断的负载均衡到各个cpu，简单来说，
-	是网卡驱动对每个流生成一个hash标识，这个HASH值得计算可以通过四元组来计算
-	（SIP，SPORT，DIP，DPORT），然后由中断处理的地方根据这个hash标识分配到相应的CPU上去，
-	这样就可以比较充分的发挥多核的能力了。通俗点来说就是在软件层面模拟实现硬件的多队列
-	网卡功能，如果网卡本身支持多队列功能的话RPS就不会有任何的作用。该功能主要针对单队
-	列网卡多CPU环境，如网卡支持多队列则可使用SMP irq affinity直接绑定硬中断。
-	*/
+	/* RPS（Receive Packet Steering）主要是把软中断的负载均衡到各个cpu，简单来说，
+	 * 是网卡驱动对每个流生成一个hash标识，这个HASH值得计算可以通过四元组来计算
+	 *（SIP，SPORT，DIP，DPORT），然后由中断处理的地方根据这个hash标识分配到相应的CPU上去，
+	 * 这样就可以比较充分的发挥多核的能力了。通俗点来说就是在软件层面模拟实现硬件的多队列
+	 * 网卡功能，如果网卡本身支持多队列RSS功能的话，RPS就不会有任何的作用。该功能主要针对单队
+	 * 列网卡多CPU环境，如网卡支持多队列则可使用SMP irq affinity直接绑定硬中断。
+	 */
 	/* record the last CPU that the flow was processed on*/
 	sock_rps_record_flow(sk);
 
-	//如果连接还没分配本地端口，且允许自动绑定，那么给连接绑定一个本地端口。
-	//tcp_prot的no_autobind是为true，即TCP是不允许自动绑定端口的。
+	/* 如果socket还没分配本地端口，且允许自动绑定，那么给socket绑定一个本地端口。
+	 * tcp_prot的no_autobind是为true，即TCP是不允许自动绑定端口的。
+	 */
 	/* We may need to bind the socket. */
 	if (!inet_sk(sk)->inet_num && !sk->sk_prot->no_autobind &&
 	    inet_autobind(sk))
 		return -EAGAIN;
 
-	/*根据不同的协议调用相应的接口，例 udp_sendmsg, tcp_sendmsg, raw_sendmsg*/
+	/* 根据不同的协议调用相应的接口，例，udp_sendmsg, tcp_sendmsg, raw_sendmsg */
 	return sk->sk_prot->sendmsg(sk, msg, size);
 }
 EXPORT_SYMBOL(inet_sendmsg);
@@ -1460,6 +1460,7 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 			tot_len = skb->len - nhoff;
 		}
 
+		/* 更新ip header的total length字段 */
 		iph->tot_len = htons(tot_len);
 
 		/* 进行ip checksum计算 */
