@@ -2227,7 +2227,7 @@ static inline int pskb_may_pull(struct sk_buff *skb, unsigned int len)
 	if (unlikely(len > skb->len))
 		return 0;
 
-	/* 其余情况，即len长度的数据有一部分在非线性区，就需要扩展非线性区，且把非线性区的数据复制到线性区。 */
+	/* 其余情况，即len长度的数据有一部分在非线性区，就需要扩展线性区尾部，且把非线性区的数据复制到线性区。 */
 	return __pskb_pull_tail(skb, len - skb_headlen(skb)) != NULL;
 }
 

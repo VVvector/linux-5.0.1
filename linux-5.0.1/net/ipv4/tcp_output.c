@@ -1481,7 +1481,7 @@ int tcp_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 			tcp_adjust_pcount(sk, skb, diff);
 	}
 
-	/* 将tso后的第二skb，加入到 sk_write_queue */
+	/* 将分段后的第2个skb，加入到 sk_write_queue */
 	/* Link BUFF into the send queue. */
 	__skb_header_release(buff);
 	tcp_insert_write_queue_after(skb, buff, sk, tcp_queue);

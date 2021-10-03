@@ -1647,18 +1647,16 @@ static struct sock *tcp_v4_cookie_check(struct sock *sk, struct sk_buff *skb)
  * held.
  */
 /*
- * TCP被动打开-服务器：
+ * TCP被动打开 -- 服务器：
  * tcp 想要被动打开，就必须得先进行 listen 调用。而对于一台主机，它如果想要作
  * 为服务器，它会在什么时候进行 listen 调用呢？不难想到，它在启动某个需要 TCP 连
- * 接的高级应用程序的时候，就会执行 listen 调用。经过 listen 调用之后，系统内部其实
+ * 接的应用程序的时候，就会执行 listen 调用。经过 listen 调用之后，系统内部其实
  * 创建了一个监听套接字，专门负责监听是否有数据发来，而不会负责传输数据。
- * 接着客户端就开始等待接收 SYN 段，然后回复 SYN+ACK 段，最后接收 ACK 段，
+ * 接着服务端就开始等待客户端发送 SYN 段，然后回复 SYN+ACK 段，最后接收 ACK 段，
  * 三次握手建立连接。
- */
-
-/* 第一次握手：客户端-接受 SYN 段；服务端-接收ACK包
- * 在进行第一次握手的时候， TCP 必然处于 LISTEN 状态。传输控制块接收处理的
- * 段都由tcp_v4_do_rcv来处理。
+ *
+ * 服务端：在进行第一次握手的时候，TCP 必然处于 LISTEN 状态。传输控制块接收处理的
+ * 段都由tcp_v4_do_rcv()来处理。
  */
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
@@ -1730,7 +1728,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	}
 	return 0;
 
-	/* 错误状态处理 */
+	/* 错误状态处理, 发送rst 包。 */
 reset:
 	tcp_v4_send_reset(rsk, skb);
 discard:
@@ -1969,26 +1967,24 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	/* Count it even if it's bad */
 	__TCP_INC_STATS(net, TCP_MIB_INSEGS);
 
-	/* 查看TCP协议头的正确性 */
-	/*
-	 * 如果 TCP 段在传输过程中被分片了，则到达本地后会在 IP 层重新组装。
-	 * 组装完成后，报文分片都存储在链表中。在此，需把存储在分片中的报文
-	 * 复制到 SKB 的线性存储区域中。如果发生异常，则丢弃该报文。
+	/* 确保TCP协议头(不包括tcp option)在skb的线性区:
+	 * 如果 TCP 段在传输过程中被ip 分片了，则到达本地后会在 IP 层重新组装。
+	 * 组装完成后，报文分片都存储在链表 - frag_list 中。在此，需要
+	 * 确保tcp header在线性区。
 	 */
 	if (!pskb_may_pull(skb, sizeof(struct tcphdr)))
 		goto discard_it;
 
-	/* 拿到tcp的头部 */
+	/* 获取到tcp的头部 */
 	th = (const struct tcphdr *)skb->data;
 
-	 /*
-	  * 如果 TCP 的首部长度小于不带数据的 TCP 的首部长度，则说明 TCP 数据异常。
-	  * 统计相关信息后，丢弃。
-	  */
+	/* 如果 TCP 的首部长度小于不带数据的 TCP 的首部长度，则说明 TCP 数据异常。
+	 * 统计相关信息后，丢弃。(TCP数据包的最小长度)
+	 */
 	if (unlikely(th->doff < sizeof(struct tcphdr) / 4))
 		goto bad_packet;
 
-	/* 检测整个 TCP 首部长度是否正常，如有异常，则丢弃。 */
+	/* 再次确保tcp头部(包括tcp option)都在线性区，便于后续处理。如有异常，则丢弃。 */
 	if (!pskb_may_pull(skb, th->doff * 4))
 		goto discard_it;
 
@@ -1996,20 +1992,20 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * Packet length and doff are validated by header prediction,
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
-	/* 验证 TCP 首部中的校验和，如校验和有误，则说明报文已损坏，统计相关信息后丢弃。 */
+	/* tcp伪首部checksum的计算和check，便于后面的check。 */
 	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo))
 		goto csum_error;
 
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
 
-	/* 2. 查看数据段是否属于某个套接字。即在ehash或bhash散列表中根据地址和端口来查找传输控制块。
+	/* 2. 查看数据段是否属于某个套接字。即在ehash或bhash散列表中根据 地址和端口 来查找传输控制块socket。
 	 * 查看依据：接收数据包的网络接口，源端口号，目的端口号。
-
+	 *
 	 * 如果在 ehash 中找到，则表示已经经历了三次握手并且已建立了连接，可以
 	 * 进行正常的通信。如果在 bhash 中找到，则表示已经绑定已经绑定了端口，处于侦听
 	 * 状态。如果在两个散列表中都查找不到，说明此时对应的传输控制块还没有创建，跳转
-	 * 到no_tcp_socket 处处理
+	 * 到 no_tcp_socket 处理。
 	 */
 lookup:
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
@@ -2043,6 +2039,7 @@ process:
 			inet_csk_reqsk_queue_drop_and_put(sk, req);
 			goto lookup;
 		}
+
 		/* We own a reference on the listener, increase it again
 		 * as we might lose it too soon.
 		 */
@@ -2081,13 +2078,13 @@ process:
 		}
 	}
 
-	/*ttl 小于给定的最小的 ttl*/
+	/* ttl 小于给定的最小的 ttl */
 	if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
 		__NET_INC_STATS(net, LINUX_MIB_TCPMINTTLDROP);
 		goto discard_and_relse;
 	}
 
-	/* 查找 IPsec 数据库，如果查找失败，进行相应处理. */
+	/* 查找 IPsec 数据库，如果查找失败，进行相应处理。 */
 	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
 		goto discard_and_relse;
 
@@ -2103,7 +2100,7 @@ process:
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
 
-	/* 根据 TCP 首部中的信息来设置 TCP 控制块中的值，因为 TCP 首部中的
+	/* 根据 TCP 首部中的信息来设置skb->cb[]中的值，因为 TCP 首部中的
 	 * 值都是网络字节序的，为了便于后续处理直接访问 TCP 首部字段，在此将这些值转换
 	 * 为本机字节序后存储在 TCP 的私有控制块中。 
 	 */
@@ -2132,12 +2129,12 @@ process:
 		/* 将skb放入sk->sk_receive_queue中 */
 		ret = tcp_v4_do_rcv(sk, skb);
 	} else if (tcp_add_backlog(sk, skb)) {
-		/* 添加到后备队列成功 sk->sk_backlog */
+		/* 添加到后备队列成功 sk->sk_backlog（也会受到sk->sk_rmem_alloc的限制）*/
 		goto discard_and_relse;
 	}
 	bh_unlock_sock(sk);
 
-/* 递减引用计数，当计数为 0 的时候，使用 sk\_free 释放传输控制块 */
+	/* 递减引用计数，当计数为 0 的时候，使用 sk_free 释放传输控制块 */
 put_and_return:
 	if (refcounted)
 		sock_put(sk);

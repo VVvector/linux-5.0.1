@@ -673,11 +673,18 @@ static inline void __tcp_fast_path_on(struct tcp_sock *tp, u32 snd_wnd)
 			       snd_wnd);
 }
 
+/* 用于生成预测标志 tp->pred_flags。 */
 static inline void tcp_fast_path_on(struct tcp_sock *tp)
 {
 	__tcp_fast_path_on(tp, tp->snd_wnd >> tp->rx_opt.snd_wscale);
 }
 
+/* 也是用于生成预测标志。不过会有条件检查：
+ * 1. 没有乱序数据
+ * 2. 接收窗口不为0
+ * 3. 接收缓存未耗尽
+ * 4. 没有紧急数据
+ */
 static inline void tcp_fast_path_check(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);

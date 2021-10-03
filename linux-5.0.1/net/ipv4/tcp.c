@@ -1296,17 +1296,16 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 /* tcp 发送函数
  * sendmsg系统调用在tcp层的实现是tcp_sendmsg函数，该函数完成以下任务：
  * 从用户空间读取数据，拷贝到内核skb，将skb加入到发送队列的任务，调用发送函数；
- * 函数在执行过程中会锁定控制块，避免软中断在tcp层的影响；函数核心流程为，
+ * 函数在执行过程中会锁定控制块，避免软中断在tcp层的影响；
+ * 函数核心流程：
  * 在发送数据时，查看是否能够将数据合并到发送队列中最后一个skb中，如果不能合并，
  * 则新申请一个skb；拷贝过程中，如果skb的线性区域有空间，则优先使用线性区域，
  * 线性区域空间不足，则使用分页区域；拷贝完成后，调用发送函数发送数据；
  *
- *	注：这时不一定会真正开始发送，如果没有达到发送条件的话，很可能
- *	    这次调用就直接返回了。
+ * 注：这时不一定会真正开始发送，如果没有达到发送条件的话，很可能这次系统调用就直接返回了。
  *
- *	注：
- *	应用程序send()数据后，会在tcp_sendmsg中尝试在同一个skb，
- *	保存size_goal大小的数据，然后再通过tcp_push把这些包通过tcp_write_xmit发出去
+ * 应用程序send()数据后，会在tcp_sendmsg()中尝试在同一个skb，
+ * 保存size_goal大小的数据，然后再通过tcp_push()把这些包通过tcp_write_xmit()发出去
  */
 int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
@@ -1320,7 +1319,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 	bool zc = false;
 	long timeo;
 
-	/* userspace通过socket sendmsg()接口下发数据。 */
+	/* user space是通过socket sendmsg()接口下发数据。 */
 	flags = msg->msg_flags;
 
 	/* 零拷贝的传输，例如 sendfile() */
@@ -1702,7 +1701,7 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	int ret;
 
-	/* 对套接字加锁 */
+	/* 对套接字加锁，防止多user同时写的并发，以及软中断的影响。 */
 	lock_sock(sk);
 	ret = tcp_sendmsg_locked(sk, msg, size);
 	release_sock(sk);

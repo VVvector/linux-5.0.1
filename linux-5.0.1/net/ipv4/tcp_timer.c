@@ -22,6 +22,15 @@
 #include <linux/gfp.h>
 #include <net/tcp.h>
 
+
+/*
+ * TCP为每条连接建立7个定时器：连接建立定时器，重传定时器，延时ACK定时器，持续定时器，保活定时器，
+ * FIN_WAIT_2定时器，TIME_WAIT定时器。
+ * 但实际上，为了提高效率，内核中只使用了4个定时器来完成了7个定时器的功能，也就是说，某些定时功能
+ * 合用了同一个定时器，其中FIN_WAIT_2和TIME_WAIT定时器比较特殊，当sock状态为FIN_WAIT_2或TIME_WAIT
+ * 时，tcp_sock会转变为inet_timewait_sock，定时器也就由inet_timewait_sock来管理。
+ */
+
 static u32 tcp_retransmit_stamp(const struct sock *sk)
 {
 	u32 start_ts = tcp_sk(sk)->retrans_stamp;
@@ -349,6 +358,15 @@ out:
  *
  *  Returns: Nothing (void)
  */
+/* 延时确认定时器的处理函数：
+ * “延时 ACK”定时器在tcp收到必须被确认但无需马上发出确认的段时设定，tcp在200ms后发送确认响应，
+ * 如果在这200ms内，有数据要在该连接发送，延时ACK响应就可随数据一起发送回对端，称为捎带确认。
+ *
+ * 延时确认定时器的激活：
+ * 1. 在建立连接时，客户端的第三次握手可能会被延时确认，如有数据需要输出，设置了TCP_DEFER_ACCEPT
+ * 选项或者不在快速确认模式。
+ * 2. 在确定立即发送ACK时，如果内存分配失败，则会进行延时确认。
+ */
 static void tcp_delack_timer(struct timer_list *t)
 {
 	struct inet_connection_sock *icsk =
@@ -369,6 +387,7 @@ static void tcp_delack_timer(struct timer_list *t)
 	sock_put(sk);
 }
 
+/* 持续(0窗口)定时器的处理函数 */
 static void tcp_probe_timer(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -486,9 +505,9 @@ void tcp_retransmit_timer(struct sock *sk)
 
 
 	/*
-		snd_wnd为窗口大小。sock_flag用来判断sock的状态，最后一个判断是
-		当前的连接状态不能处于sync_sent和syn_recv状态，即连接还未建立状态。
-	*/
+	 * snd_wnd为窗口大小。sock_flag用来判断sock的状态，最后一个判断是
+	 * 当前的连接状态不能处于sync_sent和syn_recv状态，即连接还未建立状态。
+	 */
 	if (!tp->snd_wnd && !sock_flag(sk, SOCK_DEAD) &&
 	    !((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) {
 		/* Receiver dastardly shrinks window. Our retransmits
@@ -515,12 +534,11 @@ void tcp_retransmit_timer(struct sock *sk)
 #endif
 
 		/*
-			tcp_jiffies32也就是jiffes，而rcv_tstamp表示最后一个ack接收的时间，也就是
-			最后一次对端确认的时间。因此，这两个时间之差不能大于tcp_rto_max，因为
-			tcp_rto_max为我们重传定时器的间隔时间的最大值。
-
-			tp->rcv_tstamp会在 tcp_input.c的 tcp_ack()函数中被更新
-		*/
+		 * tcp_jiffies32也就是jiffes，而rcv_tstamp表示最后一个ack接收的时间，也就是
+		 * 最后一次对端确认的时间。因此，这两个时间之差不能大于tcp_rto_max，因为
+		 * tcp_rto_max为我们重传定时器的间隔时间的最大值。
+		 * tp->rcv_tstamp会在 tcp_input.c的 tcp_ack()函数中被更新
+		 */
 		if (tcp_jiffies32 - tp->rcv_tstamp > TCP_RTO_MAX) {
 			tcp_write_err(sk);
 			goto out;
@@ -533,7 +551,7 @@ void tcp_retransmit_timer(struct sock *sk)
 		tcp_retransmit_skb(sk, tcp_rtx_queue_head(sk), 1);
 		__sk_dst_reset(sk);
 
-		/* 然后，重启定时器，继续等待akc的到来。 */
+		/* 然后，重启定时器，继续等待ack的到来。 */
 		goto out_reset_timer;
 	}
 
@@ -656,10 +674,13 @@ void tcp_write_timer_handler(struct sock *sk)
 	case ICSK_TIME_LOSS_PROBE:
 		tcp_send_loss_probe(sk);
 		break;
+	/* 重传处理定时器 */
 	case ICSK_TIME_RETRANS:
 		icsk->icsk_pending = 0;
 		tcp_retransmit_timer(sk);
 		break;
+
+	/* 持续定时器 */
 	case ICSK_TIME_PROBE0:
 		icsk->icsk_pending = 0;
 		tcp_probe_timer(sk);
@@ -670,6 +691,31 @@ out:
 	sk_mem_reclaim(sk);
 }
 
+/* 重传定时器和持续(0窗口)定时器
+ * 重传定时器：
+ * 在tcp发送数据时设定，如果定时器已超时而对端确认还未到达，则tcp将重传数据。
+ * 重传定时器的超时时间值是动态计算的，取决于tcp为该连接测量的往返时间以及该
+ * 段已被重传的次数。
+ *
+ * 持续(0窗口)定时器：
+ * 在对端通告接收窗为0，阻止TCP继续发送数据时设定。由于连接对端发送的窗口通告不可靠
+ *（只有数据才会确认，ACK不会被确认），允许TCP继续发送数据的后续窗口更新有可能丢失，
+ * 因此，如果TCP有数据要发送，而对端通告接收窗为0，则持续定时器启动，超时后，向对端
+ * 发送1字节的数据，以判断对端接收窗是否已打开。与重传定时器类似，持续定时器的超时
+ * 也是动态计算的，取决于连接的往返时间，在5-60s之间取值。
+ *
+ * 重传定时器的激活：
+ * 1. 如果发送在一个正常段之前不存在为未确认的段，在发送出该段之后。
+ * 2. 客户端连续发送SYN段后
+ * 3. 路径MTU探测失败后
+ * 4. 接收方丢弃SACK部分接收的段
+ *
+ * 持续定时器的激活：
+ * 1. 接收到ACK时：通常情况下，tcp在接收到ack后会检测对方的接收窗口大小。此时，如果本端还有
+ * 段需要发送，则会调用tcp_ack_probe()根据情况确认是否进行零窗口的探测。
+ * 2. 发送tcp段失败：在发送tcp段时，如果发送失败，则会调用tcp_check_probe_timer()检测是否需要
+ * 激活持续定时器，如有必要，则其激活。
+ */
 static void tcp_write_timer(struct timer_list *t)
 {
 	struct inet_connection_sock *icsk =
@@ -708,11 +754,11 @@ void tcp_set_keepalive(struct sock *sk, int val)
 }
 EXPORT_SYMBOL_GPL(tcp_set_keepalive);
 
-/* 用来检测一个连接是否还存在。。。
-	超时时间：7200秒，即2小时， 即超时后，会执行该timer函数。
-	最大次数：9次
-	每次发送packet间隔：75秒
-*/
+/* 
+ * 该timer实现了tcp的2个定时器：保活定时器，FIN_WAIT_2定时器。
+ * 这是由于这三个定时器分别处于ESTANBLISHED和FIN_WAIT_2三种状态，因此，
+ * 不必区分它们，只需要简单地通过当前tcp状态就能判断当前执行的是何种定时器。
+ */
 static void tcp_keepalive_timer(struct timer_list *t)
 {
 	struct sock *sk = from_timer(sk, t, sk_timer);
@@ -733,55 +779,89 @@ static void tcp_keepalive_timer(struct timer_list *t)
 		goto out;
 	}
 
+	/* 连接释放期间，用作FIN_WAIT_2定时器：
+	 * 当某个连接从FIN_WAIT_1状态变迁到FIN_WAIT_2状态，且不能再接收任何新数据时，则意味着应用
+	 * 进程调用了close()而非shutdown()，没有利用tcp的半关闭功能，FIN_WAIT_2定时器启动，超时时间
+	 * 为10min，在定时器第一次超时后，重新设置超时时间为75s，第二次超时后关闭连接。
+	 * 加入这个定时器的目的是为了避免对端一直部分FIN, 某个连接会用于滞留在FIN_WAIT_2状态。
+	 *
+	 * TIME_WAIT定时器：
+	 * 一般称为2MSL定时器，2MSL指两倍的MSL(最大段生存时间)。当连接转换到TIME_WAIT状态，即连接
+	 * 主动关闭时，TIME_WAIT定时器启动，超时时间设定为1min，超时后，TCP控制块被删除，端口号可重新使用。
+	 */
 	tcp_mstamp_refresh(tp);
 	if (sk->sk_state == TCP_FIN_WAIT2 && sock_flag(sk, SOCK_DEAD)) {
 		if (tp->linger2 >= 0) {
 			const int tmo = tcp_fin_time(sk) - TCP_TIMEWAIT_LEN;
-
-			/* Fin_Wain_2 Timer 函数 */
 			if (tmo > 0) {
 				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
 				goto out;
 			}
 		}
 
-		/* 发送 TCPHDR_RST package */
+		/* 发送 TCP HDR_RST package */
 		tcp_send_active_reset(sk, GFP_ATOMIC);
 		goto death;
 	}
 
+	/* 其余期间，用作保活定时器：
+	 * 超时时间：7200秒，即2小时， 即超时后，会执行该timer函数。
+	 * 最大次数：9次
+	 * 每次发送packet间隔：75秒
+	 * 
+	 * 注：
+	 * 只有在socket设置了SO_KEEPALIVE套接字选项后，才会发送保活探测消息。
+	 */
 	if (!sock_flag(sk, SOCK_KEEPOPEN) ||
 	    ((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_SYN_SENT)))
 		goto out;
 
+	/* 连接的空闲时间超过此值，就发送保活探测报文。 */
 	elapsed = keepalive_time_when(tp);
 
 	/* It is alive without keepalive 8) */
+	/* 如果网络中有发送且未确认的数据包，或者，发送队列不为空，说明该连接不是idle的。
+	 * 既然连接不是idle的，就没有必要探测对端是否正常，重新开始计时即可。
+	 * 
+	 * 而实际上当网络中有发送且未确认的数据包时，对端也可能会发生异常而没有响应。 
+	 * 这个时候会导致数据包的不断重传，只能依靠重传超过了允许的最大时间，来判断连接超时。 
+	 * 为了解决这一问题，引入了TCP_USER_TIMEOUT，允许用户指定超时时间，可见下文。
+	 */
 	if (tp->packets_out || !tcp_write_queue_empty(sk))
 		goto resched;
 
+	/* 连接经历的空闲时间，即上次收到报文至今的时间。 */
 	/* elapsed time of last received data packet */
 	elapsed = keepalive_time_elapsed(tp);
 
-	/* 比较 tcp_keepalive_time时间，是否超时。（最大是 7200s, 两个小时。） */
+	/* 如果连接空闲的时间超过了设置的时间（最大是 7200s, 两个小时。） */
 	if (elapsed >= keepalive_time_when(tp)) {
 		/* If the TCP_USER_TIMEOUT option is enabled, use that
 		 * to determine when to timeout instead.
+		 */
+		/*
+		 * 两种情况下关闭连接：
+		 * 1. 使用了TCP_USER_TIMEOUT选项，且有发送过探测报文，但是连接空闲时间超过了用户设置的时间。
+		 * 2. 没有使用TCP_USER_TIMETOUT选项，当发送的保活探测包个数达到了最大次数。
 		 */
 		if ((icsk->icsk_user_timeout != 0 &&
 		    elapsed >= msecs_to_jiffies(icsk->icsk_user_timeout) &&
 		    icsk->icsk_probes_out > 0) ||
 		    (icsk->icsk_user_timeout == 0 &&
-		    icsk->icsk_probes_out >= keepalive_probes(tp))) {  	/* tcp_keepalive_probes为9次。 */
+		    icsk->icsk_probes_out >= keepalive_probes(tp))) {
+			/* 发送一个RST数据包 */
 			tcp_send_active_reset(sk, GFP_ATOMIC);
+
+			/* 报告错误，关闭连接。 */
 			tcp_write_err(sk);
 			goto out;
 		}
 
-		/* 初始化 keepalive 或者 window probe */
+		/* 如果还不到关闭连接的时候，就继续发送保活探测包 */
 		if (tcp_write_wakeup(sk, LINUX_MIB_TCPKEEPALIVE) <= 0) {
 			icsk->icsk_probes_out++;
-			elapsed = keepalive_intvl_when(tp); //获取tcp_keepalive_intvl。keepalive探测包的发送间隔，tcp_keepalive_intvl为75s。
+			/* 获取tcp_keepalive_intvl。keepalive探测包的发送间隔，tcp_keepalive_intvl为75s。*/
+			elapsed = keepalive_intvl_when(tp);
 		} else {
 			/* If keepalive was lost due to local congestion,
 			 * try harder.
@@ -790,10 +870,10 @@ static void tcp_keepalive_timer(struct timer_list *t)
 		}
 	} else {
 		/* It is tp->rcv_tstamp + keepalive_time_when(tp) */
+		/* 如果连接的空闲时间还没有超过设定值，就继续等待。 */
 		elapsed = keepalive_time_when(tp) - elapsed;
 	}
 
-	/* 资源回收 */
 	sk_mem_reclaim(sk);
 
 resched:
@@ -829,9 +909,9 @@ static enum hrtimer_restart tcp_compressed_ack_kick(struct hrtimer *timer)
 	return HRTIMER_NORESTART;
 }
 
+/* tcp socket定时器的初始化函数。初始化三个定时器： 重传定时器，延时ack定时器，保活定时器 */
 void tcp_init_xmit_timers(struct sock *sk)
 {
-	/* 初始化三个定时器： 重传定时器，延时ack定时器，保活定时器 */
 	inet_csk_init_xmit_timers(sk, &tcp_write_timer, &tcp_delack_timer,
 				  &tcp_keepalive_timer);
 

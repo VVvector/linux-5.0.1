@@ -333,7 +333,7 @@ struct sock_common {
   */
 
 /*
- * sock 结构是比较通用的网络层描述块，构成传输控制块的基础，与具体的协议族无关。
+ * sock 结构是比较通用的网络层描述块，构成 传输控制块层 的基础，与具体的协议族无关。
  * 它描述了各协议族的公共信息，因此不能直接作为传输层控制块来使用。不同协议族的
  * 传输层在使用该结构的时候都会对其进行拓展，来适合各自的传输特性。例如， inet_sock
  * 结构由 sock 结构及其它特性组成，构成了 IPV4 协议族传输控制块的基础。
@@ -379,7 +379,10 @@ struct sock {
 #define sk_flags		__sk_common.skc_flags
 #define sk_rxhash		__sk_common.skc_rxhash
 
-	/* 同步锁，一是用于用户进程读取数据与网络层向传输层传递数据之间的同步。二是用于软中断之间同步访问传输块。 */
+	/* 同步锁
+	 * 1. 用于用户进程读取数据与网络层向传输层传递数据之间的同步。
+	 * 2. 用于软中断之间同步访问传输块。
+	 */
 	socket_lock_t		sk_lock;
 	atomic_t		sk_drops;
 	int			sk_rcvlowat; /* 接收缓存下限值 */
@@ -399,9 +402,10 @@ struct sock {
 	 * on 64bit arches, not because its logically part of
 	 * backlog.
 	 */
-	 /* 当接收数据时，锁被用户进程占用，就把数据先存放到该备用队列中。
-	  * 等释放时，用户进程再使用该队列数据。 只用于tcp。
-	  */
+	/* 当接收数据时，锁被用户进程占用，就把数据先存放到该备用队列 sk_backlog 中。
+	 * 等锁被释放时，用户进程再使用该队列数据。
+	 * 只用于tcp，udp没有使用该队列。
+	 */
 	struct {
 		atomic_t	rmem_alloc;
 		int		len;
@@ -438,7 +442,14 @@ struct sock {
 	/* 为发送而分配的所有SKB数据区的总长度 */
 	refcount_t		sk_wmem_alloc;
 	unsigned long		sk_tsq_flags;
+
+	/*  */
 	union {
+		/* 指向发送队列中下一个要发送的数据包。
+		 * 用来跟踪哪些包还未发送的，而不是用来进行发送的，如果为空，则意味着
+		 * 发送队列上的所有数据包都已发送过了。
+		 * 在发送方从接收方接收到ACK后，可扩大发送窗口，从sk_send_head开始遍历发送队列发送更多的段。
+		 */
 		struct sk_buff	*sk_send_head;
 		struct rb_root	tcp_rtx_queue;
 	};
@@ -446,10 +457,10 @@ struct sock {
 	/**
 	 * 向内核添加数据时，被缓冲的数据可能会在内核中形成多个待发送的IP分片。
 	 * 通过该指针将这些分片缓冲区连接起来。
-	 * 这是ip_append_data函数的输出结果。
-	 * 发送队列，对TCP来说，是重传队列和发送队列。sk_send_head之前是重传队列，之后是发送队列。
+	 * 这是ip_append_data()函数的输出结果。
 	 */
 	struct sk_buff_head	sk_write_queue;
+
 	__s32			sk_peek_off;
 	int			sk_write_pending;
 	__u32			sk_dst_pending_confirm;
@@ -508,8 +519,8 @@ struct sock {
 	rwlock_t		sk_callback_lock;
 	int			sk_err, /* 记录当前传输层最后一次致命错误的错误码。应用层读取后恢复。 */
 				sk_err_soft; /* 非致命性错误，或者用作在socket被锁定时记录错误的后备成员。 */
-	u32			sk_ack_backlog; /* 当前已经建立的连接数。等待用户调用accept。 */
-	u32			sk_max_ack_backlog; /* 连接队列长度的上限。 */
+	u32			sk_ack_backlog; /* 当前全连接队列的长度：当前已经建立的连接数。等待用户调用accept。 */
+	u32			sk_max_ack_backlog; /* 全连接队列最大值：连接队列长度的上限。 */
 	kuid_t			sk_uid;
 	struct pid		*sk_peer_pid;
 	const struct cred	*sk_peer_cred;
@@ -925,6 +936,7 @@ static inline void sk_acceptq_added(struct sock *sk)
 	sk->sk_ack_backlog++;
 }
 
+/* 检测全连接队列是否满了 */
 static inline bool sk_acceptq_is_full(const struct sock *sk)
 {
 	return sk->sk_ack_backlog > sk->sk_max_ack_backlog;

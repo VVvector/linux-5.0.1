@@ -5430,6 +5430,7 @@ static void tcp_check_space(struct sock *sk)
 	}
 }
 
+/* 检测发送队列中是否还有数据包需要发送，如果有，则调用tcp_write_xmit()来处理发送过程。 */
 static inline void tcp_data_snd_check(struct sock *sk)
 {
 	tcp_push_pending_frames(sk);
@@ -5494,6 +5495,8 @@ send_now:
 	delay = min_t(unsigned long, sock_net(sk)->ipv4.sysctl_tcp_comp_sack_delay_ns,
 		      rtt * (NSEC_PER_USEC >> 3)/20);
 	sock_hold(sk);
+
+	/* tcp delay ACK或者叫批量ACK的timer */
 	hrtimer_start(&tp->compressed_ack_timer, ns_to_ktime(delay),
 		      HRTIMER_MODE_REL_PINNED_SOFT);
 }
@@ -5789,17 +5792,17 @@ discard:
  */
 /*
  * fast path: 
- *	复制到用户空间或者按序进入sk_receive_queue的处理路径。
- *	原因：
- *	TCP协议头预定向算法可以认为在套接字连接期间到达的数据包至少有一半是包含数据段的数据包，
- *	而不是ACK段数据包。通过使用TCP协议头预定向，TCP协议底层接收函数事先确定那些数据包符合以上条件，
- *	这些数据包就立即放入sk->sk_receive_queue中。
- *	条件：
- *	1. 收到的数据段包含的是数据，而不是纯ACK。
- *	2. 数据段是顺序传输数据中的一个完整数据段，接收顺序正确。
+ * 复制到用户空间或者按序进入sk_receive_queue的处理路径。
+ * 原因：
+ * TCP协议头预定向算法可以认为在套接字连接期间到达的数据包至少有一半是包含数据段的数据包，
+ * 而不是ACK段数据包。通过使用TCP协议头预定向，TCP协议底层接收函数事先确定那些数据包符合以上条件，
+ * 这些数据包就立即放入sk->sk_receive_queue中。
+ * 条件：
+ * 1. 收到的数据段包含的是数据，而不是纯ACK。
+ * 2. 数据段是顺序传输数据中的一个完整数据段，接收顺序正确。
  *
  * slow path:
- *	对那些乱序包或者别的不符合fast-path要求的包的处理路径。
+ * 对那些乱序包或者别的不符合fast-path要求的包的处理路径。
  */
 				  
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
@@ -5829,7 +5832,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	 *	extra cost of the net_bh soft interrupt processing...
 	 *	We do checksum and copy also but from device to kernel.
 	 */
-
+	/* 基于tcp header预测 */
 	tp->rx_opt.saw_tstamp = 0;
 
 	/*	pred_flags is 0xS?10 << 16 + snd_wnd
@@ -5841,6 +5844,12 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	 *	PSH flag is ignored.
 	 */
 
+	/* 快速路径处理 */
+	/*
+	 * 1. 满足预测标志。TCP_HP_BITS用于排除flag中的PSH标志位。
+	 * 2. 数据包序列正确 （该数据包的第一个序列号就是下一个要接收的序列号）
+	 * 3. 对方的ack号也是符合预期（在已发送的数据内）
+	 */
 	if ((tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags &&
 	    TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
 	    !after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)) {
@@ -5852,6 +5861,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 		 */
 
 		/* Check timestamp */
+		/* 时间戳检查PAWS  - Protect Against Wrapped Sequence numbers 防止回绕序号*/
 		if (tcp_header_len == sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) {
 			/* No? Slow path! */
 			if (!tcp_parse_aligned_timestamp(tp, th))
@@ -5868,6 +5878,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			 */
 		}
 
+		/* 不携带数据的tcp包，即Pure ACK。例如，没有携带数据或者接收端检测到有乱序数据时 */
 		if (len <= tcp_header_len) {
 			/* Bulk data transfer: sender */
 			if (len == tcp_header_len) {
@@ -5883,9 +5894,14 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 				/* We know that such packets are checksummed
 				 * on entry.
 				 */
+				/* pure ack的数据包处理 */
 				tcp_ack(sk, skb, 0);
+
 				__kfree_skb(skb);
+
+				/* 检查发送队列是否有数据要发送 */
 				tcp_data_snd_check(sk);
+
 				/* When receiving pure ack in fast path, update
 				 * last ts ecr directly instead of calling
 				 * tcp_rcv_rtt_measure_ts()
@@ -5896,6 +5912,8 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 				TCP_INC_STATS(sock_net(sk), TCP_MIB_INERRS);
 				goto discard;
 			}
+
+		/* 其余的tcp 包处理，即tcp包中有payload数据。 */
 		} else {
 			int eaten = 0;
 			bool fragstolen = false;
@@ -5935,6 +5953,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 					goto no_ack;
 			}
 
+			/* 检查是否需要发送ack给对方 */
 			__tcp_ack_snd_check(sk, 0);
 no_ack:
 			if (eaten)
@@ -5946,7 +5965,15 @@ no_ack:
 		}
 	}
 
-	/* 慢路径的处理 */
+	/* 慢路径的处理：
+	 * 1. 收到乱序数据或乱序队列非空
+	 * 2. 收到紧急指针
+	 * 3. 接收缓存耗尽
+	 * 4. 收到0窗口通告
+	 * 5. 收到的报文中含有除了PUSH和ACK之外的标记，例如,SYN, FIN, RST
+	 * 6. 报文的时间戳选项解析失败
+	 * 7. 报文的PAWS检查失败
+	 */
 slow_path:
 	if (len < (th->doff << 2) || tcp_checksum_complete(skb))
 		goto csum_error;
@@ -5965,8 +5992,10 @@ step5:
 	if (tcp_ack(sk, skb, FLAG_SLOWPATH | FLAG_UPDATE_TS_RECENT) < 0)
 		goto discard;
 
+	/* 更新RTT估计量 */
 	tcp_rcv_rtt_measure_ts(sk, skb);
 
+	/* 紧急指针 */
 	/* Process urgent data. */
 	tcp_urg(sk, skb, th);
 
@@ -5974,7 +6003,10 @@ step5:
 	/* step 7: process the segment text */
 	tcp_data_queue(sk, skb);
 
+	/* 试图发送队列中的数据 */
 	tcp_data_snd_check(sk);
+
+	/* 发送ACK */
 	tcp_ack_snd_check(sk);
 	return;
 
@@ -6868,6 +6900,14 @@ static void tcp_reqsk_record_syn(const struct sock *sk,
 	}
 }
 
+/*
+ * 本函数可得出，会有三个条件因队列长度的关系而被丢弃的：
+ * 1. 如果半连接队列满了，并且没有开启 tcp_syncookies，则会丢弃；
+ * 2. 若全连接队列满了，且没有重传 SYN+ACK 包的连接请求多于 1 个，则会丢弃；
+ * 3. 如果没有开启 tcp_syncookies，并且 max_syn_backlog 减去 当前半连接队列长度于
+ * (max_syn_backlog >> 2)，则会丢弃；
+ */
+
 int tcp_conn_request(struct request_sock_ops *rsk_ops,
 		     const struct tcp_request_sock_ops *af_ops,
 		     struct sock *sk, struct sk_buff *skb)
@@ -6892,9 +6932,12 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 
 
 	/*
-	 * 如果打开了 SYNCOOKIE 选项，并且 SYN 请求队列已满并且 isn 为 0, 然后通过函数
-	 * tcp_syn_flood_action 判断是否需要发送 syncookie。如果没有启用 syncookie 的话，
-	 * 就会返回 false，此时不能接收新的 SYN 请求，会将所收到的包丢掉。
+	 * tcp_syncookies默认值为1，表明在套接口的SYN backlog队列溢出时，将开启SYNCOOKIES功能，
+	 * 抵御SYN泛洪攻击。如果tcp_syncookies设置为2，将会无条件的开启SYNCOOKIES功能。
+	 *
+	 * 1. 如果打开了 SYNCOOKIE 选项，或者，SYN 请求队列（半连接队列）已满，并且 isn 为 0：
+	 * 通过函数tcp_syn_flood_action() 判断是否需要发送syncookie。
+	 * 如果没有启用syncookie，就会返回 false，即此时不能接收新的 SYN 请求，会将所收到的包丢掉。（丢弃连接）
 	 */
 	/* TW buckets are converted to open requests without
 	 * limitations, they conserve resources and peer is
@@ -6907,6 +6950,9 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 			goto drop;
 	}
 
+	/*
+	 * 2. 如果全连接队列满了，则直接丢弃。
+	 */
 	if (sk_acceptq_is_full(sk)) {
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
 		goto drop;
@@ -6979,9 +7025,12 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	 */
 	if (!want_cookie && !isn) {
 
-		/* 这里有检查 SYN队列的最大半连接数 sysctl_max_syn_backlog，512个。
-			用SYN cookie技术来处理SYN连接。避免守候半连接，用一个cookie来响应TCP SYN请求。
-		*/
+		/* 3. 这里有检查 SYN队列的最大半连接数 sysctl_max_syn_backlog（512个）。
+		 * 用SYN cookie技术来处理SYN连接。避免守候半连接，用一个cookie来响应TCP SYN请求。
+		 *
+		 * 如果没有开启tcp_syncookies，并且max_syn_backlog减去当前半连接队列长度小于
+		 * (max_syn_backlog >> 2), 则会丢弃。
+		 */
 		
 		/* Kill the following clause, if you dislike this way. */
 		if (!net->ipv4.sysctl_tcp_syncookies &&

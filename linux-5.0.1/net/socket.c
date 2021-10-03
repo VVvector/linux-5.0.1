@@ -1522,7 +1522,18 @@ int __sys_listen(int fd, int backlog)
 
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (sock) {
+		/* /proc/sys/net/core/somaxconn
+		 * somaxconn是linux内核的参数，默认是128，可以通过 /proc/sys/net/core/somaxconn
+		 * 来设置其值。
+		 */
 		somaxconn = sock_net(sock->sk)->core.sysctl_somaxconn;
+
+		/* TCP全连接队列最大值  =  min(somaxconn, backlog)。
+		 * backlog是listen(int sockfd, int backlog)函数中的backlog大小，Nginx默认值是511。
+		 * 可以通过修改配置文件设置其长度。
+		 * 注：
+		 * 只有重新调用listen()函数TCP全连接队列才会重新初始化。
+		 */
 		if ((unsigned int)backlog > somaxconn)
 			backlog = somaxconn;
 
@@ -1535,6 +1546,7 @@ int __sys_listen(int fd, int backlog)
 	return err;
 }
 
+/* listen函数调用的内核源码 */
 SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 {
 	return __sys_listen(fd, backlog);
