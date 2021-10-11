@@ -1676,7 +1676,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 			}
 		}
 
-		/*skb接收函数 - fast path/ slowa path*/
+		/* established状态下的skb接收函数 - fast path/ slowa path */
 		tcp_rcv_established(sk, skb);
 		return 0;
 	}
@@ -2253,6 +2253,8 @@ const struct inet_connection_sock_af_ops ipv4_specific = {
 	.conn_request	   = tcp_v4_conn_request,
 	.syn_recv_sock	   = tcp_v4_syn_recv_sock,
 	.net_header_len	   = sizeof(struct iphdr),
+
+	/* SOL_IP */
 	.setsockopt	   = ip_setsockopt,
 	.getsockopt	   = ip_getsockopt,
 	.addr2sockaddr	   = inet_csk_addr2sockaddr,

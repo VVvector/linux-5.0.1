@@ -44,7 +44,10 @@ struct linger {
  *	system, not 4.3. Thus msg_accrights(len) are now missing. They
  *	belong in an obscure libc emulation or the bin.
  */
- //应用层传送给传输层信息的数据结构
+/* 应用层传送给传输层信息的数据结构
+ * 尽管通过发送系统调用 sendto(), send()发送数据时可以直接指定待输出数据的地址，通过接收系统
+ * 调用 recvfrom(), recv()接收时直接指定数据的缓冲区，然而，最终还是需要组合成msghdr结构进行处理。
+ */
 struct msghdr {
 	/* 套接字的名字，指向struct sockaddr_in数据结构。包含目标IP地址和端口号。*/
 	void		*msg_name;	/* ptr to socket address structure */
@@ -52,16 +55,20 @@ struct msghdr {
 	/* 套接字名字的长度 */
 	int		msg_namelen;	/* size of socket address structure */
 
-	/* 分散的数据块 */
+	/* 分散的数据块，即待发送或接收的数据 */
 	struct iov_iter	msg_iter;	/* data */
 
-	/* 控制数据，用于支持应用程序的控制信息API功能，向套接字层下的协议传送控制信息。 */
+	/* 控制信息，用于支持应用程序的控制信息API功能，向套接字层下的协议传送控制信息。
+	 * 指向一个附加的数据结构，通常情况下为 cmsghdr 结构类型的数组。
+	 */
 	void		*msg_control;	/* ancillary data */
 
-	/* 控制描述符链表的长度 */
+	/* 整个控制信息考虑对齐后的长度。 */
 	__kernel_size_t	msg_controllen;	/* ancillary data buffer length */
 
-	/* 为套接字从应用层接收到控制的标志。 */
+	/* 为套接字从应用层接收到控制的标志。
+	 * 例如，MSG_OOB, MSG_PEEK, ...
+	 */
 	unsigned int	msg_flags;	/* flags on received message */
 
 	/* 指向 iocb 的指针（用于异步请求） */
@@ -92,7 +99,11 @@ struct mmsghdr {
 
 struct cmsghdr {
 	__kernel_size_t	cmsg_len;	/* data byte count, including hdr */
+
+	/* 如，SOL_SOCKET, SOL_IP等 */
         int		cmsg_level;	/* originating protocol */
+
+	/* 如，IP_RETOPTS, IP_TTL等 */
         int		cmsg_type;	/* protocol-specific type */
 };
 
@@ -326,7 +337,7 @@ struct ucred {
 
 /* 1. 会发生在sendfile(), splice()接口中。
  * 2. 可以通过setsockopt()设置SOCK_ZEROCOPY, 然后，通过send(socket, buffer, length, MSG_ZEROCOPY)发送数据。
- *     然后，通过  status = recvmsg(socket, &message, MSG_ERRORQUEUE)检查结果成功后，才释放buffer。
+ * 然后，通过  status = recvmsg(socket, &message, MSG_ERRORQUEUE)检查结果成功后，才释放buffer。
  */
 #define MSG_ZEROCOPY	0x4000000	/* Use user data in kernel path */
 

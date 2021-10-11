@@ -145,6 +145,32 @@ static int tcp_out_of_resources(struct sock *sk, bool do_reset)
  *  @sk:    Pointer to the current socket.
  *  @alive: bool, socket alive state
  */
+/* https://segmentfault.com/a/1190000022874344 */
+/*
+ * 主动方发送FIN报文后，连接就处于FIN_WAIT_1状态，正常情况下，如果能及时收到被动方的ACK，
+ * 则会很快变为FIN_WAIT_2状态。
+ * 但是，当迟迟收不到对方返回的ACK时，连接就会一直处于FIN_WAIT_1状态。此时，内核会定时
+ * 重发FIN报文，其中，重发次数由tcp_orphan_retries参数控制。
+ * 注意：
+ * orphan虽然是孤儿的意思，但是，该参数却不只对孤儿连接有效，事实上，它对
+ * 所有FIN_WAIT_1状态下的连接都有效，默认值是0，特指8次。
+ *
+ * 如果FIN_WAIT_1状态连接很多，我们就需要考虑降低tcp_orphan_retries的值，当重传次数超过
+ * tcp_orphan_retries时，连接就会直接被关闭掉。
+ * 
+ * 对于普遍正常情况下，调低tcp_orphan_retries就可以了，如果遇到恶意攻击，FIN报文根本无法
+ * 发送出去，这由tcp两个特性导致的：
+ * 1. tcp报文必须是有序发送的，FIN报文也不例外，当发送缓存区还有数据没有发送时，FIN报文也
+ * 不能提前发送。
+ * 2. tcp是有流量控制功能的，当接收方接收窗口为0时，发送方就不能再发送数据。所有，当攻击
+ * 者下载大文件时，就可以通过接收窗口设置为0，这会使得FIN报文无法发出，那么连接会一直处于
+ * FIN_WAIT_1.
+ * 解决这种问题的方法，是调整tcp_max_orphans参数，他定义了[孤儿连接]的最大数量。
+ *
+ * 当进程调用了 close()函数关闭连接，此时连接就会是 孤儿连接，因为它无法再发送和接收数据了。
+ * linux系统为了防止孤儿连接过多，导致系统资源长时间被占用，就提供了 tcp_max_orphans参数。
+ * 如果孤儿连接数量大于它，新增的孤儿连接将不再走四次挥手，而是直接发送RST复位报文强制关闭。
+ */
 static int tcp_orphan_retries(struct sock *sk, bool alive)
 {
 	int retries = sock_net(sk)->ipv4.sysctl_tcp_orphan_retries; /* May be zero. */
@@ -916,10 +942,12 @@ void tcp_init_xmit_timers(struct sock *sk)
 				  &tcp_keepalive_timer);
 
 
+	/* tcp的pacing timer */
 	hrtimer_init(&tcp_sk(sk)->pacing_timer, CLOCK_MONOTONIC,
 		     HRTIMER_MODE_ABS_PINNED_SOFT);
 	tcp_sk(sk)->pacing_timer.function = tcp_pace_kick;
 
+	/* delay ACK的timer，即批量ACK的timer */
 	hrtimer_init(&tcp_sk(sk)->compressed_ack_timer, CLOCK_MONOTONIC,
 		     HRTIMER_MODE_REL_PINNED_SOFT);
 	tcp_sk(sk)->compressed_ack_timer.function = tcp_compressed_ack_kick;

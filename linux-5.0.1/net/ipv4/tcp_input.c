@@ -705,6 +705,7 @@ static void tcp_event_data_recv(struct sock *sk, struct sk_buff *skb)
 	}
 	icsk->icsk_ack.lrcvtime = now;
 
+	/* 路由器的显示拥塞通知，进入快速确认模式。 */
 	tcp_ecn_check_ce(sk, skb);
 
 	if (skb->len >= 128)
@@ -3093,6 +3094,7 @@ void tcp_rearm_rto(struct sock *sk)
 	if (tp->fastopen_rsk)
 		return;
 
+	/* 如果没有未应答的数据，就启动重传定时器。 */
 	if (!tp->packets_out) {
 		inet_csk_clear_xmit_timer(sk, ICSK_TIME_RETRANS);
 	} else {
@@ -3712,7 +3714,7 @@ static u32 tcp_newly_delivered(struct sock *sk, u32 prior_delivered, int flag)
 }
 
 /* This routine deals with incoming acks, but not outgoing ones. */
-/* 处理接收的ack包 */
+/* 处理接收的ack包，且不会发送任何包出去。 */
 static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
@@ -3776,7 +3778,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	if (flag & FLAG_UPDATE_TS_RECENT)
 		tcp_replace_ts_recent(tp, TCP_SKB_CB(skb)->seq); /* 替换时间戳 */
 
-	/* 如果执行的是快速路径并且确认号大于先前的 snd_una*/
+	/* 如果执行的是快速路径，并且确认号大于先前的 snd_una*/
 	if ((flag & (FLAG_SLOWPATH | FLAG_SND_UNA_ADVANCED)) ==
 	    FLAG_SND_UNA_ADVANCED) {
 		/* Window is constant, pure forward advance.
@@ -4111,8 +4113,10 @@ EXPORT_SYMBOL(tcp_parse_options);
 
 static bool tcp_parse_aligned_timestamp(struct tcp_sock *tp, const struct tcphdr *th)
 {
+	/* 这里指到tcp header的option数据处了 */
 	const __be32 *ptr = (const __be32 *)(th + 1);
 
+	/* 解析时间戳 */
 	if (*ptr == htonl((TCPOPT_NOP << 24) | (TCPOPT_NOP << 16)
 			  | (TCPOPT_TIMESTAMP << 8) | TCPOLEN_TIMESTAMP)) {
 		tp->rx_opt.saw_tstamp = 1;
@@ -4960,7 +4964,7 @@ void tcp_data_ready(struct sock *sk)
 	if (avail < sk->sk_rcvlowat && !sock_flag(sk, SOCK_DONE))
 		return;
 
-	/* 这里即sock_def_readable() */
+	/* 这里即 sock_def_readable() */
 	sk->sk_data_ready(sk);
 }
 
@@ -5816,6 +5820,8 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	trace_tcp_probe(sk, skb);
 
 	tcp_mstamp_refresh(tp);
+
+	/* 如果路由为空，则重新设置路由 */
 	if (unlikely(!sk->sk_rx_dst))
 		inet_csk(sk)->icsk_af_ops->sk_rx_dst_set(sk, skb);
 	/*
@@ -5832,7 +5838,6 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	 *	extra cost of the net_bh soft interrupt processing...
 	 *	We do checksum and copy also but from device to kernel.
 	 */
-	/* 基于tcp header预测 */
 	tp->rx_opt.saw_tstamp = 0;
 
 	/*	pred_flags is 0xS?10 << 16 + snd_wnd
@@ -5844,7 +5849,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	 *	PSH flag is ignored.
 	 */
 
-	/* 快速路径处理 */
+	/* 快速路径检查和处理 */
 	/*
 	 * 1. 满足预测标志。TCP_HP_BITS用于排除flag中的PSH标志位。
 	 * 2. 数据包序列正确 （该数据包的第一个序列号就是下一个要接收的序列号）
@@ -5864,9 +5869,11 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 		/* 时间戳检查PAWS  - Protect Against Wrapped Sequence numbers 防止回绕序号*/
 		if (tcp_header_len == sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) {
 			/* No? Slow path! */
+			/* 解析时间戳错误，则执行慢速路径。 */
 			if (!tcp_parse_aligned_timestamp(tp, th))
 				goto slow_path;
 
+			/* 序号回转，则执行慢速路径。 */
 			/* If PAWS failed, check it more carefully in slow path */
 			if ((s32)(tp->rx_opt.rcv_tsval - tp->rx_opt.ts_recent) < 0)
 				goto slow_path;
@@ -5918,6 +5925,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			int eaten = 0;
 			bool fragstolen = false;
 
+			/* tcp校验检查 */
 			if (tcp_checksum_complete(skb))
 				goto csum_error;
 
@@ -5933,6 +5941,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			    tp->rcv_nxt == tp->rcv_wup)
 				tcp_store_ts_recent(tp);
 
+			/* 更新RTT */
 			tcp_rcv_rtt_measure_ts(sk, skb);
 
 			NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPHPHITS);
@@ -5943,6 +5952,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			/* 将skb放入到sk_receive_queue队列中 */
 			eaten = tcp_queue_rcv(sk, skb, &fragstolen);
 
+			/*  */
 			tcp_event_data_recv(sk, skb);
 
 			if (TCP_SKB_CB(skb)->ack_seq != tp->snd_una) {

@@ -206,7 +206,7 @@ resubmit:
 			nf_reset(skb);
 		}
 
-		/* 这里会调用ip层之上的传输层协议*/
+		/* 这里会调用ip层之上的传输层协议, 例如，tcp和udp*/
 		ret = ipprot->handler(skb);
 		if (ret < 0) {
 			protocol = -ret;
@@ -234,13 +234,10 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 
 	rcu_read_lock();
 	/*
-	这里会从数据包中读取协议类型，然后 调用该协议的 handler方法进行处理。
-
-	可能会调用 tcp_v4_rcv() （TCP）, udp_rcv() （UDP），icmp_rcv() (ICMP)，igmp_rcv()(IGMP)
-		net/ipv4/af_inet.c：用inet_add_protocol()接口注册各协议。
-
-
-	inet_protos: 这里有保存不同的高层协议。 
+	 * 这里会从数据包中读取协议类型，然后 调用该协议的 handler方法进行处理。
+	* 可能会调用 tcp_v4_rcv() （TCP）, udp_rcv() （UDP），icmp_rcv() (ICMP)，igmp_rcv()(IGMP)
+	* net/ipv4/af_inet.c：用inet_add_protocol()接口注册各协议。
+	* inet_protos: 这里有保存不同的高层协议。 
 	net/ipv4/af_inet.c
 	tcp_protocol, udp_protocol, icmp_protocol 等
 

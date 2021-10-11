@@ -173,10 +173,17 @@ enum {
  * 在tcp建立连接后，tcp本身有一个状态机的跳转来处理各种丢包，包乱序等异常情况。
  */
 enum tcp_ca_state {
+	/*
+	 * 当网络中没有发送丢包，也就不需要重传，sender按照慢启动或者拥塞避免算法处理到来的ACK。
+	 */
 	/* Normal state, no dubious events, fast path */
 	TCP_CA_Open = 0,
 #define TCPF_CA_Open	(1<<TCP_CA_Open)
 
+	/*
+	 * 当sender检测到dupack或者sack，将会转移到Disorder状态，当处于这个状态时，cwnd将维持不变。
+	 * 每收到一个dupack或sack，发送方将发送一个新包。
+	 */
 	/* In all the respects it is "Open", but requires a bit more attention.
 	 * It is entered when we see some SACKs or dupacks. It is split of "Open"
 	 * mainly to move some processing from fast path to slow one.
@@ -184,16 +191,33 @@ enum tcp_ca_state {
 	TCP_CA_Disorder = 1,
 #define TCPF_CA_Disorder (1<<TCP_CA_Disorder)
 
+	/*
+	 * 当sender收到ACK包含显式拥塞通知ECN，这个ECN由路由器写在IP头中，告诉TCP sender网络拥塞，
+	 * sender不会立马降低cwnd，而是根据 快速恢复算法 进行降窗，直到减为之前的一半。当cwnd正在
+	 * 减少，网络中又没有重传包时，这个状态就叫CWR，CWR可以被Recovery 或者 Loss中断。
+	 */
 	/* CWND was reduced due to some Congestion Notification event. It can be ECN,
 	 * ICMP source quench, local device congestion.
 	 */
 	TCP_CA_CWR = 2,
 #define TCPF_CA_CWR	(1<<TCP_CA_CWR)
 
+	/*
+	 * 当sender因为 快速重传机制 触发丢包时，sender会重传第一个未被ACK的包，并进入Recovery状态。
+	 * 在Recovery状态期间，cwnd的处理和CWR大致一样，要么重传标记为lost的包，要么根据包守恒原则
+	 * 发送新包。直到网络中所有的包都被ACK，才会退出Recovery进入open状态，Recovery状态可以被loss
+	 * 状态打断。
+	 */
 	/* CWND was reduced, we are fast-retransmitting. */
 	TCP_CA_Recovery = 3,
 #define TCPF_CA_Recovery (1<<TCP_CA_Recovery)
 
+	/*
+	 * 当RTO后，tcp sender进入loss状态，所有在网络中的包被标记为lost，cwnd重置为1，通过slow start
+	 * 重新增加cwnd。Loss与Recovery状态的不同点在于cwnd会重置为1，但是，Recovery不会，Recvoery状态下
+	 * 拥塞控制通过 快速恢复 算法逐步降低cwnd至sshthresh。Loss状态不能被其他任何状态中断，只有当网络
+	 * 中所有的包都被成功ACK后，才能重新进入Open状态。
+	 */
 	/* CWND was reduced due to RTO timeout or SACK reneging */
 	TCP_CA_Loss = 4
 #define TCPF_CA_Loss	(1<<TCP_CA_Loss)

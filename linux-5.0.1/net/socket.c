@@ -391,7 +391,7 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 	if (!dname)
 		dname = sock->sk ? sock->sk->sk_prot_creator->name : "";
 
-	/* 这里，会调用alloc_file, 且会把socket_file_ops赋值给file->f_op。 */
+	/* 这里，会调用alloc_file, 且会把 socket_file_ops赋值给 file->f_op。 */
 	file = alloc_file_pseudo(SOCK_INODE(sock), sock_mnt, dname,
 				O_RDWR | (flags & O_NONBLOCK),
 				&socket_file_ops);
@@ -952,6 +952,7 @@ static long sock_do_ioctl(struct net *net, struct socket *sock,
 	int err;
 	void __user *argp = (void __user *)arg;
 
+	/* 具体socket类型有不同的ops,在 inet_create() 中被初始化。例如， inet_stream_ops */
 	err = sock->ops->ioctl(sock, cmd, arg);
 
 	/*
@@ -1005,6 +1006,8 @@ static long sock_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	sock = file->private_data;
 	sk = sock->sk;
 	net = sock_net(sk);
+
+	/* 每个设备都可以自定义ioctl命令字，范围在SIOCDEVPRIVATE 到 SIOCDEVPRIVATE+15 之间。 */
 	if (unlikely(cmd >= SIOCDEVPRIVATE && cmd <= (SIOCDEVPRIVATE + 15))) {
 		struct ifreq ifr;
 		bool need_copyout;
@@ -1945,10 +1948,16 @@ static int __sys_setsockopt(int fd, int level, int optname,
 		if (err)
 			goto out_put;
 
+		/* SOCKET level的处理 */
 		if (level == SOL_SOCKET)
 			err =
 			    sock_setsockopt(sock, level, optname, optval,
 					    optlen);
+
+		/* 其他level的处理，例如，传输层，网络层等的处理。
+		 * SOL_TCP, SOL_UDP, SOL_RAW, SOL_IP, NETFILTER。
+		 * sock_common_setsockopt()
+		 */
 		else
 			err =
 			    sock->ops->setsockopt(sock, level, optname, optval,
@@ -1959,6 +1968,7 @@ out_put:
 	return err;
 }
 
+/* setsockopt()系统调用实现 */
 SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,
 		char __user *, optval, int, optlen)
 {
@@ -2199,6 +2209,7 @@ long __sys_sendmsg(int fd, struct user_msghdr __user *msg, unsigned int flags,
 	if (forbid_cmsg_compat && (flags & MSG_CMSG_COMPAT))
 		return -EINVAL;
 
+	/* 根据套接字文件描述符拿到套接字 */
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (!sock)
 		goto out;
@@ -2210,6 +2221,7 @@ out:
 	return err;
 }
 
+/* sendmsg()系统调用实现 */
 SYSCALL_DEFINE3(sendmsg, int, fd, struct user_msghdr __user *, msg, unsigned int, flags)
 {
 	return __sys_sendmsg(fd, msg, flags, true);

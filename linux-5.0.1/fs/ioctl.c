@@ -43,6 +43,7 @@ long vfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	if (!filp->f_op->unlocked_ioctl)
 		goto out;
 
+	/* 根据具体文件的实现，例如，socket类型文件则调用 socket_file_ops */
 	error = filp->f_op->unlocked_ioctl(filp, cmd, arg);
 	if (error == -ENOIOCTLCMD)
 		error = -ENOTTY;
@@ -692,10 +693,10 @@ int do_vfs_ioctl(struct file *filp, unsigned int fd, unsigned int cmd,
 		return ioctl_file_dedupe_range(filp, argp);
 
 	default:
-		if (S_ISREG(inode->i_mode))
+		if (S_ISREG(inode->i_mode)) //普通文件
 			error = file_ioctl(filp, cmd, arg);
 		else
-			error = vfs_ioctl(filp, cmd, arg);
+			error = vfs_ioctl(filp, cmd, arg); //其他类型的文件：例如，字符设备文件，块设备文件，socket文件。
 		break;
 	}
 	return error;
@@ -715,6 +716,7 @@ int ksys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	return error;
 }
 
+/* 系统调用ioctl()的实现 */
 SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 {
 	return ksys_ioctl(fd, cmd, arg);

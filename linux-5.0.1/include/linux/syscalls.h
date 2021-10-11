@@ -367,6 +367,10 @@ asmlinkage long sys_inotify_add_watch(int fd, const char __user *path,
 					u32 mask);
 asmlinkage long sys_inotify_rm_watch(int fd, __s32 wd);
 
+/* 在整个linux内核源码中，都没有找到sys_ioctl的定义。其实，由于 CVE-2010-3301 漏洞的存在，
+ * 系统在函数定义上又做了一层分装，过程也显得繁琐。
+ * 实际是 ksys_ioctl()函数。
+ */
 /* fs/ioctl.c */
 asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd,
 				unsigned long arg);

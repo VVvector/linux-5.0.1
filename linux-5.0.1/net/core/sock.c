@@ -3047,6 +3047,11 @@ int sock_common_setsockopt(struct socket *sock, int level, int optname,
 {
 	struct sock *sk = sock->sk;
 
+	/* 直接路由到传输层的 setsockopt()
+	 * TCP: tcp_setsockopt()
+	 * UDP: udp_setsockopt()
+	 * RAW: raw_setsockopt()
+	 */
 	return sk->sk_prot->setsockopt(sk, level, optname, optval, optlen);
 }
 EXPORT_SYMBOL(sock_common_setsockopt);

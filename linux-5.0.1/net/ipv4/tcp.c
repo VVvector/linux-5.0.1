@@ -3543,6 +3543,7 @@ int tcp_setsockopt(struct sock *sk, int level, int optname, char __user *optval,
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
+	/* 例如：SOL_IP, ip_setsockopt() */
 	if (level != SOL_TCP)
 		return icsk->icsk_af_ops->setsockopt(sk, level, optname,
 						     optval, optlen);

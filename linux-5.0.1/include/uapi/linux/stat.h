@@ -18,13 +18,13 @@
 #define S_ISGID  0002000
 #define S_ISVTX  0001000
 
-#define S_ISLNK(m)	(((m) & S_IFMT) == S_IFLNK)
-#define S_ISREG(m)	(((m) & S_IFMT) == S_IFREG)
-#define S_ISDIR(m)	(((m) & S_IFMT) == S_IFDIR)
-#define S_ISCHR(m)	(((m) & S_IFMT) == S_IFCHR)
-#define S_ISBLK(m)	(((m) & S_IFMT) == S_IFBLK)
-#define S_ISFIFO(m)	(((m) & S_IFMT) == S_IFIFO)
-#define S_ISSOCK(m)	(((m) & S_IFMT) == S_IFSOCK)
+#define S_ISLNK(m)	(((m) & S_IFMT) == S_IFLNK) //符号链接文件
+#define S_ISREG(m)	(((m) & S_IFMT) == S_IFREG) //普通文件
+#define S_ISDIR(m)	(((m) & S_IFMT) == S_IFDIR) //目录文件
+#define S_ISCHR(m)	(((m) & S_IFMT) == S_IFCHR) //字符设备文件
+#define S_ISBLK(m)	(((m) & S_IFMT) == S_IFBLK) //块设备文件
+#define S_ISFIFO(m)	(((m) & S_IFMT) == S_IFIFO) //管道文件
+#define S_ISSOCK(m)	(((m) & S_IFMT) == S_IFSOCK) //socket套接字文件
 
 #define S_IRWXU 00700
 #define S_IRUSR 00400

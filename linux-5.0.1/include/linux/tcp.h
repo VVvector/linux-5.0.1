@@ -190,6 +190,7 @@ struct tcp_sock {
  *	Header prediction flags
  *	0x5?10 << 16 + snd_wnd in net byte order
  */
+	/* 相当于tcp header的第3个32bits字段，只是将Reserved字段和除去ACK位的flag标志字段设置为了0。 */
 	__be32	pred_flags;
 
 /*

@@ -996,7 +996,9 @@ int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		err = devinet_ioctl(net, cmd, &ifr);
 		break;
+		
 	default:
+		/* 根据具体的传输层协议而不同，例如， udp_ioctl, tcp_ioctl */
 		if (sk->sk_prot->ioctl)
 			err = sk->sk_prot->ioctl(sk, cmd, arg);
 		else

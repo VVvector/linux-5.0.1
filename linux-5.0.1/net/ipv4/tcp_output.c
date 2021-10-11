@@ -68,7 +68,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 
 /* 调用tcp_event_new_data_sent()-->tcp_advance_send_head()更新sk_send_head，即取发送队列中的下一个SKB。
  * 同时更新snd_nxt，即等待发送的下一个TCP段的序号，然后统计发出但未得到确认的数据报个数。
- * 最后如果发送该报文前没有需要确认的报文，则复位重传定时器，对本次发送的报文做重传超时计时。
+ * 最后，如果发送该报文前没有需要确认的报文，则复位重传定时器，对本次发送的报文做重传超时计时。
  */
 static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
 {
@@ -81,6 +81,8 @@ static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
 
 	/* 将本skb从sk_wirte_queue中删除 */
 	__skb_unlink(skb, &sk->sk_write_queue);
+
+	/* 添加到重传队列中 */
 	tcp_rbtree_insert(&sk->tcp_rtx_queue, skb);
 
 	/* 增加待确认的data长度 */
@@ -1091,7 +1093,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	BUG_ON(!skb || !tcp_skb_pcount(skb));
 	tp = tcp_sk(sk);
 
-	/* 查看是否要克隆待发送的数据包 */
+	/* 查看是否要克隆待发送的数据包, 一般情况下，都要克隆一份，等待收到ack后再删除。 */
 	if (clone_it) {
 		TCP_SKB_CB(skb)->tx.in_flight = TCP_SKB_CB(skb)->end_seq
 			- tp->snd_una;
