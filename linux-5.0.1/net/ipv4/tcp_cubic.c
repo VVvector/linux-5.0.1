@@ -411,8 +411,8 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	 * 拥塞窗口大小的变化应当为 1,2,4,6 而不是 1,2,4,8。当处于慢启动的状态时， acked 的数
 	 * 目完全由慢启动决定。
 	 * 
-	 * 如果满足 cwnd < ssthresh，那么， bictcp_cong_avoid就表现为慢启动。否
-	 * 则，就表现为拥塞避免。拥塞避免状态下，调用bictcp_update来更新拥塞窗口的值。
+	 * 如果满足 cwnd < ssthresh，那么， bictcp_cong_avoid就表现为慢启动。
+	 * 否则，就表现为拥塞避免。拥塞避免状态下，调用bictcp_update来更新拥塞窗口的值。
 	 */
 	if (tcp_in_slow_start(tp)) {
 		if (hystart && after(ack, ca->end_seq))
@@ -422,11 +422,11 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			return;
 	}
 
-	/* 拥塞避免处理 */
+	/* 到这里，说明需要进入拥塞避免处理了。 */
 	bictcp_update(ca, tp->snd_cwnd, acked);
 
-	/* 在更新完窗口大小以后， CUBIC 模块没有直接改变窗口值，而是通过调用 tcp_cong_avoid_ai来
-	 * 改变窗口大小的。 
+	/* 在更新完窗口大小以后， CUBIC 模块没有直接改变窗口值，
+	 * 而是通过调用 tcp_cong_avoid_ai() 来改变窗口大小的。
 	 */
 	tcp_cong_avoid_ai(tp, ca->cnt, acked);
 }
@@ -472,7 +472,7 @@ static void bictcp_state(struct sock *sk, u8 new_state)
 }
 
 /*
- * 每次接到 ACK 以后，如果 tcp 仍处于慢启动状态，且拥塞窗口大小已经大于了一
+ * 每次收到 ACK 以后，如果 tcp 仍处于慢启动状态，且拥塞窗口大小已经大于了一
  * 定的值，那么就会通过调用hystart_update()进入到 hystart 算法。
  */
 static void hystart_update(struct sock *sk, u32 delay)
@@ -572,7 +572,7 @@ static void bictcp_acked(struct sock *sk, const struct ack_sample *sample)
 		ca->delay_min = delay;
 
 	/* hystart triggers when cwnd is larger than some threshold */
-	/* 当 cwnd 的大小大于阈值后，会触发 hystart 更新机制 */
+	/* 当 cwnd 大于阈值(16)后，会触发 hystart 更新机制 */
 	if (hystart && tcp_in_slow_start(tp) &&
 	    tp->snd_cwnd >= hystart_low_window)
 		hystart_update(sk, delay);

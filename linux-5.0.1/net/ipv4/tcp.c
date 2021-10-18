@@ -404,20 +404,19 @@ static u64 tcp_compute_delivery_rate(const struct tcp_sock *tp)
  * NOTE: A lot of things set to zero explicitly by call to
  *       sk_alloc() so need not be done here.
  */
- /*  应用层创建socket时，会被调用到。
-
-	socket() -> inet_creat() -> .init() //tcp_init_sock()
+/* 应用层创建socket时，会被调用到。
+ * socket() -> inet_creat() -> .init()
  */
 void tcp_init_sock(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 
-	/*初始化out_of_order_queue队列 */
+	/* 初始化乱序队列，重传队列 */
 	tp->out_of_order_queue = RB_ROOT;
 	sk->tcp_rtx_queue = RB_ROOT;
 
-	/* timer初始化  */
+	/* tcp 相关的timer初始化 */
 	tcp_init_xmit_timers(sk);
 	INIT_LIST_HEAD(&tp->tsq_node);
 	INIT_LIST_HEAD(&tp->tsorted_sent_queue);
@@ -433,7 +432,7 @@ void tcp_init_sock(struct sock *sk)
 	 * algorithms that we must have the following bandaid to talk
 	 * efficiently to them.  -DaveM
 	 */
-	/* 发送拥塞窗口的大小 */
+	/* 发送拥塞窗口的大小 google研究表明 10 */
 	tp->snd_cwnd = TCP_INIT_CWND;
 
 	/* There's a bubble in the pipe until at least the first ACK. */
@@ -443,6 +442,7 @@ void tcp_init_sock(struct sock *sk)
 	 * initialization of these values.
 	 */
 	/* send slow start threshold */
+	/* 慢启动和拥塞避免的阈值，初始值很大。 */
 	tp->snd_ssthresh = TCP_INFINITE_SSTHRESH; 
 	tp->snd_cwnd_clamp = ~0;
 	tp->mss_cache = TCP_MSS_DEFAULT;
@@ -2524,12 +2524,13 @@ found_ok_skb:
 skip_copy:
 		/*
 		 * 如果已经完成了对紧急数据的处理，则将紧急数据标志清零，
-		 * 设置首部预测标志，下一个接收到的段，就又可以通过首部预测执行快速
-		 * 路径还是慢速路径了。
+		 * 设置首部预测标志，下一个接收到的段，就又可以通过首部预测执行快速路径还是慢速路径了。
 		 */
 		if (tp->urg_data && after(tp->copied_seq, tp->urg_seq)) {
+			/* 紧急数据是由慢速路径处理，需要保持在慢速路径模式直到收完紧急数据，
+			 * 读完后就能检测是否能开启fast path了。
+			 */
 			tp->urg_data = 0;
-			/* 现在处理完了紧急数据，转到fast path上，如果输入处理遇到紧急数据的段，则fast path会关闭。 */
 			tcp_fast_path_check(sk);
 		}
 

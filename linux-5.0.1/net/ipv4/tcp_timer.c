@@ -570,7 +570,7 @@ void tcp_retransmit_timer(struct sock *sk)
 			goto out;
 		}
 
-		/* 这个函数用来进入loss状态，也就是进行一些拥塞以及流量的控制。 */
+		/* 这个函数用来进入 ca_loss 状态，也就是进行一些拥塞以及流量的控制。 */
 		tcp_enter_loss(sk);
 
 		/* 现在开始重传skb */

@@ -73,6 +73,12 @@ s32 tcp_rack_skb_timeout(struct tcp_sock *tp, struct sk_buff *skb, u32 reo_wnd)
  * or tcp_time_to_recover()'s "Trick#1: the loss is proven" code path will
  * make us enter the CA_Recovery state.
  */
+/*
+ * 如果有开启rack，则根据sack数据包的时间戳判断未sack的数据包是否丢包，
+ * 在标记loss流程里会更新 tp->lost_out计 数，等回到 tcp_fastretrans_alert() 里，
+ * 函数 tcp_time_to_recover() 判断lost_out非零，则进入recovery状态。如果没有需要标记loss的数据包，
+ * 则根据剩余时间启动定时器，定时器超时，重新检测。
+ */
 static void tcp_rack_detect_loss(struct sock *sk, u32 *reo_timeout)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -91,6 +97,10 @@ static void tcp_rack_detect_loss(struct sock *sk, u32 *reo_timeout)
 		    !(scb->sacked & TCPCB_SACKED_RETRANS))
 			continue;
 
+		/* 
+		 * tp->rack.mstamp表示sack的包的发送时间，tp->rack.end_seq表示sack数据包的序列号
+		 * 如果skb比被sack的数据的发送时间更早，或者序列号更小，那说明有可能这个skb是丢了
+		 */
 		if (!tcp_rack_sent_after(tp->rack.mstamp,
 					 tcp_skb_timestamp_us(skb),
 					 tp->rack.end_seq, scb->end_seq))
@@ -99,12 +109,22 @@ static void tcp_rack_detect_loss(struct sock *sk, u32 *reo_timeout)
 		/* A packet is lost if it has not been s/acked beyond
 		 * the recent RTT plus the reordering window.
 		 */
+		/*
+		 * 如果后发送的skb已经被sack，旧的还没有sack，并且时间超过rtt+窗口阀值
+		 * 则认为之前的包已经丢失，rack对其标记loss
+		 * tp->rack.rtt_us表示sack的数据包的发送到现在的时间距离
+		 * 这个remaining的意思是，如果sack的数据包与比它更早发送出去但还未被sack的数据包
+		 * 的时间间隔超过1000us与1/4 rtt两个时间相对大的那个，那说明还未被sack的数据包可能是已经丢了，标记loss
+		 */
 		remaining = tcp_rack_skb_timeout(tp, skb, reo_wnd);
 		if (remaining <= 0) {
 			tcp_mark_skb_lost(sk, skb);
 			list_del_init(&skb->tcp_tsorted_anchor);
 		} else {
 			/* Record maximum wait time */
+			/* 如果时间还未超时，则启动超时定时器，如果定时器超时，
+			 * 则超时处理函数又进入tcp_rack_detect_loss()重新检测。
+			 */
 			*reo_timeout = max_t(u32, *reo_timeout, remaining);
 		}
 	}
@@ -151,6 +171,8 @@ void tcp_rack_advance(struct tcp_sock *tp, u8 sacked, u32 end_seq,
 		 */
 		return;
 	}
+
+	/* 设置sack数据包的发送时间及序列号信息 */
 	tp->rack.advanced = 1;
 	tp->rack.rtt_us = rtt_us;
 	if (tcp_rack_sent_after(xmit_time, tp->rack.mstamp,

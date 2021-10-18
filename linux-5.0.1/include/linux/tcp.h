@@ -190,7 +190,10 @@ struct tcp_sock {
  *	Header prediction flags
  *	0x5?10 << 16 + snd_wnd in net byte order
  */
-	/* 相当于tcp header的第3个32bits字段，只是将Reserved字段和除去ACK位的flag标志字段设置为了0。 */
+	/* 用来作为快速路径的判断条件。
+	 * 相当于tcp header的第3个32bits字段，只是将Reserved字段和非ACK位的flag标志字段设置为了0。
+	 * __tcp_fast_path_on() 在本函数中被设置。
+	 */
 	__be32	pred_flags;
 
 /*
@@ -214,8 +217,7 @@ struct tcp_sock {
 	/* 代表还没有读取的数据 */
 	u32	copied_seq;	/* Head of yet unread data		*/
 
-	/* 意思就是在上一个窗口更新的时候，所接收到的确认号也就是上一个窗口更新之后，将要发送的第一个字节的
-	 * 序列号。 
+	/* 意思就是在上一个窗口更新时所接收到的确认号，也就是上一个窗口更新之后，将要发送的第一个字节的序列号。
 	 */
 	u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
 
@@ -271,7 +273,8 @@ struct tcp_sock {
 	struct list_head tsq_node; /* anchor in tsq_tasklet.head list */
 	struct list_head tsorted_sent_queue; /* time-sorted sent but un-SACKed skbs */
 
-	/* 更新发送窗口的那个ACK段的序号，用来判断是否需要更新窗口。如果后续收到的ACK段大于此值，则需要更新。 */
+	/* 记录发送窗口更新时，造成窗口更新的那个数据报的第一个序号。
+	 * 用来判断是否需要更新窗口。如果后续收到的ACK段大于此值，则需要更新。 */
 	u32	snd_wl1;	/* Sequence for window update		*/
 
 	/* 发送方窗口大小，即接收方提供的接收窗口大小
@@ -341,11 +344,12 @@ struct tcp_sock {
 	u32	rtt_seq;	/* sequence number to update rttvar	*/
 	struct  minmax rtt_min;
 
-	/* 发送方发送出去但是还未得到确认的 TCP 段的数目, packets_out=SND.NXT-SND.UNA */
+	/* 发送方已经发送出去，但是还未得到ack的 TCP 段的数目, packets_out = SND.NXT - SND.UNA */
 	u32	packets_out;	/* Packets which are "in flight"	*/
 
-	/* 重传并且还未得到确认的 TCP 段的数目 */
+	/* 重传并且还未得到ack的 TCP 段的数目 */
 	u32	retrans_out;	/* Retransmitted packets out		*/
+
 	u32	max_packets_out;  /* max packets_out in last window */
 	u32	max_packets_seq;  /* right edge of max_packets_out flight */
 
@@ -363,12 +367,13 @@ struct tcp_sock {
 /*
  *      Options received (usually on last packet, some only on SYN packets).
  */
+ 	/* 收到对方的tcp option设置。 */
 	struct tcp_options_received rx_opt;
 
 /*
  *	Slow start and congestion control (see also Nagle, and Karn & Partridge)
  */
- 	/* 拥塞控制时，慢启动的阀值 */
+ 	/* 拥塞控制时，慢启动的阈值 */
  	u32	snd_ssthresh;	/* Slow start size threshold		*/
 
 	/* 发送的拥塞窗口大小 */
@@ -396,15 +401,19 @@ struct tcp_sock {
 	 */
 	u32	snd_cwnd_stamp;
 
-	/* 在进入 Recovery 状态时的拥塞窗口 */
+	/* 在进入 Recovery 状态时的拥塞窗口。表示prr算法中的RecoverFS的值 */
 	u32	prior_cwnd;	/* cwnd right before starting loss recovery */
 
-	/* 在恢复阶段给接收者新发送包的数量 */
+	/* 在Recovery状态下，已经被接收方从网络中拿走的数据量。
+	 * 用于计算数据离开网络的速度。
+	 */
 	u32	prr_delivered;	/* Number of newly delivered packets to
 				 * receiver in Recovery. */
-
-	/* 在恢复阶段一共发送的包的数量 */
+	/* 在Recovery状态下，一共发送的数量量。
+	 * 用于计算数据进入网络的速度。
+	 */
 	u32	prr_out;	/* Total number of pkts sent during Recovery. */
+
 	u32	delivered;	/* Total data packets delivered incl. rexmits */
 	u32	delivered_ce;	/* Like the above but only ECE marked packets */
 	u32	lost;		/* Total data packets lost incl. rexmits */
@@ -429,7 +438,7 @@ struct tcp_sock {
 	/* 一般表示已经真正发送出去的最后一个字节序号，有时也表示期望发出去的最后一个字节的序号 */
 	u32	pushed_seq;	/* Last pushed seq, required to talk to windows */
 
-	/* 丢失的数据报 */
+	/* 丢失的数据报个数，只是一个猜测值 */
 	u32	lost_out;	/* Lost packets			*/
 
 	/*

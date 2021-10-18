@@ -273,7 +273,7 @@ EXPORT_SYMBOL(tcp_select_initial_window);
  * frame.
  */
 /*
- * 这个函数的作用是选择一个新的窗口大小以用于更新tcp_sock。返回的结果根据
+ * 用于选择一个新的窗口大小来作为后续的通告窗口；返回的结果根据
  * RFC1323（详见1.3.2）进行了缩放。
  */
 static u16 tcp_select_window(struct sock *sk)
@@ -332,6 +332,7 @@ static u16 tcp_select_window(struct sock *sk)
 	new_win >>= tp->rx_opt.rcv_wscale;
 
 	/* If we advertise zero window, disable fast path. */
+	/* 因为0窗口，关闭快速路径。 */
 	if (new_win == 0) {
 		tp->pred_flags = 0;
 		if (old_win)
@@ -1271,7 +1272,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	err = icsk->icsk_af_ops->queue_xmit(sk, skb, &inet->cork.fl);
 
 	if (unlikely(err > 0)) {
-		/* 如果发送了丢包（如被主动队列管理丢弃），那么进入到拥塞控制状态。 */
+		/* 如果发送了丢包（如被主动队列管理丢弃），那么进入到拥塞状态机的 CA_CWR 状态。 */
 		tcp_enter_cwr(sk);
 		err = net_xmit_eval(err);
 	}
@@ -1664,6 +1665,7 @@ EXPORT_SYMBOL(tcp_mtup_init);
    NOTE2. inet_csk(sk)->icsk_pmtu_cookie and tp->mss_cache
    are READ ONLY outside this function.		--ANK (980731)
  */
+/* 将当前连接的路径MTU(PMTU)转换为缓存MSS(mss_cache) */
 unsigned int tcp_sync_mss(struct sock *sk, u32 pmtu)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -2579,7 +2581,9 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 				break; /* 如果窗口大小为0，则无法发送任何东西。*/
 		}
 
-		/* 检查tcp的数据段是否在发送窗口之内，如果是，则可以发送，否则，不能发送。*/
+		/* 检查tcp的数据段是否在发送窗口之内，如果是，则可以发送，否则，不能发送。
+		 * 条件：至少要有一个接收窗口才能正常发送。
+		 */
 		if (unlikely(!tcp_snd_wnd_test(tp, skb, mss_now))) {
 			is_rwnd_limited = true;
 			break;
@@ -2689,6 +2693,7 @@ repair:
 
 	/* 本次有数据发送，则对tcp拥塞窗口相关数据更新 */
 	if (likely(sent_pkts)) {
+		/* 如果本连接处于CWR或者Recovery拥塞状态，需要增加prr的值。 */
 		if (tcp_in_cwnd_reduction(sk))
 			tp->prr_out += sent_pkts;
 
@@ -3347,6 +3352,7 @@ void tcp_xmit_retransmit_queue(struct sock *sk)
 
 		NET_ADD_STATS(sock_net(sk), mib_idx, tcp_skb_pcount(skb));
 
+		/* 如果本连接处于CWR或者Recovery拥塞状态，则需要增加prr_out的值。 */
 		if (tcp_in_cwnd_reduction(sk))
 			tp->prr_out += tcp_skb_pcount(skb);
 

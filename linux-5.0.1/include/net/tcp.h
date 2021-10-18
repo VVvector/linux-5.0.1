@@ -673,13 +673,13 @@ static inline void __tcp_fast_path_on(struct tcp_sock *tp, u32 snd_wnd)
 			       snd_wnd);
 }
 
-/* 用于生成预测标志 tp->pred_flags。 */
+/* 用于生成预测标志 tp->pred_flags。因为snd_wnd可能进行所放过，所有要还原回去。 */
 static inline void tcp_fast_path_on(struct tcp_sock *tp)
 {
 	__tcp_fast_path_on(tp, tp->snd_wnd >> tp->rx_opt.snd_wscale);
 }
 
-/* 也是用于生成预测标志。不过会有条件检查：
+/* 在建立连接的过程中，前面有收到其他数据包，所有需要进行相关判断，才能调用tcp_fast_path_on()：
  * 1. 没有乱序数据
  * 2. 接收窗口不为0
  * 3. 接收缓存未耗尽
@@ -1227,9 +1227,7 @@ static inline bool tcp_is_reno(const struct tcp_sock *tp)
 	return !tcp_is_sack(tp);
 }
 
-/* 该函数用于计算已经发出去的 TCP 段 (离开主机) 中一共有多少个 tcp 段还未得到
- * 确认。
-*/
+/* 这里表示获取 离开网络且未被确认的数据包个数 */
 static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
 {
 	return tp->sacked_out + tp->lost_out;
@@ -1248,6 +1246,9 @@ static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
  *	"Packets sent once on transmission queue" MINUS
  *	"Packets left network, but not honestly ACKed yet" PLUS
  *	"Packets fast retransmitted"
+ */
+/*
+ * 这里表示获取 还处于网络中且未被确认的数据包个数。
  */
 static inline unsigned int tcp_packets_in_flight(const struct tcp_sock *tp)
 {
@@ -1404,6 +1405,9 @@ static inline void tcp_init_wl(struct tcp_sock *tp, u32 seq)
 	tp->snd_wl1 = seq;
 }
 
+/* 记录发送窗口更新时，造成窗口更新的那个数据报的第一个序号。
+ * 用来判断是否需要更新窗口。如果后续收到的ACK段大于此值，则需要更新。
+ */
 static inline void tcp_update_wl(struct tcp_sock *tp, u32 seq)
 {
 	tp->snd_wl1 = seq;
