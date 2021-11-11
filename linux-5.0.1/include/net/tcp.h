@@ -1227,7 +1227,7 @@ static inline bool tcp_is_reno(const struct tcp_sock *tp)
 	return !tcp_is_sack(tp);
 }
 
-/* 这里表示获取 离开网络且未被确认的数据包个数 */
+/* 这里表示获取 离开网络且未被确认的数据包个数。 */
 static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
 {
 	return tp->sacked_out + tp->lost_out;
@@ -1249,6 +1249,8 @@ static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
  */
 /*
  * 这里表示获取 还处于网络中且未被确认的数据包个数。
+ * Linux的tcp发送方支持以NewReno恢复和SACK恢复这两种算法来确定正在传送段的数目时，
+ * 使用同一组概念和函数。
  */
 static inline unsigned int tcp_packets_in_flight(const struct tcp_sock *tp)
 {

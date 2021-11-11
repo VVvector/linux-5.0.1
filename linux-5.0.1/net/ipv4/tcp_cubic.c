@@ -38,20 +38,41 @@
 #define HYSTART_DELAY		0x2
 
 /* Number of delay samples for detecting the increase of delay */
+/* 注意：
+ * 这里的delay_min没有放大8倍。
+ * HYSTART_DELAY_THRESH宏用来计算 Delay increase threshold, 即在 32 ~ 128 之间。
+ * delay_min <= 32ms, 则 threshold = 4ms
+ * 32ms < delay_min < 256ms, 则threshold = (delay_min / 16)ms
+ * delay_min >= 256ms, 则threshold = 16ms
+ */
 #define HYSTART_MIN_SAMPLES	8
 #define HYSTART_DELAY_MIN	(4U<<3)
 #define HYSTART_DELAY_MAX	(16U<<3)
 #define HYSTART_DELAY_THRESH(x)	clamp(x, HYSTART_DELAY_MIN, HYSTART_DELAY_MAX)
 
 static int fast_convergence __read_mostly = 1;
+
+/* beta在BIC中为819，而在CUBIC中为717，
+ * 会导致在 bictcp_recalc_ssthresh() 中，当启用了fast convergence时，
+ * cubic: last_max_cwnd = 0.85 * snd_cwnd, 而慢启动阈值 = 0.7 * snd_cwnd；
+ * bic: last_max_cwnd = 0.955 * snd_cwnd, 而慢启动阈值 = 0.8 * snd_cwnd；
+ * 这样会导致更早地到达平衡值，对snd_cwnd有很大的影响。
+ */
 static int beta __read_mostly = 717;	/* = 717/1024 (BICTCP_BETA_SCALE) */
+
 static int initial_ssthresh __read_mostly;
 static int bic_scale __read_mostly = 41;
 static int tcp_friendliness __read_mostly = 1;
 
+/* hybird slow start的开关 */
 static int hystart __read_mostly = 1;
+
+/* hystart状态描述。默认两种方法都使用，故设置为3。 */
 static int hystart_detect __read_mostly = HYSTART_ACK_TRAIN | HYSTART_DELAY;
+
+/* 设置snd_ssthresh的最小拥塞窗口值，当cwnd超过了这个值，才能使用hystart。 */
 static int hystart_low_window __read_mostly = 16;
+
 static int hystart_ack_delta __read_mostly = 2;
 
 static u32 cube_rtt_scale __read_mostly;
@@ -81,35 +102,38 @@ MODULE_PARM_DESC(hystart_ack_delta, "spacing between ack's indicating train (mse
 
 /* BIC TCP Parameters */
 struct bictcp {
-	/* 每次 cwnd 增长 1/cnt 的比例 */
+	/* 每次 cwnd 增长 1/cnt 的比例，用于控制snd_cwnd的增长。
+	 * 是cubic拥塞算法的核心，主要用于控制在拥塞避免状态下，什么时候才能增大拥塞窗口，
+	 * 具体实现是通过比较cnt和snd_cwnd_cnt，来决定是否增大拥塞窗口。
+	 */
 	u32	cnt;		/* increase cwnd by 1 after ACKs */
 
-	/* snd_cwnd 之前的最大值 */
+	/* 上一次的最大拥塞窗口值 */
 	u32	last_max_cwnd;	/* last maximum snd_cwnd */
 
-	/* 最近的 snd_cwnd */
+	/* 上一次的拥塞窗口值 */
 	u32	last_cwnd;	/* the last snd_cwnd */
 
 	/* 更新 last_cwnd 的时间 */
 	u32	last_time;	/* time when updated last_cwnd */
 
-	/* bic 函数的初始点 */
+	/* 即新的Wmax饱和点，取last_max_cwnd和snd_cwnd较大者。 */
 	u32	bic_origin_point;/* origin point of bic function */
 
-	/* 从当前一轮开始到初始点的时间 */
+	/* 从当前一轮开始到初始点的时间，即新Wmax对应的时间点t, W(bic_K) = Wmax。*/
 	u32	bic_K;		/* time to origin point
 				   from the beginning of the current epoch */
 
-	/* 最小延迟 (msec << 3) */
+	/* 最小RTT */
 	u32	delay_min;	/* min delay (msec << 3) */
 
-	/* 一轮的开始 */
+	/* 一轮的开始,即拥塞状态切换开始的时刻。 */
 	u32	epoch_start;	/* beginning of an epoch */
 
-	/* ack 的数量 */
+	/* 在一个epoch中的ack包的数量 */
 	u32	ack_cnt;	/* number of acks */
 
-	/* estimated tcp cwnd */
+	/* 按照Reno算法算得的cwnd */
 	u32	tcp_cwnd;	/* estimated tcp cwnd */
 	u16	unused;
 
@@ -125,6 +149,7 @@ struct bictcp {
 	u32	curr_rtt;	/* the minimum rtt of current round */
 };
 
+/* RTO timeout时会被调用 */
 static inline void bictcp_reset(struct bictcp *ca)
 {
 	ca->cnt = 0;
@@ -152,22 +177,27 @@ static inline u32 bictcp_clock(void)
 /*
  * 在长期的实践中，人们发现慢启动存在这样一个问题：如果慢启动时窗口变得很大
  *（在大带宽网络中），那么如果慢启动的过程中发生了丢包，有可能一次丢掉大量的包（因
- * 为每次窗口都会加倍）。 HyStart(Hybrid Slow Start) 是一种优化过的慢启动算法，可以
+ * 为每次窗口都会加倍）。
+ * HyStart(Hybrid Slow Start) 是一种优化过的慢启动算法，可以
  * 避免传统慢启动过程中的突发性丢包，从而提升系统的吞吐量并降低系统负载。
  * 在 HyStart 算法中，慢启动过程仍然是每次将拥塞窗口加倍。但是，它会使用 ACK
- * 空间和往返延迟作为启发信息，来寻找一个安全的退出点 (Safe Exit Points)。退出点即
- * 结束慢启动并进入拥塞避免的点。如果在慢启动的过程中发生丢包，那么 HyStart 算法
- * 的表现和传统的慢启动协议是一致的。
- * 初始化 HyStart 算法时，会记录当前的时间，上一次的 rtt 值，并重新统计当前的
- * rtt 值。
+ * 空间和往返延迟作为启发信息来寻找一个安全的退出点 (Safe Exit Points)。退出点即
+ * 结束慢启动并进入拥塞避免的点。
+ * 如果在慢启动的过程中发生丢包，那么 HyStart 算法的表现和传统的慢启动协议是一致的。
+ * 初始化 HyStart 算法时，会记录当前的时间，上一次的 rtt 值，并重新统计当前的rtt 值。
+ */
+
+/*
+ * bictcp_hystart_reset() 中并没有对ca->found设置为0，即只有在初始化时、loss状态时、
+ * 开启hystart慢启动时，Hystart才能派上用场，其他时间并不适用。
  */
 static inline void bictcp_hystart_reset(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
 
-	ca->round_start = ca->last_ack = bictcp_clock();
-	ca->end_seq = tp->snd_nxt;
+	ca->round_start = ca->last_ack = bictcp_clock(); //记录时间戳
+	ca->end_seq = tp->snd_nxt; //记录待发送的下一个序列号
 	ca->curr_rtt = 0;
 	ca->sample_cnt = 0;
 }
@@ -178,11 +208,11 @@ static void bictcp_init(struct sock *sk)
 
 	bictcp_reset(ca);
 
-	/* 查看是否启用了hystart机制 */
+	/* 如果启用了hystart机制 */
 	if (hystart)
 		bictcp_hystart_reset(sk);
 
-	/* 如果设置了初始值，就设置为初始值 */
+	/* 设置初始值： 10 */
 	if (!hystart && initial_ssthresh)
 		tcp_sk(sk)->snd_ssthresh = initial_ssthresh;
 }
@@ -222,6 +252,7 @@ static void bictcp_cwnd_event(struct sock *sk, enum tcp_ca_event event)
  * Newton-Raphson iteration.
  * Avg err ~= 0.195%
  */
+ /* 用于计算立方根。利用二分法逼近 */
 static u32 cubic_root(u64 a)
 {
 	u32 x, b, shift;
@@ -269,14 +300,24 @@ static u32 cubic_root(u64 a)
 /*
  * Compute congestion window to use.
  */
+/* 从快速恢复退出并进入拥塞避免后，更新cnt。 */
 static inline void bictcp_update(struct bictcp *ca, u32 cwnd, u32 acked)
 {
+	/*
+	 * delta：cwnd差，
+	 * bic_target: 预测值
+ 	 */
 	u32 delta, bic_target, max_cnt;
+
+	/* offs: 时间差|t-K|，
+	 * t: 预测时间
+	 */
 	u64 offs, t;
 
 	/* 统计 ACKed packets 的数目 */
 	ca->ack_cnt += acked;	/* count the number of ACKed packets */
 
+	/* 当前窗口和历史窗口相同，且时间差小于(1000/32)ms，直接退出。 */
 	if (ca->last_cwnd == cwnd &&
 	    (s32)(tcp_jiffies32 - ca->last_time) <= HZ / 32)
 		return;
@@ -292,19 +333,22 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd, u32 acked)
 	if (ca->epoch_start && tcp_jiffies32 == ca->last_time)
 		goto tcp_friendliness;
 
+	/* 记录进入拥塞避免时的窗口值和时间 */
 	ca->last_cwnd = cwnd;
 	ca->last_time = tcp_jiffies32;
 
+	/* 丢包后，开启一个新的时段 */
 	if (ca->epoch_start == 0) {
-		/* 记录起始时间 */
+		/* 新时段的开始 */
 		ca->epoch_start = tcp_jiffies32;	/* record beginning */
 
-		/* 开始计数 */
+		/* ack包计数器的初始化 */
 		ca->ack_cnt = acked;			/* start counting */
 
 		/* 同步cubic的cwnd值 */
 		ca->tcp_cwnd = cwnd;			/* syn with cubic */
 
+		/* 取max(last_max_cwnd，cwnd)作为当前Wmax饱和点 */
 		if (ca->last_max_cwnd <= cwnd) {
 			ca->bic_K = 0;
 			ca->bic_origin_point = cwnd;
@@ -338,24 +382,29 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd, u32 acked)
 	t <<= BICTCP_HZ;
 	do_div(t, HZ);
 
+	/* 计算|t - bic_K| */
 	if (t < ca->bic_K)		/* t - K */
-		offs = ca->bic_K - t;
+		offs = ca->bic_K - t; //还未达到Wmax
 	else
-		offs = t - ca->bic_K;
+		offs = t - ca->bic_K; //已经超过Wmax
 
+	/* 计算立方， delta = |W(t) - W(bic_K)| */
 	/* c/rtt * (t-K)^3 */
 	delta = (cube_rtt_scale * offs * offs * offs) >> (10+3*BICTCP_HZ);
+
+	/* t为预测时间，bic_K为新Wmax所对应的时间，
+	 * bic_target为cwnd预测值，bic_origin_point为当前Wmax饱和点。
+	 */
 	if (t < ca->bic_K)                            /* below origin*/
 		bic_target = ca->bic_origin_point - delta;
 	else                                          /* above origin*/
 		bic_target = ca->bic_origin_point + delta;
 
+	/* 根据 cubic 函数计算出来的目标拥塞窗口值和当前拥塞窗口值，计算 ca->cnt 的大小。 */
 	/* cubic function - calc bictcp_cnt*/
-	/* 根据 cubic 函数计算出来的目标拥塞窗口值和当前拥塞窗口值，计算 cnt 的大小。 */
-	if (bic_target > cwnd) {
+	if (bic_target > cwnd) { //相差越多，增长越快，这就是函数形状由来。
 		ca->cnt = cwnd / (bic_target - cwnd);
-	} else {
-		/* 只增长一小点 */
+	} else { //目前cwnd已经超出预期了，应该降速。
 		ca->cnt = 100 * cwnd;              /* very small increment*/
 	}
 
@@ -366,13 +415,21 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd, u32 acked)
 	if (ca->last_max_cwnd == 0 && ca->cnt > 20)
 		ca->cnt = 20;	/* increase cwnd 5% per RTT */
 
-	/* TCP 友好性 */
+
 tcp_friendliness:
+	/* TCP 友好性 
+	 * 如果cubic比Reno慢，则提升cwnd增长速度，即减小cnt。
+	 * 以上次丢包以后的时间t算起，每次RTT增长 3B/(2-B)，那么可以得到采用Reno算法的cwnd。
+	 * cwnd(Reno) = cwnd + 3B/(2-B) * ack_cnt / cwnd
+	 * B为乘性减少因子，此算法中为0.3
+	 */
 	/* TCP Friendly */
 	if (tcp_friendliness) {
 		u32 scale = beta_scale;
 
-		/* 推算在传统的 AIMD 算法下， TCP 拥塞窗口的大小 */
+		/* 推算在传统的 AIMD 算法下， TCP 拥塞窗口的大小。
+		 * delta代表多少ACK可使tcp_cwnd++
+		 */
 		delta = (cwnd * scale) >> 3;
 		while (ca->ack_cnt > delta) {		/* update tcp cwnd */
 			ca->ack_cnt -= delta;
@@ -401,6 +458,7 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
 
+	/* 判断发送拥塞窗口是否达到限制，如果达到限制，则不进行窗口增加。 */
 	if (!tcp_is_cwnd_limited(sk))
 		return;
 
@@ -408,30 +466,36 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	/* 当 tp->snd_cwnd < tp->snd_ssthresh 时，
 	 * 让拥塞窗口大小正好等于 ssthresh 的大小。并据此计算 acked 的大小。
 	 * 这里不妨举个例子。如果 ssthresh 的值为 6，初始 cwnd 为 1。那么按照 TCP 的标准，
-	 * 拥塞窗口大小的变化应当为 1,2,4,6 而不是 1,2,4,8。当处于慢启动的状态时， acked 的数
-	 * 目完全由慢启动决定。
+	 * 拥塞窗口大小的变化应当为 1,2,4,6 而不是 1,2,4,8。当处于慢启动的状态时， acked 的数目完全由慢启动决定。
 	 * 
-	 * 如果满足 cwnd < ssthresh，那么， bictcp_cong_avoid就表现为慢启动。
+	 * 如果满足 cwnd < ssthresh，那么， bictcp_cong_avoid()就表现为慢启动。
 	 * 否则，就表现为拥塞避免。拥塞避免状态下，调用bictcp_update来更新拥塞窗口的值。
 	 */
 	if (tcp_in_slow_start(tp)) {
 		if (hystart && after(ack, ca->end_seq))
 			bictcp_hystart_reset(sk);
+
+		/* 进入slow start状态 */
 		acked = tcp_slow_start(tp, acked);
 		if (!acked)
 			return;
 	}
 
-	/* 到这里，说明需要进入拥塞避免处理了。 */
+	/* 否则，到这里，说明需要进入拥塞避免处理了。
+	 * 首先，更新bictcp->cnt。
+	 */
 	bictcp_update(ca, tp->snd_cwnd, acked);
 
-	/* 在更新完窗口大小以后， CUBIC 模块没有直接改变窗口值，
+	/* 在更新bictcp_cnt后，CUBIC 模块没有直接改变窗口值，
 	 * 而是通过调用 tcp_cong_avoid_ai() 来改变窗口大小的。
+	 * 也会更新tp->snd_cwnd_cnt。
 	 */
 	tcp_cong_avoid_ai(tp, ca->cnt, acked);
 }
 
-/* 门限值的计算
+/* 门限值的计算。
+* 每次发送拥塞状态切换时，就会重新计算慢启动阈值。（进入loss时）
+*
 * 这里涉及到了 Fast Convergence 机制。该机制的存在是为了加快 CUBIC 算法的收敛速
 * 度。在网络中，一个新的流的加入，会使得旧的流让出一定的带宽，以便给新的流让出一
 * 定的增长空间。为了增加旧的流释放的带宽量， CUBIC 的作者引入了 Fast Convergence
@@ -444,8 +508,15 @@ static u32 bictcp_recalc_ssthresh(struct sock *sk)
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
 
+	/* 发生拥塞状态切换，标志一个epoch结束。 */
 	ca->epoch_start = 0;	/* end of epoch */
 
+	/* beta在BIC中为819，而在CUBIC中为717，
+	 * 会导致在 bictcp_recalc_ssthresh() 中，当启用了fast convergence时，
+	 * cubic: last_max_cwnd = 0.85 * snd_cwnd, 而慢启动阈值 = 0.7 * snd_cwnd；
+	 * bic: last_max_cwnd = 0.955 * snd_cwnd, 而慢启动阈值 = 0.8 * snd_cwnd；
+	 * 这样会导致更早地到达平衡值，对snd_cwnd有很大的影响。
+	 */
 	/* Wmax and fast convergence */
 	if (tp->snd_cwnd < ca->last_max_cwnd && fast_convergence)
 		ca->last_max_cwnd = (tp->snd_cwnd * (BICTCP_BETA_SCALE + beta))
@@ -456,12 +527,10 @@ static u32 bictcp_recalc_ssthresh(struct sock *sk)
 	return max((tp->snd_cwnd * beta) / BICTCP_BETA_SCALE, 2U);
 }
 
-/* 当拥塞状态机的状态发生改变时，会调用set_state函数，对应到 CUBIC 模块中，
- * 就是bictcp_state函数。
+/* 当拥塞状态机的状态发生改变时，会调用set_state()函数，对应到 CUBIC 模块中，就是bictcp_state()函数。
  * 
  * CUBIC 只特殊处理了一种状态： TCP_CA_Loss。可以看到，当进入了 LOSS 以后，就会
- * 调用bictcp_reset函数，重置拥塞控制参数。这样，拥塞控制算法就会重新从慢启动开
- * 始执行。
+ * 调用bictcp_reset()函数，重置拥塞控制参数。这样，拥塞控制算法就会重新从慢启动开始执行。
  */
 static void bictcp_state(struct sock *sk, u8 new_state)
 {
@@ -473,7 +542,11 @@ static void bictcp_state(struct sock *sk, u8 new_state)
 
 /*
  * 每次收到 ACK 以后，如果 tcp 仍处于慢启动状态，且拥塞窗口大小已经大于了一
- * 定的值，那么就会通过调用hystart_update()进入到 hystart 算法。
+ * 定的值(hystart_low_window)，那么就会通过调用hystart_update()进入到 hystart 算法。
+ * 如果满足相应条件，则会退出慢启动，进入拥塞避免阶段。
+ *
+ * 退出慢启动状态的方法很简单，就是直接将当前的snd_ssthresh的大小设定为和当前拥
+ * 塞窗口一样的大小。这样， TCP 自然就会转入拥塞避免状态。
  */
 static void hystart_update(struct sock *sk, u32 delay)
 {
@@ -485,13 +558,14 @@ static void hystart_update(struct sock *sk, u32 delay)
 		return;
 
 	/*
-	 * 第一个判别条件，如果收到两次相隔不远的 ACK 之间的时间大于了 rtt 时间的一
-	 * 半，那么，就说明窗口的大小差不多到了网络容量的上限了。这里之所以会右移 4，是因为
-	 * delay_min是最小延迟左移 3 后的结果。 rtt 的一半相当于单程的时延。连续收到的两次
-	 * ACK 可以用于估计带宽大小。这里需要特别解释一下：由于在慢启动阶段，会一次性发
-	 * 送大量的包，所以，可以假设在网络中，数据是连续发送的。而收到的两个连续的包之间
-	 * 的时间间隔就是窗口大小除以网络带宽的商。作为发送端，我们只能获得两次 ACK 之间
-	 * 的时间差，因此用这个时间来大致估计带宽。拥塞窗口的合理大小为 C = B ×Dmin +S，
+	 * 第一个判别条件: 如果收到两次相隔不远的 ACK 之间的时间大于了 rtt 时间的一半，那么，
+	 * 就说明窗口的大小差不多到了网络容量的上限了。
+	 * 这里之所以会右移 4，是因为delay_min是最小延迟左移 3 后的结果。 rtt 的一半相当于单程的时延。
+	 * 连续收到的两次 ACK 可以用于估计带宽大小。
+	 * 这里需要特别解释一下：由于在慢启动阶段，会一次性发送大量的包，所以，可以假设在网络中，
+	 * 数据是连续发送的。而收到的两个连续的包之间的时间间隔就是窗口大小除以网络带宽的商。
+	 * 作为发送端，我们只能获得两次 ACK 之间的时间差，因此用这个时间来大致估计带宽。
+	 * 拥塞窗口的合理大小为 C = B × Dmin +S，
 	 * 这里 C 是窗口大小， B 是带宽， Dmin 是最小的单程时延， S 是缓存大小。由于带宽是
 	 * 基本恒定的，因此，只要两次 ACK 之间的时间接近与 Dmin 就可以认为该窗口的大小
 	 * 是基本合理的，已经充分的利用了网络。
@@ -515,8 +589,9 @@ static void hystart_update(struct sock *sk, u32 delay)
 	}
 
 	/*
-	 * 第二个启发条件是如果当前往返时延的增长已经超过了一定的限度，那么，说明网
+	 * 第二个启发条件: 如果当前往返时延的增长已经超过了一定的限度，那么，说明网
 	 * 络的带宽已经要被占满了。因此，也需要退出慢启动状态。
+ 	 */
 	 */
 	if (hystart_detect & HYSTART_DELAY) {
 		/* obtain the minimum delay of more than sampling packets */
@@ -538,16 +613,14 @@ static void hystart_update(struct sock *sk, u32 delay)
 			}
 		}
 	}
-
-	/* 退出慢启动状态的方法很简单，都是直接将当前的snd_ssthresh的大小设定为和当前拥
-	 * 塞窗口一样的大小。这样， TCP 自然就会转入拥塞避免状态。
- 	 */
 }
 
 /* Track delayed acknowledgment ratio using sliding window
  * ratio = (15*ratio + sample) / 16
  */
- /* 收到 ACK 后， Cubic 模块会重新计算链路的延迟情况。 */
+/* 基本上每次收到 ACK 后都会调用本函数， Cubic 模块会重新计算链路的延迟情况。
+ * 会更新snd_ssthresh和delayed_ack。
+ */
 static void bictcp_acked(struct sock *sk, const struct ack_sample *sample)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -565,14 +638,17 @@ static void bictcp_acked(struct sock *sk, const struct ack_sample *sample)
 	delay = (sample->rtt_us << 3) / USEC_PER_MSEC;
 	if (delay == 0)
 		delay = 1;
-
-	/* first time call or link delay decreases */
+	
 	/* 当第一次调用或者链路延迟增大时，重设 delay_min 的值。 */
+	/* first time call or link delay decreases */
 	if (ca->delay_min == 0 || ca->delay_min > delay)
 		ca->delay_min = delay;
 
+	/* 当 cwnd 大于阈值(hystart_low_window = 16)后，会触发 hystart 更新机制。
+	 * 注：
+	 * tp->snd_ssthresh初始值是一个很大的值0x7fffffff。
+	 */
 	/* hystart triggers when cwnd is larger than some threshold */
-	/* 当 cwnd 大于阈值(16)后，会触发 hystart 更新机制 */
 	if (hystart && tcp_in_slow_start(tp) &&
 	    tp->snd_cwnd >= hystart_low_window)
 		hystart_update(sk, delay);
@@ -580,21 +656,35 @@ static void bictcp_acked(struct sock *sk, const struct ack_sample *sample)
 
 static struct tcp_congestion_ops cubictcp __read_mostly = {
 	.init		= bictcp_init,
+
+	/* 调用本函数的地方有： tcp_fastretrans_alert()，tcp_enter_cwr(), tcp_enter_frto(), tcp_enter_loss() 
+	 * 即每次发生拥塞状态切换时，都会调整ssthresh。
+	 * 修改snd_ssthresh值的地方有bictcp_init,hystart_update以及上面列出的调用ssthresh函数处。
+	 */
 	.ssthresh	= bictcp_recalc_ssthresh,
+
+	/*
+	 * 发送方发出一个data包之后，接收方回复一个ack包，发送方收到这个ack包之后，
+	 * 调用tcp_ack()->tcp_cong_avoid()->bictcp_cong_avoid()来更改拥塞窗口snd_cwnd大小.
+	 */
 	.cong_avoid	= bictcp_cong_avoid,
 	.set_state	= bictcp_state,
+
+	/* 调用undo_cwnd函数的地方有:tcp_undo_cwr()用来撤销之前误判导致的"缩小拥塞窗口" */
 	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cwnd_event	= bictcp_cwnd_event,
+
+	/* 调用ptts_acked()函数的路径为：tcp_ack() -->tcp_clean_rtx_queue() */
 	.pkts_acked     = bictcp_acked,
 	.owner		= THIS_MODULE,
 	.name		= "cubic",
 };
 
 /* 系统默认的拥塞控制算法:
-	拥塞算法是 针对发送方而言，但 收到接收方的窗口限制。
-	解决在大带宽延迟积网络中TCP拥塞窗口增长缓慢的问题，其具有TCP友好性与RTT公平性，
-	实时保持窗口的增长率不受RTT的影响
-
+ * 拥塞算法是 针对发送方而言，但受到接收方的窗口限制。
+ * 解决在大带宽延迟积网络中TCP拥塞窗口增长缓慢的问题，其具有TCP友好性与RTT公平性，
+ * 实时保持窗口的增长率不受RTT的影响
+ *
  * CUBIC 算法的思路是这样的：当发生了一次丢包后，它将此时的窗口大小定义为
  * Wmax，之后，进行乘法减小。这里与标准 TCP 不同，乘法减小时不是直接减小一半，
  * 而是乘一个常系数 β。快重传和快恢复的部分和标准 TCP 一致。当它进入到拥塞避免
@@ -608,10 +698,13 @@ static int __init cubictcp_register(void)
 	/* Precompute a bunch of the scaling factors that are used per-packet
 	 * based on SRTT of 100ms
 	 */
-	/* 预先计算缩放因子（此时假定 SRTT 为 100ms） */
+	/* 预先计算缩放因子（此时假定 SRTT 为 100ms）
+	 * beta_scale == 8*(1024 + 717) / 3 / (1024 -717 )，大约为15
+	 */
 	beta_scale = 8*(BICTCP_BETA_SCALE+beta) / 3
 		/ (BICTCP_BETA_SCALE - beta);
 
+	/* cube_rtt_scale == 41*10 = 410  */
 	cube_rtt_scale = (bic_scale * 10);	/* 1024*c/rtt */
 
 	/* calculate the "K" for (wmax-cwnd) = c/rtt * K^3

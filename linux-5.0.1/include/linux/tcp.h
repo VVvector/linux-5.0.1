@@ -438,7 +438,20 @@ struct tcp_sock {
 	/* 一般表示已经真正发送出去的最后一个字节序号，有时也表示期望发出去的最后一个字节的序号 */
 	u32	pushed_seq;	/* Last pushed seq, required to talk to windows */
 
-	/* 丢失的数据报个数，只是一个猜测值 */
+	/* 丢失的数据报个数，只是一个预估值。
+	 * 一般是根据选择恢复方法来确定丢失的段数量。
+	 * 例如：
+	 * 1. Normal(non-FACK, non-RACK) :
+	 *	1. 未启用SACK, dup ACK表示ACK seq相同的段。
+	 *	2. 启用SACK, 携带SACK的ACK段也被认为是重复ACK。
+	 *	设 dupthresh = 3，SACKed_count = 6，从 unAcked 包开始的 SACKed_count - dupthresh 个数据包，
+	 *	即 3 个数据包会被标记为 LOST。
+	 * 1. FACK - forward ack:
+	 *	它假设网络不会使数据包乱序，因此收到最大的被 SACK 的数据包之前，FACK 均认为是丢失的。
+	 * 	FACK 模式下，重传时机为 被 SACKed 的包数 + 空洞数 > dupthresh。
+	 * 2. RACK - recent ack:
+	 * 	如果数据包 p1 在 p2 之前发送，没有收到 p1 的确认，当收到 p2 的 Sack 时，推断 p1 丢包。
+	 */
 	u32	lost_out;	/* Lost packets			*/
 
 	/*
@@ -474,7 +487,8 @@ struct tcp_sock {
 	int     lost_cnt_hint;
 
 	/* 在启用RTO算法的情况下，路径MTU探测成功，进入拥塞控制状态时保存的ssthresh值。
-	主要用于撤销拥塞窗口时，恢复慢启动阀值 */
+	 * 主要用于撤销拥塞窗口 undo_xxx() 时，恢复慢启动阀值
+	 */
 	u32	prior_ssthresh; /* ssthresh saved at recovery start	*/
 
 	/* 记录发生拥塞时的snd_nxt，标识重传队列的尾部 */
@@ -488,14 +502,14 @@ struct tcp_sock {
 				 * also used in SYN-SENT to remember stamp of
 				 * the first SYN. */
 	/* 在使用 F-RTO 算法进行发送超时处理，或进入 Recovery 进行重传，
-	 * 或进入 Loss 开始慢启动时，记录当时 SND.UNA, 标记重传起始点。
+	 * 或进入 Loss 开始慢启动时，记录当时的 SND.UNA, 标记重传起始点。
 	 * 它是检测是否可以进行拥塞控制撤销的条件之一，一般在完成
 	 * 拥塞撤销操作或进入拥塞控制 Loss 状态后会清零。 
 	 */
 	u32	undo_marker;	/* snd_una upon a new recovery episode. */
 
-	/* 在恢复拥塞控制之前可进行撤销的重传段数。在进入 FTRO 算法或
-	 * 拥塞状态 Loss 时，清零，在重传时计数，是检测是否可以进行拥塞
+	/* 在恢复拥塞控制之前可进行撤销的重传段数。在进入 F-TRO 算法或
+	 * 拥塞状态 Loss 时清零，在重传时计数，是检测是否可以进行拥塞
 	 * 撤销的条件之一。 */
 	int	undo_retrans;	/* number of undoable retransmissions. */
 	u64	bytes_retrans;	/* RFC4898 tcpEStatsPerfOctetsRetrans
