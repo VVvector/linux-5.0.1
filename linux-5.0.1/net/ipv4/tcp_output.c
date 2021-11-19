@@ -1727,6 +1727,12 @@ unsigned int tcp_current_mss(struct sock *sk)
  * As additional protections, we do not touch cwnd in retransmission phases,
  * and if application hit its sndbuf limit recently.
  */
+/*
+ * 此函数是在网络空闲（未充分利用）RTO时长之后调整拥塞窗口。
+ * 此调整不针对重传阶段，以及应用程序受到发送缓存限值的情况。首先获得窗口的使用情况，
+ * 取值为初始窗口值和tcp_cwnd_validate()函数中记录的使用值snd_cwnd_used之间的较大值。
+ * 拥塞窗口值调整为原窗口值与窗口使用值之和的一半。
+ */
 static void tcp_cwnd_application_limited(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -1745,6 +1751,11 @@ static void tcp_cwnd_application_limited(struct sock *sk)
 	tp->snd_cwnd_stamp = tcp_jiffies32;
 }
 
+/*
+ * 第一次执行此函数时，max_packets_out和max_packets_seq均未赋值，分别为两者赋值为packets_out和SND.NXT的值。
+ * 之后再次执行此函数时，只有进入下一个发送窗口期或者发送报文大于记录值时进行更新。由此可见，
+ * 前者max_packets_out记录的为上一个窗口发送的最大报文数量；而后者max_packets_seq记录的为最大的发送序号。
+ */
 static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 {
 	const struct tcp_congestion_ops *ca_ops = inet_csk(sk)->icsk_ca_ops;
@@ -1760,6 +1771,15 @@ static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 		tp->is_cwnd_limited = is_cwnd_limited;
 	}
 
+	/*
+	 * 参数is_cwnd_limited记录了上一个发送窗口期是否受到了拥塞窗口的限制。
+	 * 函数tcp_is_cwnd_limited()判断连接的发送是否受限于拥塞窗口，为真表明当前发送使用了全部可用网络资源，
+	 * 反之，表明存在空闲的网络资源。
+	 * 在后一种情况下，记录当前网络中报文数量到变量snd_cwnd_used中，
+	 * 如果内核配置开启了在空闲时长超过RTO之后，复位拥塞窗口的功能，即tcp_slow_start_after_idle为真，
+	 * 并且空闲时长大于等于RTO，并且拥塞控制算法未定义相关处理，这里调用tcp_cwnd_application_limited()函数，
+	 * 处理应用限速的情况。
+	 */
 	if (tcp_is_cwnd_limited(sk)) {
 		/* Network is feed fully. */
 		tp->snd_cwnd_used = 0;
@@ -1769,11 +1789,16 @@ static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 		if (tp->packets_out > tp->snd_cwnd_used)
 			tp->snd_cwnd_used = tp->packets_out;
 
+		/* 在网络空闲（未充分利用）RTO时长之后调整拥塞窗口。 */
 		if (sock_net(sk)->ipv4.sysctl_tcp_slow_start_after_idle &&
 		    (s32)(tcp_jiffies32 - tp->snd_cwnd_stamp) >= inet_csk(sk)->icsk_rto &&
 		    !ca_ops->cong_control)
 			tcp_cwnd_application_limited(sk);
 
+		/*
+		 * 以下检查是否为发送端缓存不足引起的空闲，首先，排除拥塞窗口的原因，其次，
+		 * 是发送队列为空，而且应用程序遇到缓存限值，记录下发送缓存限值标志TCP_CHRONO_SNDBUF_LIMITED。
+		 /
 		/* The following conditions together indicate the starvation
 		 * is caused by insufficient sender buffer:
 		 * 1) just sent some data (see tcp_write_xmit)
@@ -2128,6 +2153,10 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 	if ((s64)(delta - (u64)NSEC_PER_USEC * (tp->srtt_us >> 4)) < 0)
 		goto send_now;
 
+	/* 这里表示 如果判断到拥塞窗口小于发送窗口，并且拥塞窗口小于等于报文长度时，意味着
+	 * 当前报文不能被发送，于是就设置拥塞窗口限制标志 is_cwnd_limited。（表示说受到拥塞
+	 * 窗口的限制）
+	 */
 	/* Ok, it looks like it is advisable to defer.
 	 * Three cases are tracked :
 	 * 1) We are cwnd-limited
@@ -2136,12 +2165,12 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 	 */
 	if (cong_win < send_win) {
 		if (cong_win <= skb->len) {
-			*is_cwnd_limited = true;
+			*is_cwnd_limited = true; //受到拥塞窗口的限制
 			return true;
 		}
 	} else {
 		if (send_win <= skb->len) {
-			*is_rwnd_limited = true;
+			*is_rwnd_limited = true; //受到当前发送窗口限制
 			return true;
 		}
 	}
@@ -2691,7 +2720,7 @@ repair:
 	else
 		tcp_chrono_stop(sk, TCP_CHRONO_RWND_LIMITED);
 
-	/* 本次有数据发送，则对tcp拥塞窗口相关数据更新 */
+	/* 本次有数据发送，则对tcp拥塞窗口相关数据更新。 */
 	if (likely(sent_pkts)) {
 		/* 如果本连接处于CWR或者Recovery拥塞状态，需要增加prr的值。 */
 		if (tcp_in_cwnd_reduction(sk))
@@ -2701,8 +2730,15 @@ repair:
 		if (push_one != 2)
 			tcp_schedule_loss_probe(sk, false);
 
-		/* 拥塞窗口校验 */
+		/* 1. tcp_tso_should_defer()的结果。（如果判断到拥塞窗口小于发送窗口，
+		 *   并且报文长度大于拥塞窗口；或者 判断到拥塞窗口大于发送窗口，但报文长度大于发送窗口。
+		 *   于是就设置拥塞窗口限制标志 is_cwnd_limited。（表示说受到拥塞窗口的限制）
+		 *
+		 * 2. 还在网络中packets数量大于等于拥塞窗口了，表示说 受到拥塞窗口限制了。
+		 */
 		is_cwnd_limited |= (tcp_packets_in_flight(tp) >= tp->snd_cwnd);
+
+		/* 拥塞窗口校验 */
 		tcp_cwnd_validate(sk, is_cwnd_limited);
 		return false;
 	}

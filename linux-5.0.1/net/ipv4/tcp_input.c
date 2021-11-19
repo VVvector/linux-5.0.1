@@ -3934,7 +3934,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	/* 设置时间戳，注意：精度有限 */
 	tp->rcv_tstamp = tcp_jiffies32;
 
-	/* 检测是否有未发送但还未ack的段，没有则跳转 */
+	/* 检测是否有未发送但还未ack的段，没有，则跳转 */
 	if (!prior_packets)
 		goto no_queue;
 
@@ -6150,7 +6150,7 @@ slow_path:
 	if (!tcp_validate_incoming(sk, skb, th, 1))
 		return;
 
-	/* 当接收缓存不足的情况处理 */
+	/* 当接收缓存不足的情况处理,也会跳到本处进行处理。 */
 step5:
 	/* 先进行慢速路径ack的处理 */
 	if (tcp_ack(sk, skb, FLAG_SLOWPATH | FLAG_UPDATE_TS_RECENT) < 0)

@@ -1329,6 +1329,12 @@ static inline u32 tcp_wnd_end(const struct tcp_sock *tp)
  * either send more filler packets or data to artificially blow up the cwnd
  * usage, and allow application-limited process to probe bw more aggressively.
  */
+/*
+ * 对于是否为拥塞窗口受限，内核的判断与RFC2861略有不同，RFC2861建议如果CWND没有全部的使用，不应
+ * 增加其值，这正符合内核在拥塞避免阶段的实现。但是，对于慢启动阶段，内核允许拥塞窗口增长到使用量的一倍。
+ * tcp_is_cwnd_limited()相关注释，在初始窗口为10，发送了9个报文后，如果所有报文都被确认了，
+ * 将窗口增加到18。这将有利于限速应用程序更好的探测网络带宽。 
+ */
 static inline bool tcp_is_cwnd_limited(const struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);

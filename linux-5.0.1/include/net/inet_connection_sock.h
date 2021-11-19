@@ -130,9 +130,11 @@ struct inet_connection_sock {
 	void (*icsk_clean_acked)(struct sock *sk, u32 acked_seq);
 	struct hlist_node         icsk_listen_portaddr_node;
 	unsigned int		  (*icsk_sync_mss)(struct sock *sk, u32 pmtu);
+	
 	__u8			  icsk_ca_state:6,
 				  icsk_ca_setsockopt:1,
 				  icsk_ca_dst_locked:1;
+	
 	__u8			  icsk_retransmits;
 	__u8			  icsk_pending;
 	__u8			  icsk_backoff;
