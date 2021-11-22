@@ -513,7 +513,7 @@ struct sock {
 				sk_type      : 16; /* 套接字类型，其值为SOCK_XXX形式。eg: SOCK_STREAM */
 #define SK_PROTOCOL_MAX U8_MAX
 	u16			sk_gso_max_segs; /* 该sock支持的gso最大分段数 */
-	u8			sk_pacing_shift;
+	u8			sk_pacing_shift; /* 定义为10，一般用于计算流量。2的十次方。即1ms。 */
 	unsigned long	        sk_lingertime; /* 关闭套接口前发送剩余数据的时间。参见SO_LINGER选项 */
 	struct proto		*sk_prot_creator; /* 传输层接口 */
 	rwlock_t		sk_callback_lock;

@@ -839,10 +839,15 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
  * to process all sockets that eventually need to send more skbs.
  * We use one tasklet per cpu, with its own queue of sockets.
  */
+/*
+ * TCP Small Queues的目的是限制每个tcp连接在Qdisc和device队列中的skb数量，以达到降低RTT和避免bufferbloat的目的。
+ */
 struct tsq_tasklet {
 	struct tasklet_struct	tasklet;
 	struct list_head	head; /* queue of tcp sockets */
 };
+
+/* 为每个处理器都分配一个tsq_tasklet，且每个tasklet有独立的socket队列。*/
 static DEFINE_PER_CPU(struct tsq_tasklet, tsq_tasklet);
 
 static void tcp_tsq_write(struct sock *sk)
@@ -863,6 +868,7 @@ static void tcp_tsq_write(struct sock *sk)
 	}
 }
 
+/* TSQ的核心处理函数tcp_tsq_handler，负责重新调用TCP的发送或者重传函数。 */
 static void tcp_tsq_handler(struct sock *sk)
 {
 	bh_lock_sock(sk);
@@ -877,6 +883,12 @@ static void tcp_tsq_handler(struct sock *sk)
  * We run in tasklet context but need to disable irqs when
  * transferring tsq->head because tcp_wfree() might
  * interrupt us (non NAPI drivers)
+ */
+/*
+ * 以上的tasklet_schedule调用了初始化时注册的tcp_tasklet_func函数。如下，在其处理过程中，
+ * 首先从TSQ队列中移除套接口，清除其TSQ_QUEUE入队标志。其次，如果此套接口未设置TCP_TSQ_DEFERRED标志，
+ * 表明其已经在tcp_write_xmit发送函数中得到处理，此处不再处理。否则，如果此套接口没有被用户层系统调用锁定，
+ * 调用TSQ核心处理函数tcp_tsq_handler处理。
  */
 static void tcp_tasklet_func(unsigned long data)
 {
@@ -914,6 +926,10 @@ static void tcp_tasklet_func(unsigned long data)
  *
  * called from release_sock() to perform protocol dependent
  * actions before socket release.
+ */
+/*
+ * 如果在以上的操作中，由于用户层正在执行套接口相关的系统调用，导致未能进行。将在用户层系统调用退出时，
+ * 在套接口释放函数中tcp_release_cb，根据标志TCPF_TSQ_DEFERRED的判断，执行TSQ函数tcp_tsq_handler。
  */
 void tcp_release_cb(struct sock *sk)
 {
@@ -976,6 +992,18 @@ void __init tcp_tasklet_init(void)
  * We can't xmit new skbs from this context, as we might already
  * hold qdisc lock.
  */
+/*
+ * 当数据报文skb释放时（如TX完成中断发生），检查其所属套接口的TSQ阻塞状态，如下发送缓存释放函数tcp_wfree。
+ * 首先将发送缓存sk_wmem_alloc的值将其skb的truesize-1的值，保留1个计数是由于此函数之后或者tcp_tasklet_func函数
+ * 将调用sk_free函数，如果sk_wmem_alloc为1，sk_free将释放套接口结构。其次如果当前进程上下文在ksoftirqd中，
+ * 并且Qdisc或者设备队列中还有数据未发送，表明系统当前繁忙，不在进行TSQ拥塞处理，避免导致加重系统的繁忙状况，
+ * 也可使此TCP流的确认ACK报文得以处理。
+ * 
+ * 如果此套接口没有被TSQ阻塞，TSQF_THROTTLED标志未设置，或者其已经位于TSQ处理队列中，直接返回。
+ * 如果在此期间套接口的阻塞状态已经缓解（见cmpxchg函数实现），直接返回。否则，将处于阻塞状态的套接口
+ * 的sk_tsq_flags中的阻塞状态清除，并且将此套接口添加到当前处理器的TSQ处理队列中，
+ * 并且调用处理器的takslet进行处理。
+ */
 void tcp_wfree(struct sk_buff *skb)
 {
 	struct sock *sk = skb->sk;
@@ -1025,6 +1053,9 @@ out:
 
 /* Note: Called under soft irq.
  * We can call TCP stack right away, unless socket is owned by user.
+ */
+/* 除以tcp_wfree函数之外，在TCP的pacing功能中，pacing超时处理函数tcp_pace_kick已将处理TSQ除以阻塞状态的套接口，
+ * 其逻辑与tcp_wfree中的一致，唯一区别在于pacing处理中，不会先检查套接口是否处于阻塞状态。
  */
 enum hrtimer_restart tcp_pace_kick(struct hrtimer *timer)
 {
@@ -1101,7 +1132,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		oskb = skb;
 
 		tcp_skb_tsorted_save(oskb) {
-			/* 如果已经被克隆的skb，则 进行复制skb。否则 克隆一份。*/
+			/* 如果已经被克隆的skb，则进行复制skb。否则克隆一份。*/
 			if (unlikely(skb_cloned(oskb)))
 				skb = pskb_copy(oskb, gfp_mask);
 			else
@@ -2432,20 +2463,37 @@ static bool tcp_pacing_check(struct sock *sk)
  * 1. 更好地进行RTT估算和ACK调度
  * 2. 更快速地恢复
  * 3. 高数据速率
+ *
+ * tcp_small_queue_check() 在TCP发送路径的tcp_write_xmit()函数和tcp_xmit_retransmit_queue()函数中都有调用。
  */
 static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 				  unsigned int factor)
 {
 	unsigned long limit;
 
+	/* 取以下两者之间的较大值：1）当前发送的数据报文skb结构所占用空间的两倍值（2*skb->truesize）；
+	 * 2）以及当前大约每毫秒的流量值（其通过sk_pacing_rate计算而来，内核将sk_pacing_shift变量定义为10，
+	 * 将当前每秒钟的流量（sk_pacing_rate）除以2的10次方，得到大约1毫秒的流量值）。*/
 	limit = max_t(unsigned long,
 		      2 * skb->truesize,
 		      sk->sk_pacing_rate >> sk->sk_pacing_shift);
+
+	/* 其次，如果此结果值大于 sysctl_tcp_limit_output_bytes（默认为1M） 限定的值，
+	 * 使用tcp_limit_output_bytes作为限定值。
+	 */
 	if (sk->sk_pacing_status == SK_PACING_NONE)
 		limit = min_t(unsigned long, limit,
 			      sock_net(sk)->ipv4.sysctl_tcp_limit_output_bytes);
+
+	/* 最后，如果是重传报文，即factor等于1，将最终的判定值增大一倍。 */
 	limit <<= factor;
 
+	/* 如果sk_wmem_alloc大于limit，说明已经发送了太多的数据在Qdisc或者设备队列中，
+	 * 但是如果重传队列为空，此次发送还是允许进行。否则，返回true，禁止发送操作。
+	 * 在此之前，设置sk_tsp_flags的标志位TSQ_THROTTLED，表明是由于TSQ检查结果导致的不能发送。
+	 * 另外，有可能在此函数设置TSQ_THROTTLED标志之前，发生了TX中断，进行了skb释放操作，
+	 * 导致了sk_wmem_alloc的递减，所以，在返回前再次判断sk_wmem_alloc是否超过限值limit。
+	 */
 	if (refcount_read(&sk->sk_wmem_alloc) > limit) {
 		/* Always send skb if rtx queue is empty.
 		 * No need to wait for TX completion to call us back,

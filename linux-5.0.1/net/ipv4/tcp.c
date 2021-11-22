@@ -732,23 +732,24 @@ static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
  * autocorking if we only have an ACK in Qdisc/NIC queues,
  * or if TX completion was delayed after we processed ACK packet.
  */
- /*
-当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少
-总的发包个数。tcp_autocorking的思路是当规则队列Qdisc、或网卡的发送队列中有尚未发出的
-数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
-包成功发送出去为止。
-
-同时满足以下条件时，tcp_push()才会自动阻塞：
-	1. 数据包为小包，即数据长度小于最大值。
-	2. 使用了tcp_autocorking，这个值默认为1。
-	3. 此数据包不是发送队列的第一个包，即前面有数据包被发送了。
-	4. Qdisc或Nic queues必须有数据包，而不能只是纯ACK包。
-
-Q：什么时候会取消自动阻塞呢？
-A：在tcp_push()中会检查，if (atomic_read(&sk->sk_wmem_alloc) > skb->truesize)
-当提交给IP层的数据包都发送出去后，sk_wmem_alloc的值就会变小，此时这个条件就为假，
-之后可以发送被阻塞的数据包了。
-*/
+/*
+ * 当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少
+ * 总的发包个数。tcp_autocorking的思路是：当规则队列Qdisc、或网卡的发送队列中有尚未发出的
+ * 数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
+ * 包成功发送出去为止。
+ * 
+ * 同时满足以下条件时，tcp_push()才会自动阻塞：
+ * 	1. 数据包为小包，即数据长度小于最大值size_goal( MSS )。
+ * 	2. 使用了tcp_autocorking( /proc/sys/net/ipv4/tcp_autocorking )，这个值默认为1。
+ * 	3. 当前skb不是发送队列头，表明已经有数据发送。（此数据包不是发送队列的第一个包，即前面有数据包被发送了。）
+ * 	4. 当前正在发送的数据的总truesize长度大于此skb的truesize，
+ * 	   表明位于Qdisc或者设备队列中的数据不是仅有ACK报文，所以TX发送处理不会被延迟。
+ * 
+ * Q：什么时候会取消自动阻塞呢？
+ * A：在tcp_push()中会检查，if (atomic_read(&sk->sk_wmem_alloc) > skb->truesize)
+ * 当提交给IP层的数据包都发送出去后，sk_wmem_alloc的值就会变小，此时这个条件就为假，
+ * 之后可以发送被阻塞的数据包了。
+ */
 static bool tcp_should_autocork(struct sock *sk, struct sk_buff *skb,
 				int size_goal)
 {
