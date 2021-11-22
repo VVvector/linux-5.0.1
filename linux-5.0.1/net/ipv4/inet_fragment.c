@@ -170,6 +170,14 @@ static struct inet_frag_queue *inet_frag_alloc(struct netns_frags *nf,
 	f->constructor(q, arg);
 	add_frag_mem_limit(nf, f->qsize);
 
+	/* 分片生存时间
+	 * 现实网络环境中，有可能接收不到一个数据包的所有分片，无法重组数据包将导致这些分片一直驻留在分片队列中。
+	 * 内核采用超时机制处理这些分片。在接收到第一个数据包分片，创建分片队列后，内核随即启动超时计时器，
+	 * 超时时间从网络命名空间结构中获取（timeout）， 默认情况下超时时间为30秒钟（IP_FRAG_TIME）。
+	 *
+	 * 超时定时器在到期之后，使用 ip_expire() 函数释放分片队列（ipq_put）。如果本机就是这些分片报文的目的主机，
+	 * 回复ICMP的分片重组超时消息（type=ICMP_TIME_EXCEEDED(11), code=ICMP_EXC_FRAGTIME(1)）。
+	 */
 	timer_setup(&q->timer, f->frag_expire, 0);
 	spin_lock_init(&q->lock);
 	refcount_set(&q->refcnt, 3);

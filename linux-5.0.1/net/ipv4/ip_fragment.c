@@ -109,8 +109,11 @@ static void ip4_frag_create_run(struct inet_frag_queue *q, struct sk_buff *skb)
 }
 
 /* Describe an entry in the "incomplete datagrams" queue. */
+/* 分片接收队列
+ * 内核将接收到的分片报文暂存在一个ipq结构的队列中。
+ */
 struct ipq {
-	struct inet_frag_queue q;
+	struct inet_frag_queue q; //实际的分片保存在本成员中
 
 	u8		ecn; /* RFC3168 support */
 	u16		max_df_size; /* largest frag with DF set seen */
@@ -287,11 +290,18 @@ static struct ipq *ip_find(struct net *net, struct iphdr *iph,
 	return container_of(q, struct ipq, q);
 }
 
+/*
+ * 丢弃不合法分片。正常情况下，每接收一个分片就将队列的接收计数加一，
+ * 同时将相应的对端系统的接收计数加一，二者一致。但是，内核有可能在此期间接收到相同的源地址设备
+ * 发送的另外一组需要分片的数据流，其会对应到另外一个分片队列，将会导致内核的对端系统（peer->rid）
+ * 接收计数增加。此后，再次接收到前一个队列的分片时，分片队列ipq的rid就会小于对端系统的rid，
+ * 如果二者的差值大于64时，内核认为是非法的分片，将会丢弃整个分片队列。
+ */
 /* Is the fragment too far ahead to be part of ipq? */
 static int ip_frag_too_far(struct ipq *qp)
 {
 	struct inet_peer *peer = qp->peer;
-	unsigned int max = qp->q.net->max_dist;
+	unsigned int max = qp->q.net->max_dist; //ipv4_frags_init_net() 中初始化为64。
 	unsigned int start, end;
 
 	int rc;
@@ -356,6 +366,7 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 	if (qp->q.flags & INET_FRAG_COMPLETE)
 		goto err;
 
+	/* 丢弃不合法的分片 */
 	if (!(IPCB(skb)->flags & IPSKB_FRAG_COMPLETE) &&
 	    unlikely(ip_frag_too_far(qp)) &&
 	    unlikely(err = ip_frag_reinit(qp))) {
@@ -486,11 +497,20 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 	    fragsize > qp->max_df_size)
 		qp->max_df_size = fragsize;
 
+	/*
+	 * 重组的前提是接收到所有的分片。内核判断一个队列是否接收到了所有分片需要满足三个条件：
+	 * a）INET_FRAG_FIRST_IN  - 在接收到OFFSET为0值的数据包时设置此标志；
+	 * b）INET_FRAG_LAST_IN   - 接收到IP报头中More Fragmentation（IP_MF）标志等于0的分片时，设置此标志位；
+	 * c）inet_frag_queue中meat等于len，meat在每次成功插入一个分片后增加此分片的长度值，
+	 *    len值由最后一个分片的OFFSET值加上其长度获得。
+	 */
 	if (qp->q.flags == (INET_FRAG_FIRST_IN | INET_FRAG_LAST_IN) &&
 	    qp->q.meat == qp->q.len) {
 		unsigned long orefdst = skb->_skb_refdst;
 
 		skb->_skb_refdst = 0UL;
+
+		/* 重组函数 */
 		err = ip_frag_reasm(qp, skb, prev_tail, dev);
 		skb->_skb_refdst = orefdst;
 		if (err)
@@ -532,6 +552,14 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 		err = -EINVAL;
 		goto out_fail;
 	}
+
+	/* 
+	 * 首先检查最近插入的分片报文是否为数据包的第一个分片，如果不是, 必定存在前一个分片（prev不为空），
+	 * 此时，如下的代码将使用最近插入的这个分片结构（sk_buff）作为分片链表的头。
+	 * 首先克隆clone一份最近接收的这一分片，将克隆之后的分片重新链接到分片链表中，
+	 * 替换掉之前的分片。之后将链表头分片（fragments）克隆到最近接收的这一分片中，
+	 * 释放位于链表头的分片，将最近接收分片设置为链表头。
+	 */
 	/* Make the one we just received the head. */
 	if (head != skb) {
 		fp = skb_clone(skb, GFP_ATOMIC);
@@ -555,6 +583,7 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 
 	WARN_ON(head->ip_defrag_offset != 0);
 
+	/* 其次检查所有分片的总长度是否超过65535，超出65535的数据包不做重组，函数直接返回。 */
 	/* Allocate a new buffer for the datagram. */
 	ihlen = ip_hdrlen(head);
 	len = ihlen + qp->q.len;
@@ -573,6 +602,11 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 	if (delta)
 		add_frag_mem_limit(qp->q.net, delta);
 
+	/*
+	 * 对于分片链表的头一个分片（head），如果其自身包括分片，需要做一些特殊处理:
+	 * 为其分片数据单独创建一个sk_buff，将其链接在链表头head之后。head仅包含数据区与页面数据存储区。
+	 * 修改相应的长度信息。
+	 */
 	/* If the first fragment is fragmented itself, we split
 	 * it to two chunks: the first with data and paged part
 	 * and the second, holding only fragments. */
@@ -600,6 +634,7 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 
 	skb_push(head, head->data - skb_network_header(head));
 
+	/* 真正的重组操作 */
 	/* Traverse the tree in order, to build frag_list. */
 	fp = FRAG_CB(head)->next_frag;
 	rbn = rb_next(&head->rbnode);
@@ -692,9 +727,9 @@ int ip_defrag(struct net *net, struct sk_buff *skb, u32 user)
 	skb_orphan(skb);
 
 	/*
-		查找ip分片，实际上就是从ip4_frag表中取出对应项，
-		这里的哈希值就是由ip包头的（标识，源ip，目的ip，协议号）得到的。
-	*/
+	 * 查找ip分片，实际上就是从ip4_frag表中取出对应项，
+	 * 这里的哈希值就是由ip包头的（标识，源ip，目的ip，协议号）得到的。
+	 */
 	/* Lookup (or create) queue header */
 	qp = ip_find(net, ip_hdr(skb), user, vif);
 	if (qp) {
@@ -702,7 +737,7 @@ int ip_defrag(struct net *net, struct sk_buff *skb, u32 user)
 
 		spin_lock(&qp->q.lock);
 
-		/* 实现将ip分片加到队列中 */
+		/* 实现将ip分片加到分片队列中 */
 		ret = ip_frag_queue(qp, skb);
 
 		spin_unlock(&qp->q.lock);
@@ -912,6 +947,7 @@ static int __net_init ipv4_frags_init_net(struct net *net)
 	 */
 	net->ipv4.frags.high_thresh = 4 * 1024 * 1024;
 	net->ipv4.frags.low_thresh  = 3 * 1024 * 1024;
+
 	/*
 	 * Important NOTE! Fragment queue must be destroyed before MSL expires.
 	 * RFC791 is wrong proposing to prolongate timer each fragment arrival
