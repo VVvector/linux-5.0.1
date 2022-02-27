@@ -249,7 +249,20 @@ static bool retransmits_timed_out(struct sock *sk,
 	if (!start_ts)
 		return false;
 
+	/* 这里可以得到   linear_backoff_thresh 为9，
+	 * 这里会比较 net->ipv4.sysctl_tcp_retries2，即不同的设定得到的timeout值不一样。
+	 * 当实际的timeout大于上面计算的timeout时，就不会进行重传了，会释放掉该tcp。
+	 * 
+	 * 在RFC1122中有两个门限R1和R2，当重传次数超过R1的时候，TCP向IP层发送negative advice，
+	 * 指示IP层进行MTU探测、刷新路由等过程，以防止由于网络链路发生变化而导致TCP传输失败。
+	 * 当重传次数超过R2的时候，TCP放弃重传并关闭TCP连接。在linux中对于普通数据报文状态下的TCP，
+	 * R1对应/proc/sys/net/ipv4/tcp_retries1，R2对应/proc/sys/net/ipv4/tcp_retries2参数。
+	 * 这两个参数都是根据上面的计算流程计算出一个timeout值，当总重传时间超过这个timeout值还
+	 * 没有收到ack的时候触发相应的操作。对于SYN报文如我们之前所讲，则是由tcp_syn_retries和
+	 * tcp_synack_retries这两个参数控制。
+	 */
 	if (likely(timeout == 0)) {
+		// 计算得到 linear_backoff_thresh = 9, rto_base = 200ms, TCP_RTO_MAX = 120000ms
 		linear_backoff_thresh = ilog2(TCP_RTO_MAX/rto_base);
 
 		if (boundary <= linear_backoff_thresh)

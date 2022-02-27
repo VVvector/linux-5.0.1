@@ -135,10 +135,17 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCP_DELACK_MIN	4U
 #define TCP_ATO_MIN	4U
 #endif
+
+/* 最大的RTO为120s，指数退避时不能超过这个值 */
 #define TCP_RTO_MAX	((unsigned)(120*HZ))
+
+/* 最小的RTO为200ms，rttvar不能低于这个值 */
 #define TCP_RTO_MIN	((unsigned)(HZ/5))
 #define TCP_TIMEOUT_MIN	(2U) /* Min timeout for TCP timers in jiffies */
+
+/* 还没有计算出RTO值前的RTO初始值，为1s */
 #define TCP_TIMEOUT_INIT ((unsigned)(1*HZ))	/* RFC6298 2.1 initial RTO value	*/
+
 #define TCP_TIMEOUT_FALLBACK ((unsigned)(3*HZ))	/* RFC 1122 initial RTO value, now
 						 * used as a fallback RTO for the
 						 * initial data transmission if no
@@ -702,6 +709,9 @@ static inline u32 tcp_rto_min(struct sock *sk)
 	const struct dst_entry *dst = __sk_dst_get(sk);
 	u32 rto_min = TCP_RTO_MIN;
 
+	/* 如果路由缓存中存在RTO_MIN，则取其为最小RTO，例如：
+	 * ip tcp_metrics show 121.201.104.55
+	 */
 	if (dst && dst_metric_locked(dst, RTAX_RTO_MIN))
 		rto_min = dst_metric_rtt(dst, RTAX_RTO_MIN);
 	return rto_min;

@@ -316,10 +316,15 @@ struct tcp_sock {
 		fastopen_no_cookie:1, /* Allow send/recv SYN+data without a cookie */
 		is_sack_reneg:1,    /* in recovery from loss with SACK reneg? */
 		unused:2;
+
 	u8	nonagle     : 4,/* Disable Nagle algorithm?             */
 		thin_lto    : 1,/* Use linear timeouts for thin streams */
 		recvmsg_inq : 1,/* Indicate # of bytes in queue upon recvmsg */
 		repair      : 1,
+		/* FRTO - forward RTO-Recovery，也称为F-RTO，是一种发送端的无效RTO超时重传检测方法。
+		 * 虚假重传spurious retransmission。
+		 * https://www.cnblogs.com/lshs/p/6038603.html
+		 */
 		frto        : 1;/* F-RTO (RFC5682) activated in CA_Loss */
 	u8	repair_queue;
 	u8	syn_data:1,	/* SYN includes data */
@@ -337,10 +342,26 @@ struct tcp_sock {
 
 /* RTT measurement */
 	u64	tcp_mstamp;	/* most recent packet received/sent */
+	/* 经过平滑后的RTT值，它代表当前的RTT值，每收到一个ack更新一次。
+	 * 为了避免浮点运算，它是实际RTT值的8倍。
+	 */
 	u32	srtt_us;	/* smoothed round trip time << 3 in usecs */
+
+	/* 为RTT的平均偏差，用来衡量RTT的抖动，每收到一个ack更新一次。 */
 	u32	mdev_us;	/* medium deviation			*/
+
+	/* 上一个RTT内的最大mdev_us， 代表上个RTT内时延的波动情况，有效期为一个RTT。 */
 	u32	mdev_max_us;	/* maximal mdev for the last rtt period	*/
+
+	/* 为mdev_max的平滑值，可生可降，代表连接的抖动情况，在连接断开前都有效。*/
 	u32	rttvar_us;	/* smoothed mdev_max			*/
+
+	/* 用于判断当前采样是否处于RTT时间窗内。
+	 * 因为linux在一个RTT时间窗内部更新状态变量的方式和RTT时间窗结束更新状态变量的方式不同。
+	 * 1. 当snd.una <= rtt_seq，说明之前发送的数据包还没有收到ack，即当前还处于RTT时间窗内部。
+	 * 2. 当snd.una > rtt_seq, 说明之前发送的数据包已经收到了对应的ack确认，那么一个RTT时间窗结束，
+	 *    并把rtt_seq设置为snd.nxt继续下一个RTT时间窗的处理。
+	 */
 	u32	rtt_seq;	/* sequence number to update rttvar	*/
 	struct  minmax rtt_min;
 
@@ -491,7 +512,9 @@ struct tcp_sock {
 	 */
 	u32	prior_ssthresh; /* ssthresh saved at recovery start	*/
 
-	/* 记录发生拥塞时的snd_nxt，标识重传队列的尾部 */
+	/* 记录发生拥塞时的snd_nxt，标识重传队列的尾部。
+	 * 也是(recovery point + 1)，即在进行RTO超时重传时，当前已发送的数据中的最高序列号。
+	 */
 	u32	high_seq;	/* snd_nxt at onset of congestion	*/
 
 	/**

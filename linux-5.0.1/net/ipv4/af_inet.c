@@ -1429,7 +1429,7 @@ struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 	do {
 		iph = (struct iphdr *)(skb_mac_header(skb) + nhoff);
 
-		/* 对于UDP进行的IP分片的头部处理逻辑 */
+		/* UFO - 对于UDP进行的IP分片的头部处理逻辑 */
 		if (udpfrag) {
 			/* 设置offset，因为ip frag_off的非最后一个fragment，都应该是8的倍数，所有这里左移3bits。*/
 			iph->frag_off = htons(offset >> 3);

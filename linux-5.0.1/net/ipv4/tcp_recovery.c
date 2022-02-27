@@ -225,21 +225,28 @@ void tcp_rack_update_reo_wnd(struct sock *sk, struct rate_sample *rs)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* tcp_recovery如果设置为2，则使用旧版的静态时间窗口功能。默认是开启0x01 */
 	if (sock_net(sk)->ipv4.sysctl_tcp_recovery & TCP_RACK_STATIC_REO_WND ||
 	    !rs->prior_delivered)
 		return;
 
+	/* 刚调整完乱序时间窗口，还未经过一轮，则忽略处理该d-sack. */
 	/* Disregard DSACK if a rtt has not passed since we adjusted reo_wnd */
 	if (before(rs->prior_delivered, tp->rack.last_delivered))
 		tp->rack.dsack_seen = 0;
 
 	/* Adjust the reo_wnd if update is pending */
 	if (tp->rack.dsack_seen) {
+		/* 将时间窗口增加一个min_rtt/4 */
 		tp->rack.reo_wnd_steps = min_t(u32, 0xFF,
 					       tp->rack.reo_wnd_steps + 1);
 		tp->rack.dsack_seen = 0;
 		tp->rack.last_delivered = tp->delivered;
+
+		/* 重置为16轮 */
 		tp->rack.reo_wnd_persist = TCP_RACK_RECOVERY_THRESH;
+
+	/* 连续16轮没有再收到D-SACK，则认为网络乱序已经变好了，将时间窗口值变小。*/
 	} else if (!tp->rack.reo_wnd_persist) {
 		tp->rack.reo_wnd_steps = 1;
 	}

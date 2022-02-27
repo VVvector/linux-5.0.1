@@ -110,13 +110,15 @@ static void ip4_frag_create_run(struct inet_frag_queue *q, struct sk_buff *skb)
 
 /* Describe an entry in the "incomplete datagrams" queue. */
 /* 分片接收队列
- * 内核将接收到的分片报文暂存在一个ipq结构的队列中。
+ * 内核将接收到的分片报文暂存在一个ipq结构的队列中, 该结构保存了属于同一个 IP 报文的所有 IP 片段。
  */
 struct ipq {
 	struct inet_frag_queue q; //实际的分片保存在本成员中
 
 	u8		ecn; /* RFC3168 support */
 	u16		max_df_size; /* largest frag with DF set seen */
+
+	/* 记录IP分片的输入网卡索引 */
 	int             iif;
 	unsigned int    rid;
 	struct inet_peer *peer;
@@ -127,6 +129,7 @@ static u8 ip4_frag_ecn(u8 tos)
 	return 1 << (tos & INET_ECN_MASK);
 }
 
+/* IPv4协议用于分片重组的哈希表信息(全局) */
 static struct inet_frags ip4_frags;
 
 static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
@@ -727,7 +730,7 @@ int ip_defrag(struct net *net, struct sk_buff *skb, u32 user)
 	skb_orphan(skb);
 
 	/*
-	 * 查找ip分片，实际上就是从ip4_frag表中取出对应项，
+	 * 查找ip分片，实际上就是从 ip4_frag 表中取出对应项，
 	 * 这里的哈希值就是由ip包头的（标识，源ip，目的ip，协议号）得到的。
 	 */
 	/* Lookup (or create) queue header */

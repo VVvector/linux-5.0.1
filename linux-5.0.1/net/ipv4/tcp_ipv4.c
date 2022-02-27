@@ -1676,7 +1676,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 			}
 		}
 
-		/* established状态下的skb接收函数 - fast path/ slowa path */
+		/* established状态下的skb接收函数 - fast path/ slow path */
 		tcp_rcv_established(sk, skb);
 		return 0;
 	}
@@ -2003,7 +2003,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * 查看依据：接收数据包的网络接口，源端口号，目的端口号。
 	 *
 	 * 如果在 ehash 中找到，则表示已经经历了三次握手并且已建立了连接，可以
-	 * 进行正常的通信。如果在 bhash 中找到，则表示已经绑定已经绑定了端口，处于侦听
+	 * 进行正常的通信。如果在 bhash 中找到，则表示已经绑定了端口，处于侦听
 	 * 状态。如果在两个散列表中都查找不到，说明此时对应的传输控制块还没有创建，跳转
 	 * 到 no_tcp_socket 处理。
 	 */

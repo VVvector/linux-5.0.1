@@ -10,8 +10,14 @@ struct netns_frags {
 	long			low_thresh;
 	int			timeout;
 	int			max_dist;
+
 	struct inet_frags	*f;
 
+	/* IP分片在内核中分两级存储。其一，根据IP报头的4个字段计算得到一个hash值，
+	 * 数据包按照此hash值散列于相应的bucket中。此hash数组大小为1024。所以，
+	 * 此处的查找非常简单，只需要将计算得到的hash值作为索引（ip4_frags.hash[hash]）
+	 * 即可得到相应的bucket。全局变量ip4_frags保存有所有ipv4相关的分片信息。
+	 */
 	struct rhashtable       rhashtable ____cacheline_aligned_in_smp;
 
 	/* Keep atomic mem on separate cachelines in structs that include it */
@@ -74,22 +80,43 @@ struct inet_frag_queue {
 		struct frag_v4_compare_key v4;
 		struct frag_v6_compare_key v6;
 	} key;
+
+	/* 一个IP报文，如果在指定时间内（/proc/sys/net/ipv4/ipfrag_time）内不能完成重组，则所有片段都会丢弃。 */
 	struct timer_list	timer;
+
 	spinlock_t		lock;
 	refcount_t		refcnt;
+
 	struct sk_buff		*fragments;  /* Used in IPv6. */
 	struct rb_root		rb_fragments; /* Used in IPv4. */
 	struct sk_buff		*fragments_tail;
 	struct sk_buff		*last_run_head;
+
+	/* 上一次收到IP分片的时间戳 */
 	ktime_t			stamp;
+
+	/* 当前收到的该IP报文的最大偏移量，随着片段的接收，该值会不断更新，实际一个IP报文
+	 * 有多少字节只能在收到最后一个片段后才能知道 
+	 */
 	int			len;
+
+	/* 当前已经收到的IP分片的数据量总和 */
 	int			meat;
+
 	__u8			flags;
 	u16			max_size;
+
+	/* 指向网络命名空间中的net->ipv4.frags */
 	struct netns_frags      *net;
+
 	struct rcu_head		rcu;
 };
 
+/* IPv4分片哈希表
+ * 在实现重组功能时，IP层显然需要先缓存所有收到的IP片段，
+ * 等同一个IP报文的所有片段都到达后把它们重组到一起再递交给L4协议。
+ * 所以，IPv4协议定义了哈希表用于保存当前已收到的所有分片。
+ */
 struct inet_frags {
 	unsigned int		qsize;
 

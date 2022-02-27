@@ -1602,7 +1602,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 	bufsz = ixgbe_rx_bufsz(rx_ring);
 
 	do {
-	if (!ixgbe_alloc_mapped_page(rx_ring, bi))
+		if (!ixgbe_alloc_mapped_page(rx_ring, bi))
 			break;
 
 		/* sync the buffer for use by the device */

@@ -87,6 +87,7 @@ static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
 
 	/* 增加待确认的data长度 */
 	tp->packets_out += tcp_skb_pcount(skb);
+	/* prior_packets=0表示 之前未发送过数据，因此需要启动timer。 */
 	if (!prior_packets || icsk->icsk_pending == ICSK_TIME_LOSS_PROBE)
 		tcp_rearm_rto(sk); //复位重传定时器
 
@@ -1160,10 +1161,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	/* 确定TCP协议选项，不同类型的packet */
 	if (unlikely(tcb->tcp_flags & TCPHDR_SYN))
-		/* 构建SYN包，包括时间戳，窗口大小，选择回答SACK等。*/
+		/* 构建SYN包，包括时间戳，MSS, WSCALE，SACK，fast open。*/
 		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5); 
 	else
-		/* 构建非SYNC TCP segment header选项 */
+		/* 构建非SYNC TCP segment header选项，包括时间戳，SACK */
 		tcp_options_size = tcp_established_options(sk, skb, &opts,
 							   &md5);
 
@@ -1194,6 +1195,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	 */
 	skb->pfmemalloc = 0;
 
+	/* 预留TCP header需要的空间，包括tcp option部分。 */
 	skb_push(skb, tcp_header_size);
 	skb_reset_transport_header(skb);
 
@@ -1237,7 +1239,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		}
 	}
 
-	/* 构建好tcp首部后，开始构建tcp选项。 */
+	/* 构建好tcp首部后，开始构建tcp选项。即 从tcp_out_options中获取上面设置的options。  */
 	tcp_options_write((__be32 *)(th + 1), tp, &opts);
 
 	/* 这里会设置tcp skb的gso type，即 SKB_GSO_TCPV4 */
@@ -3190,6 +3192,11 @@ static bool tcp_can_collapse(const struct sock *sk, const struct sk_buff *skb)
 
 /* Collapse packets in the retransmit queue to make to create
  * less packets on the wire. This is only done on retransmission.
+ */
+/*
+ * 在TCP重传的时候，并没有限制TCP只能重传与初传完全相同的报文段大小，TCP允许执行重组包(repacketization)，
+ * 发送一个更大的TCP报文段，进而增加性能。TCP在重传时候允许重组包同时提供了一种判别虚假重传的方法。
+ * 在linux中参数/proc/sys/net/ipv4/tcp_retrans_collapse为非0值的时候打开重传重组包功能，为0的时候关闭重传重组包功能。
  */
 static void tcp_retrans_try_collapse(struct sock *sk, struct sk_buff *to,
 				     int space)

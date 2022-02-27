@@ -835,7 +835,7 @@ struct sk_buff {
 	__u16			tc_index;	/* traffic control index */
 #endif
 
-	/* hash hardware offload使用 */
+	/* hash hardware offload使用 -伪头部的计算 */
 	union {
 		__wsum		csum;
 		struct {

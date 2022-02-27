@@ -1004,7 +1004,7 @@ int udp_cmsg_send(struct sock *sk, struct msghdr *msg, u16 *gso_size)
 EXPORT_SYMBOL_GPL(udp_cmsg_send);
 
 /* udp的send函数:
- * UDP sock发送flow，从user space的send/sendto(), sendmsg/sendmmsg()等调用到该函数。
+ * UDP sock发送flow，从userspace的send/sendto(), sendmsg/sendmmsg()等调用到该函数。
  *
  * croked(软木塞) feature：
  * kernel会把用户层多次传下来的数据进行一个打包，

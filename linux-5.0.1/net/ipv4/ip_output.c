@@ -497,7 +497,7 @@ static void ip_copy_addrs(struct iphdr *iph, const struct flowi4 *fl4)
  * 在TCP中，将TCP段打包成IP数据报的方法根据TCP段类型的不同而有多种接口，
  * 最常用的就是ip_queue_xmit()，而ip_build_and_send_pkt()和ip_send_unicast_reply()只有在发送特定段时才会调用。
  * 
- * 在UDP中使用的输出接口有ip_append_data()和ip_push_pending_frames()
+ * 在UDP中使用的输出接口有 ip_append_data() 和 ip_push_pending_frames()
  */
 int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		    __u8 tos)
@@ -562,7 +562,7 @@ packet_routed:
 	if (inet_opt && inet_opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto no_route;
 
-	/* 填充ip header。 */
+	/* 预留和填充ip header，包括ip option部分空间。 */
 	/* OK, we know where to send it, allocate and build IP header. */
 	skb_push(skb, sizeof(struct iphdr) + (inet_opt ? inet_opt->opt.optlen : 0));
 	skb_reset_network_header(skb);
@@ -578,7 +578,7 @@ packet_routed:
 	iph->protocol = sk->sk_protocol;
 	ip_copy_addrs(iph, fl4);
 
-	/* 如果有option，则需要给IP header构建option域。 */
+	/* 如果有ip option，则需要给IP header构建option域。 */
 	/* Transport layer set skb->h.foo itself. */
 	if (inet_opt && inet_opt->opt.optlen) {
 		iph->ihl += inet_opt->opt.optlen >> 2;
@@ -981,16 +981,23 @@ csum_page(struct page *page, int offset, int copy)
  *
  * https://blog.csdn.net/minghe_uestc/article/details/7836920?utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromMachineLearnPai2%7Edefault-1.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromMachineLearnPai2%7Edefault-1.control
  *
- * 1. 如果 socket 是 corked，则从 ip_append_data 调用此函数；
- * 2. 如果 socket 未被 cork，则从ip_make_skb 调用此函数。
+ * 1. 如果 socket 是 corked，则从 ip_append_data() 调用此函数；
+ * 2. 如果 socket 未被 cork，则从ip_make_skb() 调用此函数。
  * 在任何一种情况下，函数都将分配一个新缓冲区来存储传入的数据，或者将数据附加到现有数据中。
- * 这种工作的方式围绕 socket 的发送队列。等待发送的现有数据（例如，如果 socket 被 cork）将在队列中有一个对应条目，
+ * 这种工作的方式围绕 socket 的发送队列，等待发送的现有数据（例如，如果 socket 被 cork）将在队列中有一个对应条目，
  * 可以被追加数据。
  *
  * 1. 在 cork 的情况下，__ip_append_data 的返回值向上传递。数据位于发送队列中，
- * 直到udp_sendmsg 确定是时候调用 udp_push_pending_frames 来完成 skb，后者会进一步调用udp_send_skb。
- * 2. 在 unorked 情况下，持有 skb 的 queue 被作为参数传递给上面描述的__ip_make_skb，
- * 在那里它被出队并通过 udp_send_skb 发送到更底层。
+ * 直到 udp_sendmsg() 确定是时候调用 udp_push_pending_frames() 来完成 skb，后者会进一步调用 udp_send_skb() 。
+ * 2. 在 unorked 情况下，持有 skb 的 queue 被作为参数传递给上面描述的 __ip_make_skb() ，
+ * 在那里它被出队并通过 udp_send_skb() 发送到更底层。
+ *
+ * 参数：
+ * getfrag(): 将L4指定的数据拷贝到一个一个的skb中，因为该函数会由多个L4协议公用，执行拷贝时，
+ *		它们的动作有所差异（主要是校验和计算），所以，这里用函数指针。
+ * from：待拷贝数据的用户态起始地址。
+ * length： 待拷贝数据长度
+ * transhdrlen：传输层报文长度，例如：对应udp就是sizeof(struct udphdr)
  */
 static int __ip_append_data(struct sock *sk,
 			    struct flowi4 *fl4,
@@ -1031,7 +1038,7 @@ static int __ip_append_data(struct sock *sk,
 		tskey = sk->sk_tskey++;
 
 	/* hh_len是L2的首部长度，分配内存时会为L2/L3首部预留空间，这样底层协议在处理时就
-	 * 不用重新分配内存并移动数据了
+	 * 不用重新分配内存并移动数据了。
 	 */
 	hh_len = LL_RESERVED_SPACE(rt->dst.dev);
 
@@ -1414,6 +1421,14 @@ static int ip_setup_cork(struct sock *sk, struct inet_cork *cork,
  *
  *	LATER: length must be adjusted by pad at tail, when it is required.
  */
+/*
+ * 设计目标：将要发送的数据按照便于ip分片的方式组织成一个一个的skb，它并不负责实际的发送，
+ * 调用者需要主动调用 ip_push_pending_frames() 接口进行实际的发送。
+ * 调用者可以通过连续多次调用该函数将多个数据片段合并成一个大的ip报文，这里要注意ip报文和ip片段的不同。
+ * 传输层可以通过该函数组织一个很大的ip报文，但是，该函数会负责根据MTU将其分割成一个一个的skb，所以，
+ * skb是和ip片段一一对应的，即一个skb的载荷部分当然不能超过MTU。
+ * 
+ */
 int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 		   int getfrag(void *from, char *to, int offset, int len,
 			       int odd, struct sk_buff *skb),
@@ -1427,7 +1442,7 @@ int ip_append_data(struct sock *sk, struct flowi4 *fl4,
 	/* 检查是否从用户传入了 MSG_PROBE 标志。该标志表示用户查询当前是否有数据可读。
 	 * 只是做路径探测（例如，确定PMTU） 
 	 */
-	if (flags&MSG_PROBE)
+	if (flags & MSG_PROBE)
 		return 0;
 
 	/* 检查 socket 的发送队列是否为空。如果为空，意味着没有 cork 数据等待处理，

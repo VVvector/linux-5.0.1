@@ -40,25 +40,34 @@
  * @ts_needtime - Need to record timestamp
  * @ts_needaddr - Need to record addr of outgoing dev
  */
+/*
+ * 宽松路由选项（LSRR）和严格路由选项（SSRR）
+ * LSRR在选项的ip地址列表中并不列出一条完备而严格的路径，而是只给出路径中的某些关键点。
+ * 在关键的之间可以通过路由器的自动路由选择功能进行路由，此选项在数据包分片的时候也必须被复制。
+ *
+ * SSRR选项要求数据包必须严格按照发送方规定的路径经过每一个路由器，这些路由器应该是一一相连的，
+ * 每两个指定的路由器之间不能有其他未指定的路由器，且路由器的顺序是不能改变的。
+ * 如果数据包在传输时无法直接到达下一跳指定的路由器，路由器就会丢弃该数据包，
+ * 然后产生一个源路由失败的目的不可达的ICMP差错报文报告给发送方。
+ */
 struct ip_options {
-	__be32		faddr; /* 保存的第一跳地址 */
-	__be32		nexthop; /* 下一跳 */
+	__be32		faddr;
+	__be32		nexthop;
 	unsigned char	optlen; /* 标识 IP 首部中选项所占的字节数 */
 
-	/*
-	 * 记录宽松路由或严格路由选项在 IP 首部中的偏移量，
-	 * 即选项的第一个字节的地址减去 IP 首部的第一个字节的地址
-	 */
-	unsigned char	srr;
-	unsigned char	rr;
-	unsigned char	ts;
-	unsigned char	is_strictroute:1, /* 严格的源路由 */
-			srr_is_hit:1, /* 包目标地址命中 */
-			is_changed:1, /* IP校验和不合法 */
-			rr_needaddr:1, /* 需要记录出口设备的地址 */
-			ts_needtime:1, /* 需要记录时间戳 */
-			ts_needaddr:1; /* 需要记录出口设备的地址 */
-	unsigned char	router_alert;
+	unsigned char	srr; //LSR/SSR 宽松或严格源路由， option到ip header的offset。
+	unsigned char	rr;  //记录路由， option到ip header的offset。
+	unsigned char	ts;  //时间戳，option到ip header的offset。
+
+	unsigned char	is_strictroute:1,
+			srr_is_hit:1,
+			is_changed:1,
+			rr_needaddr:1,
+			ts_needtime:1,
+			ts_needaddr:1;
+
+	unsigned char	router_alert; //路由器警告
+
 	unsigned char	cipso;
 	unsigned char	__pad2;
 	unsigned char	__data[0];

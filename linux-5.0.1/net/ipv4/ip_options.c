@@ -50,9 +50,11 @@ void ip_options_build(struct sk_buff *skb, struct ip_options *opt,
 	memcpy(iph+sizeof(struct iphdr), opt->__data, opt->optlen);
 	opt = &(IPCB(skb)->opt);
 
+	/* 宽松或者严格的源路由 */
 	if (opt->srr)
 		memcpy(iph+opt->srr+iph[opt->srr+1]-4, &daddr, 4);
 
+	/* RFC791, 只有LSR, SSR, TS, SID需要在分片中也被复制。 */
 	if (!is_frag) {
 		if (opt->rr_needaddr)
 			ip_rt_get_source(iph+opt->rr+iph[opt->rr+2]-5, skb, rt);
@@ -66,11 +68,15 @@ void ip_options_build(struct sk_buff *skb, struct ip_options *opt,
 		}
 		return;
 	}
+
+	/* 记录路由 */
 	if (opt->rr) {
 		memset(iph+opt->rr, IPOPT_NOP, iph[opt->rr+1]);
 		opt->rr = 0;
 		opt->rr_needaddr = 0;
 	}
+
+	/* 时间戳 */
 	if (opt->ts) {
 		memset(iph+opt->ts, IPOPT_NOP, iph[opt->ts+1]);
 		opt->ts = 0;

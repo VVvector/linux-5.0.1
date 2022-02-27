@@ -723,10 +723,54 @@ static void tcp_event_data_recv(struct sock *sk, struct sk_buff *skb)
  * To save cycles in the RFC 1323 implementation it was better to break
  * it up into three procedures. -- erics
  */
+/*
+ * 计算rtt和rto相关的变量。
+ *  RTO =  usecs_to_jiffies((tp->srtt_us >> 3) + tp->rttvar_us;
+ * 
+ * 1. 在没有任何rtt sample的时候，linux会先查看本地缓存中是否有目标ip地址的RTT缓存信息，如果
+ *  有对应的缓存信息，则会根据缓存信息初始化RTO；如果没有，则初始化为 TCP_TIMEOUT_INIT = 1s。
+ *
+ * 2. 在获取到第一个RTT -> rtt 后，
+ * 	srtt = rtt << 3
+ * 	mdev = rtt << 1
+ * 	rttvar = max(mdev, rto_min) //rto_min为最小RTT,即TCP_RTO_MIN
+ * 	mdev_max = rttvar
+ *
+ *	RTO = rtt + rttvar
+ *	所以，当mdev > rto_min, RTO = 3rtt；否则，RTO=rtt + rto_min。
+ * 	
+ *
+ * 3. 后续收到RTT -> rtt时 (n >= 2)：
+ *	srtt的更新： srtt = (7/8) * srtt + (1/8) * rtt
+ *	mdev的更新：
+ *		err = rtt - old_srtt
+ 		1. 当rtt变小时，即err < 0时：
+ *			1. 如果|err| > 1/4 old_mdev, 
+ * 				new_mdev = 31/32 * old_mdev + 1/8 * |err|
+ *				此时，old_mdev < new_mdev < 3/4 old_mdev + |err|
+ *				new_mdev有稍微变大，但是增大得不多。由于RTT是变小，所以RTO也要变小，如果
+ *				new_mdev增大很多(比如：new_mdev = 3/4 old_mdev + |err|)，就会导致RTO变大，不符合
+ *				我们的预期。
+ * 			2. 如果|err| <= 1/4 old_mdev
+ *				new_mdev = 3/4 old_mdev + |err|
+ *				此时，new_mdev < old_mdev, new_mdev变小，会导致RTO变小，符合预期。
+ *		2. 当rtt变大时，即err > 0时：
+ *			new_mdev = 3/4 old_mdev + |err|
+ *			此时，new_mdev > old_mdev, new_mdev变大，会导致RTO变大，符合预期。
+ *
+ * 4. mdev_max和rttvar的更新：
+ * 	在每个RTT开始时，mdev_max = rto_min。（注意：每次rtt都会更新。）
+ * 	如果在此RTO内，有更大的mdev，则更新mdev_max。
+ * 	如果mdev_max > rttvar，则rttvar = mdev_max；否则，本RTT结束后，rttvar -= (rttvar - mdev_max) >> 2。
+ * 	这样，就可以通过mdev_max来调节rttvar，间接调节RTO。
+ */
 static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+
+	/* 本次获取到的新的RTT sample */
 	long m = mrtt_us; /* RTT */
+	
 	u32 srtt = tp->srtt_us;
 
 	/*	The following amusing code comes from Jacobson's
@@ -745,9 +789,12 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 	 * does not matter how to _calculate_ it. Seems, it was trap
 	 * that VJ failed to avoid. 8)
 	 */
+	/* 不是得到的第一个rtt采样 */
 	if (srtt != 0) {
 		m -= (srtt >> 3);	/* m is now error in rtt est */
 		srtt += m;		/* rtt = 7/8 rtt + 1/8 new */
+
+		/* rtt变小的情况：*/
 		if (m < 0) {
 			m = -m;		/* m is now abs(error) */
 			m -= (tp->mdev_us >> 2);   /* similar update on mdev */
@@ -759,26 +806,49 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 			 * but also it limits too fast rto decreases,
 			 * happening in pure Eifel.
 			 */
+			/* |err| > 1/4 mdev */
 			if (m > 0)
 				m >>= 3;
+		/* rtt变大的情况： */
 		} else {
 			m -= (tp->mdev_us >> 2);   /* similar update on mdev */
 		}
+
 		tp->mdev_us += m;		/* mdev = 3/4 mdev + 1/4 new */
+
+		/* 更新mdev_max和rttvar */
 		if (tp->mdev_us > tp->mdev_max_us) {
 			tp->mdev_max_us = tp->mdev_us;
+			/* 真正的RTTVAR会取一个RTT中最大的RTTVAR，是一种相对保守的策
+			 * 因为计算略微偏大的RTO不会引起大问题，
+			 * 但如果计算的RTO偏小则可能引起spurious retransmission
+			 */
 			if (tp->mdev_max_us > tp->rttvar_us)
 				tp->rttvar_us = tp->mdev_max_us;
 		}
+
+		/* 如果过了一个RTT，则重置mdev_max，并适当调整rttvar */
 		if (after(tp->snd_una, tp->rtt_seq)) {
+			/* 目前看到的代码里面唯一可能导致mdev_max < rttvar的代码就是
+			 * tp->mdev_max = tcp_rto_min(sk);
+			 */
 			if (tp->mdev_max_us < tp->rttvar_us)
 				tp->rttvar_us -= (tp->rttvar_us - tp->mdev_max_us) >> 2;
+
 			tp->rtt_seq = tp->snd_nxt;
+
+			/* 每过一个RTT重置mdev_max */
 			tp->mdev_max_us = tcp_rto_min_us(sk);
 		}
+
+	/* 第一次获取到有效的RTT sample */
 	} else {
 		/* no previous measure. */
 		srtt = m << 3;		/* take the measured time to be rtt */
+
+		/* RTTVAR = RTT/2, 需要注意的是tp->rttvar_us存放的是 4 x RTTVAR，
+		 * tcp_rto_min_us(sk)限制了rttvar的最小值为 TCP_RTO_MIN,即HZ/5 = 200ms。
+		 */
 		tp->mdev_us = m << 1;	/* make sure rto = 3*rtt */
 		tp->rttvar_us = max(tp->mdev_us, tcp_rto_min_us(sk));
 		tp->mdev_max_us = tp->rttvar_us;
@@ -824,6 +894,9 @@ static void tcp_update_pacing_rate(struct sock *sk)
 /* Calculate rto without backoff.  This is the second half of Van Jacobson's
  * routine referred to above.
  */
+/*
+ * 根据 srtt和rttvar设置RTO。
+ */
 static void tcp_set_rto(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -848,6 +921,7 @@ static void tcp_set_rto(struct sock *sk)
 	/* NOTE: clamping at TCP_RTO_MIN is not required, current algo
 	 * guarantees that rto is higher.
 	 */
+	 /* 限制rto的最大值 */
 	tcp_bound_rto(sk);
 }
 
@@ -1938,6 +2012,21 @@ static inline void tcp_init_undo(struct tcp_sock *tp)
 	tp->undo_retrans = tp->retrans_out ? : -1;
 }
 
+/* 是否使能了tcp_recovery, 即RACK重传 - Recent acknowledgment，基于时间的丢包探测算法。
+ * 基本思想：
+ * 如果发送端收到的确认包中的SACK选项确认收到了一个数据包，那么在这个数据包之前发送的
+ * 数据包要么是在传输过程中发送了乱序，要么发生了丢包。RACK使用最近投递成功的数据包的
+ * 发送时刻来推测在这个数据包之前传输的数据包是否过期(expired)，RACK把这些过期的数据包
+ * 标记为lost。RACK可以修复丢包而不用等待一个比较长的RTO超时，RACK可以用于快速恢复，
+ * 也可以使用超时恢复，既可以利用初传的数据包探测丢包，也可以利用重传的数据包探测丢包，
+ * 而且，可以探测初传丢包也可以探测重传丢包，因此，RACK是一个使用多种场景的丢包恢复机制。
+ *
+ * 需要条件：
+ * 1. TCP连接必须使用SACK选项。
+ * 2. 对于每个发送的数据包，发送端必须存储这个数据包的发送时间，时间精度至少要达到毫秒级
+ * 精度，如果连接的RTT小于1ms，那么微妙精度将会更有利于RACK探测丢包。
+ * 3. 对于每个发送出去的数据包，发送端必须记录这个数据包是否已经重传过。
+ */
 static bool tcp_is_rack(const struct sock *sk)
 {
 	return sock_net(sk)->ipv4.sysctl_tcp_recovery & TCP_RACK_LOSS_DETECTION;
@@ -2972,9 +3061,10 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 			/* CWR is to be held something *above* high_seq
 			 * is ACKed for CWR bit to reach receiver. */
 			if (tp->snd_una != tp->high_seq) {
-				/* 结束窗口减小 */
+				/* 结束窗口减小 - icsk_ca_ops->cong_control(), icsk_ca_ops->cwnd_event() */
 				tcp_end_cwnd_reduction(sk);
-				/* 回到Open状态 */
+				
+				/* 回到Open状态 - icsk_ca_ops->set_state() */
 				tcp_set_ca_state(sk, TCP_CA_Open);
 			}
 			break;
@@ -2984,11 +3074,13 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 			if (tcp_is_reno(tp))
 				tcp_reset_reno_sack(tp);
 
-			/* 尝试从Recovery状态撤销，回到open状态。 */
+			/* 尝试从Recovery状态撤销，回到open状态。
+			 * icsk_ca_ops->undo_cwnd(), icsk_ca_ops->set_state(), 
+			 */
 			if (tcp_try_undo_recovery(sk))
 				return;
 
-			/* 结束拥塞窗口缩小 */
+			/* 结束拥塞窗口缩小 icsk_ca_ops->cong_control(), icsk_ca_ops->cwnd_event() */
 			tcp_end_cwnd_reduction(sk);
 			break;
 		}
@@ -3003,7 +3095,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 			if (tcp_is_reno(tp))
 				tcp_add_reno_sack(sk, num_dupack);
 		} else {
-			/* 确认了部分重传的段 */
+			/* 确认了部分重传的段 icsk_ca_ops->undo_cwnd() */
 			if (tcp_try_undo_partial(sk, prior_snd_una))
 				return;
 
@@ -3012,7 +3104,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 				  tcp_force_fast_retransmit(sk);
 		}
 
-		/* 尝试进入到open状态 */
+		/* 尝试进入到open状态 icsk_ca_ops->undo_cwnd() */
 		if (tcp_try_undo_dsack(sk)) {
 			tcp_try_keep_open(sk);
 			return;
@@ -3047,6 +3139,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		 * 如果不进入 Recovery 状态，判断可否进入 OPen 状态。
 		 */
 		if (!tcp_time_to_recover(sk, flag)) {
+			/* icsk_ca_ops->ssthresh()， icsk_ca_ops->cwnd_event()  */
 			tcp_try_to_open(sk, flag);
 			return;
 		}
@@ -3092,17 +3185,21 @@ static void tcp_update_rtt_min(struct sock *sk, u32 rtt_us, const int flag)
 			   rtt_us ? : jiffies_to_usecs(1));
 }
 
+/* 更新rtt */
 static bool tcp_ack_update_rtt(struct sock *sk, const int flag,
 			       long seq_rtt_us, long sack_rtt_us,
 			       long ca_rtt_us, struct rate_sample *rs)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 获取rtt，分为开启timestamp和传统的不开启timestamp，两种情况。 */
+
 	/* Prefer RTT measured from ACK's timing to TS-ECR. This is because
 	 * broken middle-boxes or peers may corrupt TS-ECR fields. But
 	 * Karn's algorithm forbids taking RTT if some retransmitted data
 	 * is acked (RFC6298).
 	 */
+	/* 当如果是重传的时候，会走这里，即排除重传二义性。 */
 	if (seq_rtt_us < 0)
 		seq_rtt_us = sack_rtt_us;
 
@@ -3112,6 +3209,7 @@ static bool tcp_ack_update_rtt(struct sock *sk, const int flag,
 	 * left edge of the send window.
 	 * See draft-ietf-tcplw-high-performance-00, section 3.3.
 	 */
+	/* 如果有启用tcp timestamp选项，且接收方的回显不为0. */
 	if (seq_rtt_us < 0 && tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr &&
 	    flag & FLAG_ACKED) {
 		u32 delta = tcp_time_stamp(tp) - tp->rx_opt.rcv_tsecr;
@@ -3130,9 +3228,14 @@ static bool tcp_ack_update_rtt(struct sock *sk, const int flag,
 	 * values will be skipped with the seq_rtt_us < 0 check above.
 	 */
 	tcp_update_rtt_min(sk, ca_rtt_us, flag);
+
+	/* 计算srtt, rttvar等信息 */
 	tcp_rtt_estimator(sk, seq_rtt_us);
+
+	/* 根据srtt和rttvar重新设置RTO.*/
 	tcp_set_rto(sk);
 
+	/* 指数退避复位 */
 	/* RFC6298: only reset backoff on valid RTT measurement. */
 	inet_csk(sk)->icsk_backoff = 0;
 	return true;
@@ -3173,7 +3276,7 @@ void tcp_rearm_rto(struct sock *sk)
 	if (tp->fastopen_rsk)
 		return;
 
-	/* 如果没有未应答的数据，就启动重传定时器。 */
+	/* 如果没有未应答的数据，就停止重传定时器；否则，启动重传定时器。 */
 	if (!tp->packets_out) {
 		inet_csk_clear_xmit_timer(sk, ICSK_TIME_RETRANS);
 	} else {
@@ -3370,6 +3473,8 @@ static int tcp_clean_rtx_queue(struct sock *sk, u32 prior_fack,
 		sack_rtt_us = tcp_stamp_us_delta(tp->tcp_mstamp, sack->first_sackt);
 		ca_rtt_us = tcp_stamp_us_delta(tp->tcp_mstamp, sack->last_sackt);
 	}
+
+	/* 得到一个rtt sample，更新RTO. */
 	rtt_update = tcp_ack_update_rtt(sk, flag, seq_rtt_us, sack_rtt_us,
 					ca_rtt_us, sack->rate);
 
@@ -3512,7 +3617,7 @@ static void tcp_cong_control(struct sock *sk, u32 ack, u32 acked_sacked,
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
-	/* 这里只有BBR算法有实现 */
+	/* 这里只有BBR算法有实现 ，即可以看出BBR可以忽略Recovery，Loss状态下的prr降窗处理。 */
 	if (icsk->icsk_ca_ops->cong_control) {
 		icsk->icsk_ca_ops->cong_control(sk, rs);
 		return;
@@ -3528,6 +3633,7 @@ static void tcp_cong_control(struct sock *sk, u32 ack, u32 acked_sacked,
 		/* Advance cwnd if state allows */
 		tcp_cong_avoid(sk, ack, acked_sacked);
 	}
+
 	tcp_update_pacing_rate(sk);
 }
 
@@ -3874,7 +3980,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	if (flag & FLAG_UPDATE_TS_RECENT)
 		tcp_replace_ts_recent(tp, TCP_SKB_CB(skb)->seq); /* 替换时间戳 */
 
-	/* 如果执行的是快速路径，并且，该ack有确认新的数据。*/
+	/* A. 如果执行的是快速路径，并且，该ack有确认新的数据。*/
 	if ((flag & (FLAG_SLOWPATH | FLAG_SND_UNA_ADVANCED)) ==
 	    FLAG_SND_UNA_ADVANCED) {
 		/* Window is constant, pure forward advance.
@@ -3893,26 +3999,25 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPHPACKS);
 
-	/* 慢速路径 */
+	/* B. 慢速路径 */
 	} else {
 		u32 ack_ev_flags = CA_ACK_SLOWPATH;
 
-		/* 判断本ack是否有携带数据 */
+		/* 判断本ack是否有携带数据 FLAG_DATA */
 		if (ack_seq != TCP_SKB_CB(skb)->end_seq)
 			flag |= FLAG_DATA;
 		else
 			NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPPUREACKS);
 
-		/* 更新发送窗口 */
+		/* 更新发送窗口 FLAG_WIN_UPDATE */
 		flag |= tcp_ack_update_window(sk, skb, ack, ack_seq);
 
-		/* 存在 SACK 选项，标记需要重传的段，更新乱序信息。
-		 * 更新记分牌 */
+		/* 存在 SACK 选项，标记需要重传的段，更新乱序信息，更新记分牌 FLAG_DSACKING_ACK */
 		if (TCP_SKB_CB(skb)->sacked)
 			flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
 							&sack_state);
 
-		/* 检测是否存在 ECN 标志，该标记由中间路由器设置，然后对端会带回。 */
+		/* 检测是否存在 ECN 标志，该标记由中间路由器设置，然后对端会带回。FLAG_ECE */
 		if (tcp_ecn_rcv_ecn_echo(tp, tcp_hdr(skb))) {
 			flag |= FLAG_ECE;
 			ack_ev_flags |= CA_ACK_ECE;
@@ -3931,10 +4036,10 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	sk->sk_err_soft = 0;
 	icsk->icsk_probes_out = 0;
 
-	/* 设置时间戳，注意：精度有限 */
+	/* 设置最后一次收到ACK的时间戳，用于keepalives机制。注意：精度有限 */
 	tp->rcv_tstamp = tcp_jiffies32;
 
-	/* 检测是否有未发送但还未ack的段，没有，则跳转 */
+	/* 检测是否有 已发送但还未ack的段 */
 	if (!prior_packets)
 		goto no_queue;
 
@@ -3945,21 +4050,24 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	/* 
 	 * https://blog.csdn.net/qq_40894952/article/details/80689819
 	 * 新版RACK机制，需要客户端支持D-SACK机制。
+	 * reo_wnd - reorder window
 	 */
 	tcp_rack_update_reo_wnd(sk, &rs);
 
+	/* TLP算法处理 */
 	if (tp->tlp_high_seq)
 		tcp_process_tlp_ack(sk, ack, flag);
+
 	/* If needed, reset TLP/RTO timer; RACK may later override this. */
 	if (flag & FLAG_SET_XMIT_TIMER)
 		tcp_set_xmit_timer(sk);
 
 	/*
-	 * tcp_ack_is_dubious 用于判断 ACK 是不是可疑的。
-	 * 1. ACK 是不是重复的
-	 * 2. 是不是带有 SACK 选项并且有 ECE
-	 * 3. 是不是 Open 态
-	 * 只要有一项为真就会返回 1.
+	 * C. tcp_ack_is_dubious 用于判断 ACK 是不是可疑的。
+	 * 1. ACK 是重复的
+	 * 2. 带有 SACK 选项并且有 ECE
+	 * 3. 不是处于 Open 态
+	 * 只要有一项为真，则认为该ack是可疑的。
 	 */
 	if (tcp_ack_is_dubious(sk, flag)) {
 		if (!(flag & (FLAG_SND_UNA_ADVANCED | FLAG_NOT_DUP))) {
@@ -3975,8 +4083,8 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	}
 
 	/*
-	 * 如果 ACK 确认的段是包括新的数据、 SYN 段、以及接收到新的 SACK 选项或者
-	 * 接收到的 ACK 是重复的，则认为该传输控制块的输出路由缓存项是有效的。
+	 * 如果 ACK 确认的段是包括新的数据、 ack SYN 段、接收到新的 SACK 选项，或者
+	 * 接收到的 ACK 不是重复的，则认为该传输控制块的输出路由缓存项是有效的。
 	 */
 	if ((flag & FLAG_FORWARD_PROGRESS) || !(flag & FLAG_NOT_DUP))
 		sk_dst_confirm(sk);
@@ -3984,11 +4092,17 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	delivered = tcp_newly_delivered(sk, delivered, flag);
 	lost = tp->lost - lost;			/* freshly marked lost */
 	rs.is_ack_delayed = !!(flag & FLAG_ACK_MAYBE_DELAYED);
+
+	/*
+	 * 生成发送速率样本
+	 *  https://blog.csdn.net/sinat_20184565/article/details/106109415
+	 */
 	tcp_rate_gen(sk, delivered, lost, is_sack_reneg, sack_state.rate);
 
-	/* 拥塞控制，会调用prr算法，或者拥塞控制算法等进行窗口控制。 */
+	/* D. 拥塞控制，会调用prr算法，或者拥塞控制算法BBR等进行窗口控制。 */
 	tcp_cong_control(sk, ack, delivered, flag, sack_state.rate);
 
+	/* 因为上面调整了cwnd，所以，这里尝试进行数据的发送。 */
 	tcp_xmit_recovery(sk, rexmit);
 	return 1;
 
@@ -4541,6 +4655,13 @@ static inline bool tcp_sack_extend(struct tcp_sack_block *sp, u32 seq,
 	return false;
 }
 
+/*
+ * RFC2883建议在收到重复报文的时候，SACK选项的第一个块(这个块也叫做DSACK块)可以用来传递触发这个ACK确认包的系列号。
+ * 这样允许TCP发送端根据SACK选项来推测不必要的重传。进而利用这些信息在乱序传输的环境中执行更健壮的操作。
+ * 这个DSACK扩展是与原有的SACK选项的实现相互兼容的。DSACK的使用也不需要TCP连接的双方额外协商(只要之前协商了
+ * SACK选项即可)。当TCP的发送方不理解DSACK扩展的时候会简单的丢弃DSACK块并继续处理SACK选项中的其他块。
+ * https://www.cnblogs.com/lshs/p/6038617.html
+ */
 static void tcp_dsack_set(struct sock *sk, u32 seq, u32 end_seq)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -5986,10 +6107,13 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	 *	PSH flag is ignored.
 	 */
 
-	/* 快速路径检查和处理 */
-	/*
-	 * 1. 满足预测标志（1. 对端的接收窗口不变 2. tcp header长度不变 3. tcp flag只能有ACK, PUSH可有可无, 其余的为0。
-		TCP_HP_BITS用于排除flag中的PSH标志位。
+	/* 快速路径检查和处理：
+	 *
+	 * 1. 满足预测标志
+	 * . 对端的接收窗口不变
+	 * . tcp header长度不变
+	 * . tcp flag只能有ACK, PUSH可有可无, 其余的为0
+	 * . TCP_HP_BITS用于排除flag中的PSH标志位。
 	 * 2. 数据包序列正确 （该数据包的第一个序列号就是下一个要接收的序列号）
 	 * 3. 对方的ack号也是符合预期（在已发送的数据内）
 	 */
@@ -6156,7 +6280,7 @@ step5:
 	if (tcp_ack(sk, skb, FLAG_SLOWPATH | FLAG_UPDATE_TS_RECENT) < 0)
 		goto discard;
 
-	/*对大于等于mss的数据包更新RTT */
+	/* 对大于等于mss的数据包更新RTT */
 	tcp_rcv_rtt_measure_ts(sk, skb);
 
 	/* 紧急数据的处理 */

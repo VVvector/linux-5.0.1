@@ -421,9 +421,11 @@ void tcp_init_sock(struct sock *sk)
 	INIT_LIST_HEAD(&tp->tsq_node);
 	INIT_LIST_HEAD(&tp->tsorted_sent_queue);
 
-	/* 初始化数据包重传时间 */
+	/* 初始化数据包重传时间为  1秒。*/
 	icsk->icsk_rto = TCP_TIMEOUT_INIT;
+	/* 设置为1秒 */
 	tp->mdev_us = jiffies_to_usecs(TCP_TIMEOUT_INIT);
+
 	minmax_reset(&tp->rtt_min, tcp_jiffies32, ~0U);
 
 	/* 拥塞算法相关 */

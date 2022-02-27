@@ -1290,6 +1290,7 @@ static int __ip6_append_data(struct sock *sk,
 	maxfraglen = ((mtu - fragheaderlen) & ~7) + fragheaderlen -
 		     sizeof(struct frag_hdr);
 
+	/* ipv6 header，包括extension header。 */
 	headersize = sizeof(struct ipv6hdr) +
 		     (opt ? opt->opt_flen + opt->opt_nflen : 0) +
 		     (dst_allfrag(&rt->dst) ?
@@ -1324,6 +1325,10 @@ emsgsize:
 
 	/* CHECKSUM_PARTIAL only with no extension headers and when
 	 * we are not going to fragment
+	 */
+	/* 正常的普通的UDP ip数据包，没有ipv6 extension header，小于mtu，没有cork或需要进行udp gso的 UDP socket。
+	 * 1. 分片的ip包不能用hw checksum的原因：
+	 * ip分片后，hw不会判断每个分片ip包，然后再计算checksum，所有，由sw计算。
 	 */
 	if (transhdrlen && sk->sk_protocol == IPPROTO_UDP &&
 	    headersize == sizeof(struct ipv6hdr) &&

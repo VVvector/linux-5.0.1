@@ -252,7 +252,7 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 /*
  * 	Deliver IP Packets to the higher protocol layers.
  */
- /*把skb往上层push, 到tcp、udp层*/
+ /* 把skb往上层push, 到tcp、udp层 */
 int ip_local_deliver(struct sk_buff *skb)
 {
 	/*
@@ -266,7 +266,7 @@ int ip_local_deliver(struct sk_buff *skb)
 			return 0;
 	}
 
-	/*继续把skb传入传输层。 netfilter后，会调用 ip_local_deliver_finish()结束，然后把skb继续往传输层上传输*/
+	/* 继续把skb传入传输层。 netfilter后，会调用 ip_local_deliver_finish()结束，然后把skb继续往传输层上传输 */
 	return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN,
 		       net, NULL, skb, skb->dev, NULL,
 		       ip_local_deliver_finish);
@@ -294,6 +294,7 @@ static inline bool ip_rcv_options(struct sk_buff *skb)
 	opt = &(IPCB(skb)->opt);
 	opt->optlen = iph->ihl*4 - sizeof(struct iphdr);
 
+	/* 解析ip options */
 	if (ip_options_compile(dev_net(dev), opt, skb)) {
 		__IP_INC_STATS(dev_net(dev), IPSTATS_MIB_INHDRERRORS);
 		goto drop;
@@ -372,7 +373,7 @@ static int ip_rcv_finish_core(struct net *net, struct sock *sk,
 #endif
 
 
-	/* ip_rcv_options() 会查询路由信息。。。 */
+	/* ip_rcv_options()解析ip option，而且， 会查询路由信息。。。 */
 	if (iph->ihl > 5 && ip_rcv_options(skb))
 		goto drop;
 
