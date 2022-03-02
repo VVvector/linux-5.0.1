@@ -3628,7 +3628,9 @@ static void tcp_cong_control(struct sock *sk, u32 ack, u32 acked_sacked,
 		/* Reduce cwnd if state mandates */
 		tcp_cwnd_reduction(sk, acked_sacked, flag);
 
-	/* 各拥塞算法的升窗算法, 例如，cubic的 bictcp_cong_avoid() */
+	/* 各拥塞算法的升窗算法, 例如，cubic的 bictcp_cong_avoid()
+	 * (检查点2：看是否有进入到拥塞算法的慢启动或者拥塞避免阶段算法进行窗口调整。)
+	 */
 	} else if (tcp_may_raise_cwnd(sk, flag)) {
 		/* Advance cwnd if state allows */
 		tcp_cong_avoid(sk, ack, acked_sacked);
@@ -4099,7 +4101,9 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	 */
 	tcp_rate_gen(sk, delivered, lost, is_sack_reneg, sack_state.rate);
 
-	/* D. 拥塞控制，会调用prr算法，或者拥塞控制算法BBR等进行窗口控制。 */
+	/* D. 拥塞控制，会调用prr算法，或者拥塞控制算法BBR等进行窗口控制。
+	 * (检查点1：看是否有进入到拥塞算法的慢启动或者拥塞避免阶段算法进行窗口调整。)
+	 */
 	tcp_cong_control(sk, ack, delivered, flag, sack_state.rate);
 
 	/* 因为上面调整了cwnd，所以，这里尝试进行数据的发送。 */

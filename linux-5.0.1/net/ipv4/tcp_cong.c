@@ -399,6 +399,7 @@ int tcp_set_congestion_control(struct sock *sk, const char *name, bool load, boo
  * ABC caps N to 2. Slow start exits when cwnd grows over ssthresh and
  * returns the leftover acks to adjust cwnd in congestion avoidance mode.
  */
+ /* 2的幂次级数增加。（会受到rtt的影响，即rtt小的连接，可以更快速的增加。） */
 u32 tcp_slow_start(struct tcp_sock *tp, u32 acked)
 {
 	/* 新的拥塞窗口的大小等于 ssthresh 和 cwnd 中较小的那一个 */

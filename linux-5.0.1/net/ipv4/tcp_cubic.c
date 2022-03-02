@@ -458,7 +458,7 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
 
-	/* 判断发送拥塞窗口是否达到限制，如果达到限制，则不进行窗口增加。 */
+	/* 判断发送拥塞窗口是否达到限制，如果达到限制，则需要进行窗口的调整。 */
 	if (!tcp_is_cwnd_limited(sk))
 		return;
 
@@ -494,7 +494,7 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 }
 
 /* 门限值的计算。
-* 每次发送拥塞状态切换时，就会重新计算慢启动阈值。（进入loss时）
+* 每次发生拥塞状态切换时，就会重新计算慢启动阈值。（进入loss时）
 *
 * 这里涉及到了 Fast Convergence 机制。该机制的存在是为了加快 CUBIC 算法的收敛速
 * 度。在网络中，一个新的流的加入，会使得旧的流让出一定的带宽，以便给新的流让出一

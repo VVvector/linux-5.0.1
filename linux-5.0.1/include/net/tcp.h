@@ -1344,6 +1344,11 @@ static inline u32 tcp_wnd_end(const struct tcp_sock *tp)
  * 增加其值，这正符合内核在拥塞避免阶段的实现。但是，对于慢启动阶段，内核允许拥塞窗口增长到使用量的一倍。
  * tcp_is_cwnd_limited()相关注释，在初始窗口为10，发送了9个报文后，如果所有报文都被确认了，
  * 将窗口增加到18。这将有利于限速应用程序更好的探测网络带宽。 
+ *
+ * tp->is_cwnd_limited 记录了上一个发送窗口期是否受到了拥塞窗口的限制。
+ * 函数tcp_is_cwnd_limited()判断连接的发送是否受限于拥塞窗口，为真，表明当前发送使用了全部可用网络资源，
+ * 反之，表明存在空闲的网络资源。
+ * 由发包时，tcp_write_xmit()调用tcp_cwnd_validate()进行设置。
  */
 static inline bool tcp_is_cwnd_limited(const struct sock *sk)
 {

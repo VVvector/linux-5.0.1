@@ -444,7 +444,7 @@ void tcp_init_sock(struct sock *sk)
 	 * initialization of these values.
 	 */
 	/* send slow start threshold */
-	/* 慢启动和拥塞避免的阈值，初始值很大。 */
+	/* 慢启动和拥塞避免的阈值，初始值很大。0x7fffffff */
 	tp->snd_ssthresh = TCP_INFINITE_SSTHRESH; 
 	tp->snd_cwnd_clamp = ~0;
 	tp->mss_cache = TCP_MSS_DEFAULT;

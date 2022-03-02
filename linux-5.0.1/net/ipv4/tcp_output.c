@@ -1806,7 +1806,7 @@ static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 
 	/*
 	 * 参数is_cwnd_limited记录了上一个发送窗口期是否受到了拥塞窗口的限制。
-	 * 函数tcp_is_cwnd_limited()判断连接的发送是否受限于拥塞窗口，为真表明当前发送使用了全部可用网络资源，
+	 * 函数tcp_is_cwnd_limited()判断连接的发送是否受限于拥塞窗口，为真，表明当前发送使用了全部可用网络资源，
 	 * 反之，表明存在空闲的网络资源。
 	 * 在后一种情况下，记录当前网络中报文数量到变量snd_cwnd_used中，
 	 * 如果内核配置开启了在空闲时长超过RTO之后，复位拥塞窗口的功能，即tcp_slow_start_after_idle为真，
