@@ -183,6 +183,7 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd)
 
 	/* 当last_max_cwnd == 0。即在慢启动开始或出现拥塞的时候，控制cnt不超过20,
 	 * 即一个rtt至少增cwnd/20个窗口。
+	 * 注意：前期在没有发生过丢包时，last_max_cwnd一直为0，即ca->cnt为10。
 	 */
 	/* if in slow start or link utilization is very low */
 	if (ca->last_max_cwnd == 0) {

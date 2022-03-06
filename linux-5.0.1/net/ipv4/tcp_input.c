@@ -6309,7 +6309,7 @@ csum_error:
 discard:
 	tcp_drop(sk, skb);
 }
-EXPORT_SYMBOL(tcp_rcv_established);
+EXPORT_SYMBOL(f);
 
 void tcp_finish_connect(struct sock *sk, struct sk_buff *skb)
 {

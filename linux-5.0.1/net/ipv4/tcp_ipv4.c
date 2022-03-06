@@ -1833,6 +1833,7 @@ bool tcp_add_backlog(struct sock *sk, struct sk_buff *skb)
 		goto no_coalesce;
 	thtail = (struct tcphdr *)tail->data;
 
+	/* 乱序，差异服务，URG, CWR情况下，不会进行coalesce。 */
 	if (TCP_SKB_CB(tail)->end_seq != TCP_SKB_CB(skb)->seq ||
 	    TCP_SKB_CB(tail)->ip_dsfield != TCP_SKB_CB(skb)->ip_dsfield ||
 	    ((TCP_SKB_CB(tail)->tcp_flags |
@@ -1846,6 +1847,7 @@ bool tcp_add_backlog(struct sock *sk, struct sk_buff *skb)
 	    memcmp(thtail + 1, th + 1, hdrlen - sizeof(*th)))
 		goto no_coalesce;
 
+	/* 这里会对packet进行merge，这样会减少skb的数量。 */
 	__skb_pull(skb, hdrlen);
 	if (skb_try_coalesce(tail, skb, &fragstolen, &delta)) {
 		thtail->window = th->window;
@@ -2124,10 +2126,14 @@ process:
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
 
-	/* 进程此时没有访问传输控制块 */
+	/* 进程此时没有访问传输控制块，即这里可以看出：
+	 * linux的socket在进行读取或者写数据时，都会持有该sock lock，这时，这里就会走到tcp_add_backlog()。
+	 */
 	if (!sock_owned_by_user(sk)) {
 		/* 将skb放入sk->sk_receive_queue中 */
 		ret = tcp_v4_do_rcv(sk, skb);
+
+	/* 注意： 这里可能就会有ack merge的情况，即相当于delay ack，从而，会影响拥塞算法。 */
 	} else if (tcp_add_backlog(sk, skb)) {
 		/* 添加到后备队列成功 sk->sk_backlog（也会受到sk->sk_rmem_alloc的限制）*/
 		goto discard_and_relse;
@@ -2797,14 +2803,20 @@ struct proto tcp_prot = {
 	.getsockopt		= tcp_getsockopt,
 	.keepalive		= tcp_set_keepalive,
 
-	/* tcp_recvmsg和tcp_v4_do_rcv是TCP数据接收 */
+	/* tcp_recvmsg() 和 tcp_v4_do_rcv() 是TCP数据接收。
+	 * 会被上层socket layer调用，进行读取数据包。
+	 */
 	.recvmsg		= tcp_recvmsg,
 
 	/*TCP数据发送 */
 	.sendmsg		= tcp_sendmsg,
 	.sendpage		= tcp_sendpage,
 
-	/* tcp的backlog处理函数 */
+	/* tcp的backlog处理函数。sock层在读取完sk->sk_receive_queue的数据包时，
+	 * 会在release_sock()中读取sk->sk_backlog的数据。
+	 * -- 注意：下层在tcp_add_backlog()存skb到sk->sk_backlog中是，
+	 * 放入backlog的数据会被merge。即会减少packet的数量。
+	 */
 	.backlog_rcv		= tcp_v4_do_rcv,
 	.release_cb		= tcp_release_cb,
 

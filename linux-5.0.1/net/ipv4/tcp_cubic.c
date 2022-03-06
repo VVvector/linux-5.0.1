@@ -317,7 +317,7 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd, u32 acked)
 	/* 统计 ACKed packets 的数目 */
 	ca->ack_cnt += acked;	/* count the number of ACKed packets */
 
-	/* 当前窗口和历史窗口相同，且时间差小于(1000/32)ms，直接退出。 */
+	/* 当前窗口和历史窗口相同，且时间差小于(1000/32)=31.25ms，直接退出。 */
 	if (ca->last_cwnd == cwnd &&
 	    (s32)(tcp_jiffies32 - ca->last_time) <= HZ / 32)
 		return;
@@ -411,6 +411,9 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd, u32 acked)
 	/*
 	 * The initial growth of cubic function may be too conservative
 	 * when the available bandwidth is still unknown.
+	 */
+	/*
+	 * * 注意：前期在没有发生过丢包时，last_max_cwnd一直为0，即ca->cnt为10。
 	 */
 	if (ca->last_max_cwnd == 0 && ca->cnt > 20)
 		ca->cnt = 20;	/* increase cwnd 5% per RTT */
@@ -547,6 +550,8 @@ static void bictcp_state(struct sock *sk, u8 new_state)
  *
  * 退出慢启动状态的方法很简单，就是直接将当前的snd_ssthresh的大小设定为和当前拥
  * 塞窗口一样的大小。这样， TCP 自然就会转入拥塞避免状态。
+ * 
+ * hystart_updat换句话来说也就是主要用于是否退出slow start。
  */
 static void hystart_update(struct sock *sk, u32 delay)
 {
@@ -647,6 +652,7 @@ static void bictcp_acked(struct sock *sk, const struct ack_sample *sample)
 	/* 当 cwnd 大于阈值(hystart_low_window = 16)后，会触发 hystart 更新机制。
 	 * 注：
 	 * tp->snd_ssthresh初始值是一个很大的值0x7fffffff。
+	 * 即这里可以看出 当拥塞窗口增大到16的时候我们就会进去hystart_update来更新snd_ssthresh.
 	 */
 	/* hystart triggers when cwnd is larger than some threshold */
 	if (hystart && tcp_in_slow_start(tp) &&
