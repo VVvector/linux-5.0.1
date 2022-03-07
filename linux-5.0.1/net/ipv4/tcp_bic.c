@@ -68,6 +68,13 @@ struct bictcp {
 	/* 一轮的开始 */
 	u32	epoch_start;	/* beginning of an epoch */
 
+	/*
+	 * 限制了delayed_ack的最大值为(32 << 4)，也就是说Packets/ACKs的最大估计值限制为32；
+	 * 为什么要增加这个限制呢？这是因为如果发送窗口很大，并且这个窗口的数据包的ACK大量丢失，那
+	 * 么发送端就会得到一个累积确认了非常多数据包的ACK，这会造成delayed_ack值剧烈的增大。如果
+	 * 一个ACK累积确认的数据包超过4096个，那么16位的delayed_ack就会溢出，最后的值可能为0。我
+	 * 们知道delayed_ack在bictcp_update()中是作为除数的，这时会产生除数为0的错误*/
+	 */
 #define ACK_RATIO_SHIFT	4
 	u32	delayed_ack;	/* estimate the ratio of Packets/ACKs << 4 */
 };
@@ -238,7 +245,7 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
   * 一些带宽给新的流使用，以使得网络尽快收敛到稳定状态。
   */
 /*
- * 每收到一个ack，就会调用tcp_ack(这个函数有点复杂后面慢慢看)。tcp_ack会调用.pkts_acked和.cong_avoid，
+ * 每收到一个ack，就会调用tcp_ack(这个函数有点复杂后面慢慢看)。 tcp_ack() 会调用.pkts_acked和.cong_avoid，
  * pkts_acked对应bictcp_acked, cong_avoid对应bictcp_cong_avoid。tcp_ack中如果检测到丢包，则进入拥塞阶段，
  * 调用.ssthresh，对应bic的bictcp_recalc_ssthresh函数，tcp_ack完成重传后，
  * 退回到拥塞阶段，调用.undo_cwnd函数，即tcp_reno_undo_cwnd。
@@ -277,7 +284,8 @@ static void bictcp_state(struct sock *sk, u8 new_state)
  * ratio = (15*ratio + sample) / 16
  */
 /*
- * 计算ca->delayed_ack，表示每收到一个ack，平均确认的packet数量，这里通过ACK_RATIO_SHIFT做了加权计算
+ * 计算ca->delayed_ack，表示每收到一个ack，平均确认的packet数量，这里通过ACK_RATIO_SHIFT做了加权计算。
+ * 会在 tcp_ack()中被调用。 tcp_clean_rtx_queue()
  */
 static void bictcp_acked(struct sock *sk, const struct ack_sample *sample)
 {

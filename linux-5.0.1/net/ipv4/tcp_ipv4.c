@@ -2955,8 +2955,13 @@ static int __net_init tcp_sk_init(struct net *net)
 	net->ipv4.sysctl_tcp_min_rtt_wlen = 300;
 	net->ipv4.sysctl_tcp_autocorking = 1;
 	net->ipv4.sysctl_tcp_invalid_ratelimit = HZ/2;
+
+	/* 应用于慢启动阶段，默认值为200，即将速率提升200%。 */
 	net->ipv4.sysctl_tcp_pacing_ss_ratio = 200;
+
+	/* 应用于拥塞避免阶段，默认值为120，即将速率提升120%。 */
 	net->ipv4.sysctl_tcp_pacing_ca_ratio = 120;
+
 	if (net != &init_net) {
 		memcpy(net->ipv4.sysctl_tcp_rmem,
 		       init_net.ipv4.sysctl_tcp_rmem,

@@ -740,7 +740,7 @@ static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
  * 数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
  * 包成功发送出去为止。
  * 
- * 同时满足以下条件时，tcp_push()才会自动阻塞：
+ * 同时满足以下条件时，tcp_push()才会自动阻塞autocork：
  * 	1. 数据包为小包，即数据长度小于最大值size_goal( MSS )。
  * 	2. 使用了tcp_autocorking( /proc/sys/net/ipv4/tcp_autocorking )，这个值默认为1。
  * 	3. 当前skb不是发送队列头，表明已经有数据发送。（此数据包不是发送队列的第一个包，即前面有数据包被发送了。）

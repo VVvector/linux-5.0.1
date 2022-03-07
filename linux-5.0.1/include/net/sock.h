@@ -464,13 +464,22 @@ struct sock {
 	__s32			sk_peek_off;
 	int			sk_write_pending;
 	__u32			sk_dst_pending_confirm;
+
+	/* 两种情况会被设置为SK_PACING_NEEDED：
+	 * 1. bbr算法中， bbr_init()。
+	 * 2. 用户层的setsockopt()的SO_MAX_PACING_RATE来进行设置以及设置最大速率。
+	 */
 	u32			sk_pacing_status; /* see enum sk_pacing */
+	
 	long			sk_sndtimeo; /* 套接口层发送超时时间。参见SO_SNDTIMEO选项。*/
 	struct timer_list	sk_timer;   /* 根据TCP的不同状态，来实现连接定时器、FIN_WAIT_2定时器和TCP保活定时器。*/
 	__u32			sk_priority; /* 用于设置数据报的QoS类别。参见SO_PRIORITY和IP_TOS选项。*/
 	__u32			sk_mark;
 
-	/* pacing速率 */
+	/* pacing速率， tcp_update_pacing_rate()
+	 * 1. 非bbr： tcp_rcv_state_process()中计算
+	 * 2. bbr: .cong_control()，即bbr_main()中计算。
+	 */
 	unsigned long		sk_pacing_rate; /* bytes per second */
 	unsigned long		sk_max_pacing_rate;
 

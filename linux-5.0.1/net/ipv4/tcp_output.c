@@ -87,6 +87,7 @@ static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
 
 	/* 增加待确认的data长度 */
 	tp->packets_out += tcp_skb_pcount(skb);
+
 	/* prior_packets=0表示 之前未发送过数据，因此需要启动timer。 */
 	if (!prior_packets || icsk->icsk_pending == ICSK_TIME_LOSS_PROBE)
 		tcp_rearm_rto(sk); //复位重传定时器
@@ -848,7 +849,9 @@ struct tsq_tasklet {
 	struct list_head	head; /* queue of tcp sockets */
 };
 
-/* 为每个处理器都分配一个tsq_tasklet，且每个tasklet有独立的socket队列。*/
+/* 为每个处理器都分配一个tsq_tasklet，且每个tasklet有独立的socket队列。
+ * https://blog.csdn.net/u011130578/article/details/44645643
+ */
 static DEFINE_PER_CPU(struct tsq_tasklet, tsq_tasklet);
 
 static void tcp_tsq_write(struct sock *sk)
@@ -869,7 +872,7 @@ static void tcp_tsq_write(struct sock *sk)
 	}
 }
 
-/* TSQ的核心处理函数tcp_tsq_handler，负责重新调用TCP的发送或者重传函数。 */
+/* TSQ的核心处理函数tcp_tsq_handler()，负责重新调用TCP的发送或者重传函数。 */
 static void tcp_tsq_handler(struct sock *sk)
 {
 	bh_lock_sock(sk);
@@ -904,6 +907,7 @@ static void tcp_tasklet_func(unsigned long data)
 	list_splice_init(&tsq->head, &list);
 	local_irq_restore(flags);
 
+	/* 遍历挂入TSQ队列中的socket，并调用tcp_write_xmit() 发送socket发送队列中的数据。*/
 	list_for_each_safe(q, n, &list) {
 		tp = list_entry(q, struct tcp_sock, tsq_node);
 		list_del(&tp->tsq_node);
@@ -929,8 +933,9 @@ static void tcp_tasklet_func(unsigned long data)
  * actions before socket release.
  */
 /*
- * 如果在以上的操作中，由于用户层正在执行套接口相关的系统调用，导致未能进行。将在用户层系统调用退出时，
- * 在套接口释放函数中tcp_release_cb，根据标志TCPF_TSQ_DEFERRED的判断，执行TSQ函数tcp_tsq_handler。
+ * 在TSQ的tasklet中，如果用户层正在执行socket相关的系统调用，则会设置TCPF_TSQ_DEFERRED，然后退出。
+ * 这样，当用户层系统调用退出时，在套接口释放函数tcp_release_cb()中，就会根据标志TCPF_TSQ_DEFERRED的判断，
+ * 执行TSQ函数tcp_tsq_handler()进行发包处理。
  */
 void tcp_release_cb(struct sock *sk)
 {
@@ -1042,7 +1047,7 @@ void tcp_wfree(struct sk_buff *skb)
 		local_irq_save(flags);
 		tsq = this_cpu_ptr(&tsq_tasklet);
 		empty = list_empty(&tsq->head);
-		list_add(&tp->tsq_node, &tsq->head);
+		list_add(&tp->tsq_node, &tsq->head); //将socket加入到TSQ队列中
 		if (empty)
 			tasklet_schedule(&tsq->tasklet);
 		local_irq_restore(flags);
@@ -1055,8 +1060,11 @@ out:
 /* Note: Called under soft irq.
  * We can call TCP stack right away, unless socket is owned by user.
  */
-/* 除以tcp_wfree函数之外，在TCP的pacing功能中，pacing超时处理函数tcp_pace_kick已将处理TSQ除以阻塞状态的套接口，
+/* 除以tcp_wfree()之外，在TCP的pacing功能中，pacing超时处理函数tcp_pace_kick()已将处理TSQ除以阻塞状态的套接口，
  * 其逻辑与tcp_wfree中的一致，唯一区别在于pacing处理中，不会先检查套接口是否处于阻塞状态。
+ *
+ * 由于在TSQ检查时，可能由于当前的pacing速率sk_pacing_rate过高，TSQ限制了数据报文的发送，
+ * 将套接口设置为阻塞状态。所以，在tcp_pace_kick函数中处理TSQ队列，必要时调用TSQ的tasklet处理。
  */
 enum hrtimer_restart tcp_pace_kick(struct hrtimer *timer)
 {
@@ -2427,16 +2435,19 @@ static int tcp_mtu_probe(struct sock *sk)
 	return -1;
 }
 
+/* 如果返回true，表明pacing功能正在工作，需要暂停发送数据。 */
 static bool tcp_pacing_check(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 该sock是否使能了pacing功能 */
 	if (!tcp_needs_internal_pacing(sk))
 		return false;
 
 	if (tp->tcp_wstamp_ns <= tp->tcp_clock_cache)
 		return false;
 
+	/* pacing定时器已经在工作了 */
 	if (!hrtimer_is_queued(&tp->pacing_timer)) {
 		hrtimer_start(&tp->pacing_timer,
 			      ns_to_ktime(tp->tcp_wstamp_ns),
@@ -2458,7 +2469,7 @@ static bool tcp_pacing_check(struct sock *sk)
  * One example is wifi aggregation (802.11 AMPDU)
  */
 
-/*
+/* https://blog.csdn.net/u011130578/article/details/44645643
  * TCP Small Queues :
  * 控制进入到 qdisc/devices 中的包的数目。
  * 该机制带来了以下的好处 :
@@ -2466,6 +2477,19 @@ static bool tcp_pacing_check(struct sock *sk)
  * 2. 更快速地恢复
  * 3. 高数据速率
  *
+ * TSQ工作原理：
+ * 1. 设置net.ipv4.tcp_limit_output_bytes内核选项来指定sysctl_tcp_limit_output_bytes的值；
+ * 2. 在TCP发包时，系统调用使用tcp_write_xmit() 来调用tcp_transmit_skb() 发送skb时，
+ *	会设置使得skb在释放时会调用tcp_wfree函数，并增加sk->sk_wmem_alloc的值。
+ * 3. 当sk->sk_wmem_alloc达到限制时，即底层队列允许当前TCP连接放入的数据的总大小达到限制时（此时底层队列未必会满），
+ *	tcp_write_xmit() 就不允许继续发送skb，而是设置标记使得在由tcp_transmit_skb() 
+ *	发送的任意skb在释放时会调用tcp_wfree()，将发送skb的任务放入TSQ tasklet中，然后系统调用返回。
+ * 4. 此后由TSQ tasklet在软中断上下文中驱动tcp_write_xmit()发送skb，但放入底层队列中的skb的总大小仍然不能超过限制。
+ *	一旦底层队列中的skb被陆续释放使得sk->sk_wmem_alloc的值减小到低于限制时，
+ *	TSQ tasklet就可以即时地发送skb到队列中。
+ *	这样既可以通过限制一个TCP连接向底层队列放入skb的速度来缓解队列拥堵导致的丢包问题，
+ *	也能够在队列空间宽松时及时地发送数据，从而减小了TCP延时。
+ * 
  * tcp_small_queue_check() 在TCP发送路径的tcp_write_xmit()函数和tcp_xmit_retransmit_queue()函数中都有调用。
  */
 static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
@@ -2473,14 +2497,16 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 {
 	unsigned long limit;
 
-	/* 取以下两者之间的较大值：1）当前发送的数据报文skb结构所占用空间的两倍值（2*skb->truesize）；
+	/* 取以下两者之间的较大值：
+	 * 1）当前发送的数据报文skb结构所占用空间的两倍值（2*skb->truesize）；
 	 * 2）以及当前大约每毫秒的流量值（其通过sk_pacing_rate计算而来，内核将sk_pacing_shift变量定义为10，
 	 * 将当前每秒钟的流量（sk_pacing_rate）除以2的10次方，得到大约1毫秒的流量值）。*/
 	limit = max_t(unsigned long,
 		      2 * skb->truesize,
 		      sk->sk_pacing_rate >> sk->sk_pacing_shift);
 
-	/* 其次，如果此结果值大于 sysctl_tcp_limit_output_bytes（默认为1M） 限定的值，
+	/* 其次，如果没有使能socket的pacing功能：
+	 * 则，如果此结果值大于 sysctl_tcp_limit_output_bytes（默认为1M）限定的值，
 	 * 使用tcp_limit_output_bytes作为限定值。
 	 */
 	if (sk->sk_pacing_status == SK_PACING_NONE)
@@ -2490,7 +2516,9 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 	/* 最后，如果是重传报文，即factor等于1，将最终的判定值增大一倍。 */
 	limit <<= factor;
 
-	/* 如果sk_wmem_alloc大于limit，说明已经发送了太多的数据在Qdisc或者设备队列中，
+	/* 需要发送的buffer量大于了pacing限制值，则暂停发送到qdisc或netdev，需要等到TSQ的软中断去发送。 tcp_tsq_handler()
+	 * 
+	 * 如果sk_wmem_alloc大于limit，说明已经发送了太多的数据在Qdisc或者设备队列中，
 	 * 但是如果重传队列为空，此次发送还是允许进行。否则，返回true，禁止发送操作。
 	 * 在此之前，设置sk_tsp_flags的标志位TSQ_THROTTLED，表明是由于TSQ检查结果导致的不能发送。
 	 * 另外，有可能在此函数设置TSQ_THROTTLED标志之前，发生了TX中断，进行了skb释放操作，
@@ -2505,7 +2533,9 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 		if (tcp_rtx_queue_empty(sk))
 			return false;
 
+		/* 设置该sock为TSQ，即tcp_wfree() 才会将socket放入到TSQ队列中，等待tasklet发送。*/
 		set_bit(TSQ_THROTTLED, &sk->sk_tsq_flags);
+
 		/* It is possible TX completion already happened
 		 * before we set TSQ_THROTTLED, so we must
 		 * test again the condition.
@@ -2581,8 +2611,11 @@ void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type)
  * 4. 通过以上检查后的skb发送出去
  * 5. 循环检查发送队列上所有未发送的skb
  * 
- * 最后调用：tcp_transmit_skb()进行发送。
-*/
+ * 最后调用：tcp_transmit_skb() 进行发送。
+ *
+ * 注意：
+ * TSQ功能或者tcp pacing功能都会限制发送。
+ */
 /* http://sunjiangang.blog.chinaunix.net/uid-9543173-id-3543419.html */
 static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			   int push_one, gfp_t gfp)
@@ -2632,7 +2665,10 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			goto repair; /* Skip network transmission */
 		}
 
-		/* tcp的 pacing 功能，限速 */
+		/* tcp的 pacing 正在工作，需要暂停发送packet到qdisc或者netdev中，
+		 * 需要等到pacing定时器超时后，在定时器handler tcp_pace_kick()中进行发送。
+		 * 注意：需要看该socket是否有使能tcp pacing功能。
+		 */
 		if (tcp_pacing_check(sk))
 			break;
 
@@ -2679,6 +2715,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			/* 表示有tso分段, 则检查是否需要延迟发送。
 			 * 检查是否可以延时发送，有很多条件判断。详细见函数。
 			 * 目的是为了减少软GSO分段的次数，以提高实时性。
+			 * 会对 is_cwnd_limited进行设置。
 			 */
 			if (!push_one &&
 			    tcp_tso_should_defer(sk, skb, &is_cwnd_limited,
@@ -2731,6 +2768,11 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 * Linux3.6 引入的新机制。在之前的Linux实现中，如果TCP的窗口很大，那么，
 		 * 可能导致驱动队列中待发送的包的的数目超过队列缓存的大小，因而导致丢包。
 		 * 为了解决该问题，Linux引入了TCP小队列机制。
+		 *
+		 * TCP Small Queues的目的是限制每个TCP连接在Qdisc和device队列中的skb数量，
+		 * 以达到降低RTT（Round-Trip Time）和避免bufferbloat。
+		 *
+		 * https://blog.csdn.net/sinat_20184565/article/details/89341370
 		 */
 		if (tcp_small_queue_check(sk, skb, 0))
 			break;
@@ -2765,10 +2807,14 @@ repair:
 			break;
 	}
 
+	/*
+	 * 内核定义如下，目前由三种类型，分别是TCP_CHRONO_BUSY、TCP_CHRONO_RWND_LIMITED和TCP_CHRONO_SNDBUF_LIMITED。
+	 */
 	if (is_rwnd_limited)
 		tcp_chrono_start(sk, TCP_CHRONO_RWND_LIMITED);
 	else
 		tcp_chrono_stop(sk, TCP_CHRONO_RWND_LIMITED);
+
 
 	/* 本次有数据发送，则对tcp拥塞窗口相关数据更新。 */
 	if (likely(sent_pkts)) {
@@ -2780,9 +2826,10 @@ repair:
 		if (push_one != 2)
 			tcp_schedule_loss_probe(sk, false);
 
-		/* 1. tcp_tso_should_defer()的结果。（如果判断到拥塞窗口小于发送窗口，
-		 *   并且报文长度大于拥塞窗口；或者 判断到拥塞窗口大于发送窗口，但报文长度大于发送窗口。
-		 *   于是就设置拥塞窗口限制标志 is_cwnd_limited。（表示说受到拥塞窗口的限制）
+		/* 1. tcp_tso_should_defer() 的结果：
+		 *	a. 判断到拥塞窗口小于发送窗口，并且，报文长度大于拥塞窗口；
+		 *	b. 判断到拥塞窗口大于发送窗口，但是，报文长度大于发送窗口。
+		 *	于是就设置拥塞窗口限制标志 is_cwnd_limited。（表示说受到拥塞窗口的限制）
 		 *
 		 * 2. 还在网络中packets数量大于等于拥塞窗口了，表示说 受到拥塞窗口限制了。
 		 */
@@ -2790,6 +2837,7 @@ repair:
 
 		/* 拥塞窗口校验 */
 		tcp_cwnd_validate(sk, is_cwnd_limited);
+
 		return false;
 	}
 

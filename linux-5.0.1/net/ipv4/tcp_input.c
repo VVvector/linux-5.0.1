@@ -857,6 +857,22 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 	tp->srtt_us = max(1U, srtt);
 }
 
+/* https://blog.csdn.net/sinat_20184565/article/details/89385038
+ * pacing速率更新函数：
+ * 1. 当前pacing速率的计算由三个变量组成。当前发送MSS缓存值mss_cache乘以拥塞窗口cwnd的结果，
+ *	除以平滑往返时间srtt，即最大可发送的数据长度除以srtt得到当前pacing速率。
+ * 注：拥塞窗口：取tp->snd_cwnd和tp->packets_out的较大值。
+ *	对于处在慢启动阶段的套接口，将得到的速率值默认增加200%倍（sysctl_tcp_pacing_ss_ratio）。
+ *	对于处在拥塞避免阶段的套接口，将速率默认增加120%倍（sysctl_tcp_pacing_ca_ratio）。
+ *
+ * Pacing速率更新的入口有两个
+ * 1. 一个位于TCP服务端接收到客户端的三次握手的ACK报文之后，初始化pacing速率。tcp_rcv_state_process()
+ * 前提是TCP当前采用的拥塞避免算法没有实现cong_control回调函数，目前仅有BBR算法实现了此回调。
+ * 2. 如果采用BBR算法，将不在tcp_rcv_state_process函数中初始化pacing速率。BBR拥塞算法在cong_control回调（bbr_main）
+ *	中设置pacing速率，如下的tcp_cong_control函数，如果cong_control有值，执行完之后就结束函数。
+ *	只有在采用除BBR算法之外的其它拥塞算法时（cong_control为空指针），才会往后执行，
+ *	调用pacing速率更新函数。tcp_cong_control函数在处理ACK确认报文的最后被调用。
+ */
 static void tcp_update_pacing_rate(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -4045,7 +4061,9 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	if (!prior_packets)
 		goto no_queue;
 
-	/* 如果重传队列中有一些数据已经被确认，那么，需要将它们从重传队列中清除掉。 */
+	/* 如果重传队列中有一些数据已经被确认，那么，需要将它们从重传队列中清除掉。
+	 * 会调用拥塞算法的.pkts_acked()函数。
+	 */
 	/* See if we can take anything off of the retransmit queue. */
 	flag |= tcp_clean_rtx_queue(sk, prior_fack, prior_snd_una, &sack_state);
 
@@ -6862,12 +6880,15 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		if (tp->rx_opt.tstamp_ok)
 			tp->advmss -= TCPOLEN_TSTAMP_ALIGNED;
 
-		/* pacing更新，和更新最近一次的发送数据报的时间，初始化与路径 MTU 有关的成员，并计算有关
-		 * TCP 首部预测的标志。
+		/* pacing速率更新。
+		 * 注意：这里可以看出不包括bbr拥塞算法，bbr拥塞算法是在算法的.cong_control()--bbr_main() 实现。
 		 */
 		if (!inet_csk(sk)->icsk_ca_ops->cong_control)
 			tcp_update_pacing_rate(sk);
 
+		/* 更新最近一次的发送数据报的时间，初始化与路径 MTU 有关的成员，并计算有关
+		 * TCP 首部预测的标志。
+		 */
 		/* Prevent spurious tcp_cwnd_restart() on first data packet */
 		tp->lsndtime = tcp_jiffies32;
 

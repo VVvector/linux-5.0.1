@@ -2787,6 +2787,7 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 			af_family_clock_key_strings[sk->sk_family]);
 
 	sk->sk_state_change	=	sock_def_wakeup;
+
 	/* 注：当软中断上收到数据包时，会通过调用sk_data_ready(即sock_def_readable())来
 	 * 唤醒在sock上等待的进程(这里只唤醒一个休眠的进程)。
 	 */
@@ -2818,6 +2819,9 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	sk->sk_ll_usec		=	sysctl_net_busy_read;
 #endif
 
+	/* 初始化三个pacing相关的参数 
+	 * https://blog.csdn.net/sinat_20184565/article/details/89385038
+	 */
 	sk->sk_max_pacing_rate = ~0UL;
 	sk->sk_pacing_rate = ~0UL;
 	sk->sk_pacing_shift = 10;

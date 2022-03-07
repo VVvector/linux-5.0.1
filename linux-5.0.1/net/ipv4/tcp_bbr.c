@@ -932,6 +932,7 @@ static void bbr_init(struct sock *sk)
 	bbr_reset_lt_bw_sampling(sk);
 	bbr_reset_startup_mode(sk);
 
+	/* 使能tcp pacing功能。 */
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 }
 
