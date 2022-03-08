@@ -1780,15 +1780,18 @@ void tcp_fastopen_active_detect_blackhole(struct sock *sk, bool expired);
 /* Latencies incurred by various limits for a sender. They are
  * chronograph-like stats that are mutually exclusive.
  */
+/*
+ * https://blog.csdn.net/sinat_20184565/article/details/88325291
+ */
 enum tcp_chrono {
 	TCP_CHRONO_UNSPEC,
 	/* 主动发送数据 */
 	TCP_CHRONO_BUSY, /* Actively sending data (non-empty write queue) */
 
-	/* 由于接收缓存区不足而停止 */
+	/* 表明由于接收缓存区不足而停止 */
 	TCP_CHRONO_RWND_LIMITED, /* Stalled by insufficient receive window */
 
-	/* 由于发送缓存区不足而停止 */
+	/* 该定时器表明由于发送缓存区不足所导致的发包暂停时间。 */
 	TCP_CHRONO_SNDBUF_LIMITED, /* Stalled by insufficient send buffer */
 	__TCP_CHRONO_MAX,
 };

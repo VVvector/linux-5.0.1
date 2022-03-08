@@ -48,7 +48,7 @@
 /* Refresh clocks of a TCP socket,
  * ensuring monotically increasing values.
  */
-/* 更新tcp socket的时间戳 */
+/* 更新tcp socket的时间戳，确保时间戳单调递增。 */
 void tcp_mstamp_refresh(struct tcp_sock *tp)
 {
 	u64 val = tcp_clock_ns();
@@ -1152,6 +1152,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 			return -ENOBUFS;
 	}
 
+	/* 记录当前pacing的时间戳，用于后续的pacing计算检查。 */
 	prior_wstamp = tp->tcp_wstamp_ns;
 	tp->tcp_wstamp_ns = max(tp->tcp_wstamp_ns, tp->tcp_clock_cache);
 
@@ -1318,6 +1319,7 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 		err = net_xmit_eval(err);
 	}
 	if (!err && oskb) {
+		/* 成功发送一个skb给qdisc或netdev后，更新发送下一个skb的时间戳。tcp_wstamp_ns */
 		tcp_update_skb_after_send(sk, oskb, prior_wstamp);
 		tcp_rate_skb_sent(sk, oskb);
 	}
@@ -2444,6 +2446,7 @@ static bool tcp_pacing_check(struct sock *sk)
 	if (!tcp_needs_internal_pacing(sk))
 		return false;
 
+	/* 已经到了发送下一个packet的时间，即应该立即发送skb了。 */
 	if (tp->tcp_wstamp_ns <= tp->tcp_clock_cache)
 		return false;
 
@@ -2612,11 +2615,10 @@ void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type)
  * 5. 循环检查发送队列上所有未发送的skb
  * 
  * 最后调用：tcp_transmit_skb() 进行发送。
- *
- * 注意：
- * TSQ功能或者tcp pacing功能都会限制发送。
  */
-/* http://sunjiangang.blog.chinaunix.net/uid-9543173-id-3543419.html */
+/*
+ * http://sunjiangang.blog.chinaunix.net/uid-9543173-id-3543419.html 
+ */
 static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			   int push_one, gfp_t gfp)
 {
@@ -2628,14 +2630,15 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	bool is_cwnd_limited = false, is_rwnd_limited = false;
 	u32 max_segs;
 
-	/* 该变量用于统计发送的包的数量，初始化为 0 */
+	/* 该变量用于统计发送的包的数量，初始化为 0。*/
 	sent_pkts = 0;
 
-	/* 更新tcp socket记录的时间 */
+	/* 即在每次发送skb时，就需要更新tcp socket的 tcp_clock_cache 时间戳。*/
 	tcp_mstamp_refresh(tp);
 
 	/* 不需要立即发送，linux 这里会做mtu探测工作。*/
 	if (!push_one) {
+
 		/* 进行MTU探测，用于及时增大MSS, 从而可以发送更大的报文。 */
 		/* Do MTU probing. */
 		result = tcp_mtu_probe(sk);
@@ -2649,7 +2652,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	/* 获取一个skb的最大的tso分段数量 */
 	max_segs = tcp_tso_segs(sk, mss_now);
 
-	/* 不断循环发送队列数据 - sk_write_queue */
+	/* 不断循环发送队列数据 - 从socket的 sk_write_queue 中。 */
 	while ((skb = tcp_send_head(sk))) {
 		unsigned int limit;
 
@@ -2658,8 +2661,9 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			skb->skb_mstamp_ns = tp->tcp_wstamp_ns = tp->tcp_clock_cache;
 			list_move_tail(&skb->tcp_tsorted_anchor, &tp->tsorted_sent_queue);
 
-			/* 计算本skb将会被分割成几个TSO段传输(skb->len/mss)
-			 * 重新设置tcp_gso_segs
+			/* 
+			 * 计算本skb将会被分割成几个TSO段传输( skb->len / mss)
+			 * 重新设置 tcp_gso_segs 和 tcp_gso_size。
 			 */
 			tcp_init_tso_segs(skb, mss_now);
 			goto repair; /* Skip network transmission */
@@ -2668,23 +2672,27 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		/* tcp的 pacing 正在工作，需要暂停发送packet到qdisc或者netdev中，
 		 * 需要等到pacing定时器超时后，在定时器handler tcp_pace_kick()中进行发送。
 		 * 注意：需要看该socket是否有使能tcp pacing功能。
+		 *
+		 * 限速点1：由于pacing速率的限制。
 		 */
 		if (tcp_pacing_check(sk))
 			break;
 
-		/* 初始化tso分段相关 */
+		/* 初始化tso分段相关：
 		/* 设置TSO相关信息，包括GSO类型，GSO分段的大小等。这些信息是准备给GSO分段使用的。
 		 * 如果网络设备不支持TSO，但又用了TSO功能，则报文在提交给网络设备前，
-		 * 需要进行软件分段，即由代码实现TSO功能。即GSO。
-		*/
+		 * 需要进行软件分段，即由软件实现TSO功能。即GSO。
+		 */
 		tso_segs = tcp_init_tso_segs(skb, mss_now);
 		BUG_ON(!tso_segs);
 
-		/* 获取和检查拥塞窗口大小：
+		/* 获取当前可用的拥塞窗口大小：
 		 * 如果为0，表示拥塞窗口已满，目前不能发送。
 		 * 拿拥塞窗口和正在网络上传输的包数目相比，如果拥塞窗口还大，
 		 * 则返回拥塞窗口减掉正在网上传输的包数后剩下的大小。
 		 * 目的：判断正在传输的包数目是否超过了拥塞窗口，如果超过了，则不发送。
+		 *
+		 * 限速点2：由于cwnd的限制。
 		 */
 		cwnd_quota = tcp_cwnd_test(tp, skb);
 		if (!cwnd_quota) {
@@ -2693,30 +2701,37 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 				/* Force out a loss probe pkt. */
 				cwnd_quota = 1;
 			else
-				break; /* 如果窗口大小为0，则无法发送任何东西。*/
+				/* 如果窗口大小为0，则无法发送任何东西。*/
+				break; 
 		}
 
 		/* 检查tcp的数据段是否在发送窗口之内，如果是，则可以发送，否则，不能发送。
-		 * 条件：至少要有一个接收窗口才能正常发送。
+		 * 条件：至少要有一个发送窗口才能正常发送。
+		 *
+		 * 限速点3：滑动窗口检查，即是否在发送窗口内。
 		 */
 		if (unlikely(!tcp_snd_wnd_test(tp, skb, mss_now))) {
 			is_rwnd_limited = true;
 			break;
 		}
 
-		/* 表示没有tso分段，则检查是否启用nagle算法。 */
+		/*
+		 * 限速点4：检查是否有nagle算法限制，或者 需要TSO的defer处理。
+		 */
+		/* 表示不需要tso分段，则继续检查是否启用nagle算法。 */
 		if (tso_segs == 1) {
 			/* 根据nagle算法，检查是否允许发送数据段 */
 			if (unlikely(!tcp_nagle_test(tp, skb, mss_now,
 						     (tcp_skb_is_last(sk, skb) ?
 						      nonagle : TCP_NAGLE_PUSH))))
 				break;
+
+		/* 表示需要tso分段, 则检查是否需要延迟发送。
+		 * 检查是否可以延时发送，有很多条件判断。详细见函数。
+		 * 目的是为了减少软GSO分段的次数，以提高实时性。
+		 * 会对 is_cwnd_limited进行设置。
+		 */
 		} else { 
-			/* 表示有tso分段, 则检查是否需要延迟发送。
-			 * 检查是否可以延时发送，有很多条件判断。详细见函数。
-			 * 目的是为了减少软GSO分段的次数，以提高实时性。
-			 * 会对 is_cwnd_limited进行设置。
-			 */
 			if (!push_one &&
 			    tcp_tso_should_defer(sk, skb, &is_cwnd_limited,
 						 &is_rwnd_limited, max_segs))
@@ -2724,21 +2739,21 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		}
 
 		/* 下面的逻辑是：
-		 * 不用推迟发送，即马上发送的处理 
+		 * 不用推迟发送，即马上发送的处理。
+		 */
+
+		/* 在需要分段，并且非紧急模式的条件下，重新确定分段长度限制 - 通过mss_now计算limit的值。
+		 * 以发送窗口和拥塞窗口的最小值作为分段段长。
+		 * 注意：
+		 * 	前面 tcp_init_tso_segs() 中会设置skb的gso信息，并且，
+		 * 	后面会调用tso_fragment()进行“tcp分段”。
+		 * 	而分段的条件是 skb->len > limit。
+		 * 	这里的关键就是limit的值，我们看到在tso_segs > 1时，也就是开启gso的时候，
+		 * 	limit的值是由tcp_mss_split_point() 得到的，也就是min(skb->len, window)，
+		 * 	即发送窗口允许的最大值。在没有开启gso时limit就是当前的mss。
 		 */
 		/* limit为本次分段的段长，初始化为当前MSS。 */
 		limit = mss_now;
-
-		/* 在需要分段并且非紧急模式的条件下，重新确定分段长度限制 - 通过mss_now计算limit的值。
-		 * 以发送窗口和拥塞窗口的最小值作为分段段长。
-		 * 注意：
-		 * 前面 tcp_init_tso_segs()中会设置skb的gso信息，并且，
-		 * 后面会调用tso_fragment()进行“tcp分段”。
-		 * 而分段的条件是skb->len > limit。
-		 * 这里的关键就是limit的值，我们看到在tso_segs > 1时，也就是开启gso的时候，
-		 * limit的值是由tcp_mss_split_point() 得到的，也就是min(skb->len, window)，
-		 * 即发送窗口允许的最大值。在没有开启gso时limit就是当前的mss。
-		 */
 		if (tso_segs > 1 && !tcp_urg_mode(tp))
 			limit = tcp_mss_split_point(sk, skb, mss_now,
 						    min_t(unsigned int,
@@ -2746,19 +2761,19 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 							  max_segs),
 						    nonagle);
 
-		/* 如果SKB中的数据长度大于分段段长，则调用tso_fragment()根据该段长进行分段，
-		 * 如果分段失败，则暂不发送。
+		/*
+		 * 如果SKB中的数据长度大于分段段长，则调用tso_fragment() 根据该段长进行分段，如果分段失败，则暂不发送。
 		 *
 		 * 前面处理中： 根据不同条件检查，可能需要对SKB中的报文进行分段处理，分段的报文包括两种：
 		 * 1. 普通的用MSS分段的报文
 		 * 2. TSO分段的报文。
 		 * 
 		 * 能否发送报文主要取决于两个条件：
-	         * 1. 1是报文需完全在发送窗口中，2是拥塞窗口未满。第一种报文，应该不会再分段了，
-	        	因为在tcp_sendmsg()中创建报文的SKB时已经根据MSS处理了。
-	         * 2. 一般情况下都会大于MSS，因为通过TSO分段的段有可能大于拥塞窗口的剩余空间，
-	        	如果是这样，就需要以发送窗口和拥塞窗口的最小值作为段长对报文再次分段。
-	         */
+		 * 1. 1是报文需完全在发送窗口中，2是拥塞窗口未满。第一种报文，应该不会再分段了，
+			因为在tcp_sendmsg()中创建报文的SKB时已经根据MSS处理了。
+		* 2. 一般情况下都会大于MSS，因为通过TSO分段的段有可能大于拥塞窗口的剩余空间，
+			如果是这样，就需要以发送窗口和拥塞窗口的最小值作为段长对报文再次分段。
+		*/
 		if (skb->len > limit &&
 		    unlikely(tso_fragment(sk, TCP_FRAG_IN_WRITE_QUEUE,
 					  skb, limit, mss_now, gfp)))
@@ -2773,15 +2788,18 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 * 以达到降低RTT（Round-Trip Time）和避免bufferbloat。
 		 *
 		 * https://blog.csdn.net/sinat_20184565/article/details/89341370
+		 *
+		 * 限速点5：TSQ的限制
 		 */
 		if (tcp_small_queue_check(sk, skb, 0))
 			break;
 
-		/* 构造TCP header等，最终调用ip_queue_xmit()将数据发送到网络层。
-		 * 注意：
-		 * 这里clone_it传入的是1，因为 TCP发送方在接收方确认收到数据之前，始终在发送队列中
-		 * 保留一份SKB的备份。要实现这种备份，用克隆SKB的方法是最有效的。先创建一个纯数据
-		 * 区的TCP包，然后标识该SKB已被克隆，最后 TCP发送引擎用克隆的SKB来建立TCP和IPv4首部。
+		/* 真正地将数据包发送到ip层：
+		 * 	构造TCP header等，最终调用ip_queue_xmit() 将数据发送到网络层。
+		 * 	注意：
+		 * 	这里clone_it传入的是1，因为 TCP发送方在接收方确认收到数据之前，始终在发送队列中
+		 * 	保留一份SKB的备份。要实现这种备份，用克隆SKB的方法是最有效的。先创建一个纯数据
+		 * 	区的TCP包，然后标识该SKB已被克隆，最后 TCP发送引擎用克隆的SKB来建立TCP和IPv4首部。
 		 */
 		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
 			break;
@@ -2790,12 +2808,12 @@ repair:
 		/* Advance the send_head.  This one is sent out.
 		 * This call will increment packets_out.
 		 */
-		/* 进行发送之后的数据更新，包括统计计数和复位重传定时器等。*/
+		/* 发送成功了，则进行发送之后的数据更新，包括统计计数和复位重传定时器等。*/
 		tcp_event_new_data_sent(sk, skb);
 
 		
 		/* 更新struct tcp_sock中的snd_sml字段。snd_sml表示最近发送的小包(小于MSS的段)的最后一个字节序号，
-		 * 在发送成功后，如果报文小于MSS，即更新该字段，主要用来判断是否启动nagle算法
+		 * 在发送成功后，如果报文小于MSS，即更新该字段，主要用来判断是否启动nagle算法。
 		 */
 		tcp_minshall_update(tp, mss_now, skb);
 
@@ -2809,6 +2827,7 @@ repair:
 
 	/*
 	 * 内核定义如下，目前由三种类型，分别是TCP_CHRONO_BUSY、TCP_CHRONO_RWND_LIMITED和TCP_CHRONO_SNDBUF_LIMITED。
+	 * tcp socket中，用chrono_stat保存了上面三种定时器统计的时间长度。优先级递增。
 	 */
 	if (is_rwnd_limited)
 		tcp_chrono_start(sk, TCP_CHRONO_RWND_LIMITED);
@@ -2822,6 +2841,7 @@ repair:
 		if (tcp_in_cwnd_reduction(sk))
 			tp->prr_out += sent_pkts;
 
+		/* 每次发送一个尾部丢失探测。 */
 		/* Send one loss probe per tail loss episode. */
 		if (push_one != 2)
 			tcp_schedule_loss_probe(sk, false);

@@ -365,7 +365,9 @@ struct tcp_sock {
 	u32	rtt_seq;	/* sequence number to update rttvar	*/
 	struct  minmax rtt_min;
 
-	/* 发送方已经发送出去，但是还未得到ack的 TCP 段的数目, packets_out = SND.NXT - SND.UNA */
+	/* 发送方已经发送出去，但是，还未得到ack的 TCP 段的数目, packets_out = SND.NXT - SND.UNA。
+	 * 该值时动态的，当有新的段发出或者有新的确认收到都会增加或减少该值。
+	 */
 	u32	packets_out;	/* Packets which are "in flight"	*/
 
 	/* 重传并且还未得到ack的 TCP 段的数目 */
@@ -438,6 +440,7 @@ struct tcp_sock {
 	u32	delivered;	/* Total data packets delivered incl. rexmits */
 	u32	delivered_ce;	/* Like the above but only ECE marked packets */
 	u32	lost;		/* Total data packets lost incl. rexmits */
+	
 	u32	app_limited;	/* limited until "delivered" reaches this val */
 	u64	first_tx_mstamp;  /* start of window send phase */
 	u64	delivered_mstamp; /* time we reached "delivered" */
