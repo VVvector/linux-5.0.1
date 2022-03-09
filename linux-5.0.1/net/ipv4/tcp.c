@@ -764,13 +764,15 @@ static bool tcp_should_autocork(struct sock *sk, struct sk_buff *skb,
 /* 
  * tcp_sendmsg()中，在sock发送缓存不足、系统内存不足或应用层的数据都拷贝完毕等情况下，
  * 都会调用tcp_push()来把已经拷贝到发送队列中的数据给发送出去。
-	工作：
-		1. 检查是否有未发送过的数据
-		2. 检查是否需要设置PSH标志
-		3. 检查是否使用紧急模式
-		4. 检查是否需要使用自动阻塞
-		5. 尽可能地把发送队列中的skb发送出去
-*/
+ *	工作：
+ *	1. 检查是否有未发送过的数据
+ *	2. 检查是否需要设置PSH标志
+ *	3. 检查是否使用紧急模式
+ *	4. 检查是否需要使用自动阻塞
+ *	5. 尽可能地把发送队列中的skb发送出去
+ *
+ * 会尝试遍历整个发送队列，直到无法继续发送为止。
+ */
 static void tcp_push(struct sock *sk, int flags, int mss_now,
 		     int nonagle, int size_goal)
 {
@@ -1296,7 +1298,8 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	return err;
 }
 
-/* tcp 发送函数
+/* tcp 发送函数：将用户数据拷贝到 sk->sk_write_queue中。
+ *
  * sendmsg系统调用在tcp层的实现是tcp_sendmsg函数，该函数完成以下任务：
  * 从用户空间读取数据，拷贝到内核skb，将skb加入到发送队列的任务，调用发送函数；
  * 函数在执行过程中会锁定控制块，避免软中断在tcp层的影响；
@@ -1423,7 +1426,7 @@ restart:
 		goto do_error;
 
 	/* 4. 遍历用户层的数据块数组, 把用户数据全部发送出去。 */
-	/* 从用户地址空间复制数据到socket buffer，即sk->sk_write_queue*/
+	/* 从用户地址空间复制数据到socket buffer，即sk->sk_write_queue */
 	while (msg_data_left(msg)) {
 
 		/* copy 代表本次需要从用户数据块中复制的数据量。 */
@@ -1543,7 +1546,9 @@ new_segment:
 
 			copy = min_t(int, copy, pfrag->size - pfrag->offset);
 
-			/* 从系统层面判断发送缓存的申请是否合法 */
+			/* 从系统层面判断发送缓存的申请是否合法
+			 * 该socket的wmen不足了，需要等。
+			 */
 			if (!sk_wmem_schedule(sk, copy))
 				goto wait_for_memory;
 
@@ -1624,7 +1629,7 @@ new_segment:
 			/* 尽可能的将发送队列中的skb发送出去，禁用nalge */
 			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
 
-		/*如果sk->sk_write_queue中只有一个skb，就发送一个skb */
+		/* 如果sk->sk_write_queue中只有一个skb，就发送一个skb */
 		} else if (skb == tcp_send_head(sk))
 			tcp_push_one(sk, mss_now);
 
@@ -1656,7 +1661,7 @@ wait_for_memory:
 
 	
 out:
-	/* 如果发生了超时或者要正常退出，且已经拷贝了数据，那么尝试将该数据发出 */
+	/* 如果发生了超时或者要正常退出，且已经拷贝了数据，那么尝试将该数据发出。 */
 	if (copied) {
 		tcp_tx_timestamp(sk, sockc.tsflags);
 		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);

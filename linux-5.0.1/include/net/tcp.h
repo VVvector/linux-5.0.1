@@ -1237,7 +1237,9 @@ static inline bool tcp_is_reno(const struct tcp_sock *tp)
 	return !tcp_is_sack(tp);
 }
 
-/* 这里表示获取 离开网络且未被确认的数据包个数。 */
+/* 这里表示获取 离开网络且未被确认的数据包个数。
+ * 都属于已经发送，但是，可以确定它们在网络中已经不存在了。
+ */
 static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
 {
 	return tp->sacked_out + tp->lost_out;

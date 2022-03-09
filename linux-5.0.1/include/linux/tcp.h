@@ -320,12 +320,19 @@ struct tcp_sock {
 	u8	nonagle     : 4,/* Disable Nagle algorithm?             */
 		thin_lto    : 1,/* Use linear timeouts for thin streams */
 		recvmsg_inq : 1,/* Indicate # of bytes in queue upon recvmsg */
+
+		/* 支持热迁移
+		 * 当需要迁移的时候，为迁移的socket进入repaire模式。
+		 * setsockopt的TCP_PREPAIR。
+		 */
 		repair      : 1,
+
 		/* FRTO - forward RTO-Recovery，也称为F-RTO，是一种发送端的无效RTO超时重传检测方法。
 		 * 虚假重传spurious retransmission。
 		 * https://www.cnblogs.com/lshs/p/6038603.html
 		 */
 		frto        : 1;/* F-RTO (RFC5682) activated in CA_Loss */
+
 	u8	repair_queue;
 	u8	syn_data:1,	/* SYN includes data */
 		syn_fastopen:1,	/* SYN includes Fast Open option */
@@ -365,12 +372,12 @@ struct tcp_sock {
 	u32	rtt_seq;	/* sequence number to update rttvar	*/
 	struct  minmax rtt_min;
 
-	/* 发送方已经发送出去，但是，还未得到ack的 TCP 段的数目, packets_out = SND.NXT - SND.UNA。
+	/* 发送方已经发送出去，但是，还未得到ack的TCP段的数目（不包含重传）, packets_out = SND.NXT - SND.UNA。
 	 * 该值时动态的，当有新的段发出或者有新的确认收到都会增加或减少该值。
 	 */
 	u32	packets_out;	/* Packets which are "in flight"	*/
 
-	/* 重传并且还未得到ack的 TCP 段的数目 */
+	/* 因为重传才发送出去，但是，还没有被确认的段的数量。*/
 	u32	retrans_out;	/* Retransmitted packets out		*/
 
 	u32	max_packets_out;  /* max packets_out in last window */
@@ -462,10 +469,12 @@ struct tcp_sock {
 	/* 一般表示已经真正发送出去的最后一个字节序号，有时也表示期望发出去的最后一个字节的序号 */
 	u32	pushed_seq;	/* Last pushed seq, required to talk to windows */
 
-	/* 丢失的数据报个数，只是一个预估值。
+	/* 记录发送后再传输过程中丢失的段的数量，因为tcp没有一种机制可以准确地知道发出去的段是否真的丢了，所以
+	 * 这只是一个预估值。
+	 *
 	 * 一般是根据选择恢复方法来确定丢失的段数量。
 	 * 例如：
-	 * 1. Normal(non-FACK, non-RACK) :
+	 * 0. Normal(non-FACK, non-RACK) :
 	 *	1. 未启用SACK, dup ACK表示ACK seq相同的段。
 	 *	2. 启用SACK, 携带SACK的ACK段也被认为是重复ACK。
 	 *	设 dupthresh = 3，SACKed_count = 6，从 unAcked 包开始的 SACKed_count - dupthresh 个数据包，
@@ -479,8 +488,9 @@ struct tcp_sock {
 	u32	lost_out;	/* Lost packets			*/
 
 	/*
-	 * 启用 SACK 时，通过 SACK 的 TCP 选项标识已接收到的段的数量。
-	 * 不启用 SACK 时，标识接收到的重复确认的次数，该值在接收到确认新数据段时被清除
+	 * 启用SACK时；表示已经被SACK选项确认的段的数量。
+	 * 不启用SACK时：表示接收到的重复ACK的次数，因为重复ACK不会自动发送，一定是对端收到了数据包。
+	 *	该值在接收到确认新数据段时被清除
 	 */
 	u32	sacked_out;	/* SACK'd packets			*/
 
