@@ -1363,6 +1363,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 	/* 获取socket timetout时间 */
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
+	/* 检查是否是应用层程序限制了发送速率 */
 	tcp_rate_check_app_limited(sk);  /* is sending application-limited? */
 
 	/* 2. 如果连接尚未建立好，即不处于ESTABLISHED或者CLOSE_WAIT状态，那么
@@ -1678,10 +1679,12 @@ do_fault:
 	 */
 	if (!skb->len) {
 		tcp_unlink_write_queue(skb, sk); //把skb从发送队列中删除
+
 		/* It is the one place in all of TCP, except connection
 		 * reset, where we can be unlinking the send_head.
 		 */
-		tcp_check_send_head(sk, skb); //是否要撤销sk->sk_send_head
+		tcp_check_send_head(sk, skb); //数据包payload长度为0，需要检测发送队列是否为空，并停止TCP_CHRONO_BUSY计时器。
+
 		sk_wmem_free_skb(sk, skb); //更新发送队列的大小和预分配缓存，释放skb
 	}
 

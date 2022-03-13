@@ -229,30 +229,50 @@ enum tcp_ca_state {
 };
 
 struct tcp_info {
+	/* tcp状态 */
 	__u8	tcpi_state;
+	/* tcp拥塞状态 */
 	__u8	tcpi_ca_state;
+	/* 超时重传次数 */
 	__u8	tcpi_retransmits;
+	/* 持续定时器或者保活定时器发送且未确认的段数 */
 	__u8	tcpi_probes;
+	/* 退避指数 */
 	__u8	tcpi_backoff;
+	/* 时间戳，SACK, 窗口扩大，ECN选项 */
 	__u8	tcpi_options;
+	/* 发送，接收的窗口扩大因子 */
 	__u8	tcpi_snd_wscale : 4, tcpi_rcv_wscale : 4;
+	/* app受限，即app发送不够快，未占满网络带宽。 */
 	__u8	tcpi_delivery_rate_app_limited:1;
 
+	/* 超时时间，us */
 	__u32	tcpi_rto;
+	/* 延迟确认ack的估值, us */
 	__u32	tcpi_ato;
+	/* 本端MSS */
 	__u32	tcpi_snd_mss;
+	/* 对端MSS */
 	__u32	tcpi_rcv_mss;
 
+	/* 未确认的数据段数，或者current listen backlog */
 	__u32	tcpi_unacked;
+	/* SACKed的段数，或者listen backlog set in listen() */
 	__u32	tcpi_sacked;
+	/* 丢失且未恢复的数据段数 */
 	__u32	tcpi_lost;
+	/* 重传且未确认的数据段数 */
 	__u32	tcpi_retrans;
+	/* FACKed的数据段数 */
 	__u32	tcpi_fackets;
 
-	/* Times. */
+	/* Times. /ms */
+	/* 最近一次发送数据包在多久之前 */
 	__u32	tcpi_last_data_sent;
 	__u32	tcpi_last_ack_sent;     /* Not remembered, sorry. */
+	/* 最近一次接收数据包在多久之前 */
 	__u32	tcpi_last_data_recv;
+	/* 最近一次接收ack包在多久之前 */
 	__u32	tcpi_last_ack_recv;
 
 	/* Metrics. */
@@ -263,6 +283,7 @@ struct tcp_info {
 	__u32	tcpi_snd_ssthresh;
 	__u32	tcpi_snd_cwnd;
 	__u32	tcpi_advmss;
+	/* 没有丢包时，可以重新排序的数据段数。 */
 	__u32	tcpi_reordering;
 
 	__u32	tcpi_rcv_rtt;
@@ -282,8 +303,10 @@ struct tcp_info {
 	__u32	tcpi_data_segs_in;	/* RFC4898 tcpEStatsDataSegsIn */
 	__u32	tcpi_data_segs_out;	/* RFC4898 tcpEStatsDataSegsOut */
 
+	/* tcp的发送速率 */
 	__u64   tcpi_delivery_rate;
 
+	/* 几种chrono timer的时间 __TCP_CHRONO_MAX */
 	__u64	tcpi_busy_time;      /* Time (usec) busy sending data */
 	__u64	tcpi_rwnd_limited;   /* Time (usec) limited by receive window */
 	__u64	tcpi_sndbuf_limited; /* Time (usec) limited by send buffer */

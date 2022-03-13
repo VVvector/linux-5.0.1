@@ -1321,6 +1321,8 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	if (!err && oskb) {
 		/* 成功发送一个skb给qdisc或netdev后，更新发送下一个skb的时间戳。tcp_wstamp_ns */
 		tcp_update_skb_after_send(sk, oskb, prior_wstamp);
+
+		/* 用于计算tcp发送速率 */
 		tcp_rate_skb_sent(sk, oskb);
 	}
 	return err;
@@ -1841,6 +1843,7 @@ static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 		/*
 		 * 以下检查是否为发送端缓存不足引起的空闲，首先，排除拥塞窗口的原因，其次，
 		 * 是发送队列为空，而且应用程序遇到缓存限值，记录下发送缓存限值标志TCP_CHRONO_SNDBUF_LIMITED。
+		 * 如果是，则启动 TCP_CHRONO_SNDBUF_LIMITED 计时器开始统计时间。
 		 /
 		/* The following conditions together indicate the starvation
 		 * is caused by insufficient sender buffer:
@@ -2543,7 +2546,7 @@ static bool tcp_pacing_check(struct sock *sk)
  *	这样既可以通过限制一个TCP连接向底层队列放入skb的速度来缓解队列拥堵导致的丢包问题，
  *	也能够在队列空间宽松时及时地发送数据，从而减小了TCP延时。
  * 
- * tcp_small_queue_check() 在TCP发送路径的tcp_write_xmit()函数和tcp_xmit_retransmit_queue()函数中都有调用。
+ * tcp_small_queue_check() 在TCP发送路径的tcp_write_xmit() 函数和tcp_xmit_retransmit_queue() 函数中都有调用。
  */
 static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 				  unsigned int factor)
@@ -2600,6 +2603,11 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 	return false;
 }
 
+/*
+ * 该函数完成最后的计时统计：
+ * 用当前时间减去计时器开始时间 chrono_start，将所得时长保存到对应的以类型值为索引的 chrono_stat数组中。
+ * 然后，记录当前时间值到 chrono_start，开始新的类型计时。
+ */
 static void tcp_chrono_set(struct tcp_sock *tp, const enum tcp_chrono new)
 {
 	const u32 now = tcp_jiffies32;
@@ -2611,6 +2619,11 @@ static void tcp_chrono_set(struct tcp_sock *tp, const enum tcp_chrono new)
 	tp->chrono_type = new;
 }
 
+/*
+ * 计时开始函数：
+ * 三种计时器类型值越大，优先级越高，即 TCP_CHRONO_SNDBUF_LIMITED 类型计时器优先级最高。
+ * 所以，当开启 TCP_CHRONO_SNDBUF_LIMITED 计时器时，需要停止其他类型的计时器。
+ */
 void tcp_chrono_start(struct sock *sk, const enum tcp_chrono type)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -2624,6 +2637,11 @@ void tcp_chrono_start(struct sock *sk, const enum tcp_chrono type)
 		tcp_chrono_set(tp, type);
 }
 
+/*
+ * 计时器停止函数：
+ * 需要注意在停止类型 TCP_CHRONO_RWND_LIMITED 或者 TCP_CHRONO_SNDBUF_LIMITED 的计时器时，
+ * 同时会打开 TCP_CHRONO_BUSY 计时器类型。
+ */
 void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -2886,8 +2904,7 @@ repair:
 	}
 
 	/*
-	 * 内核定义如下，目前由三种类型，分别是TCP_CHRONO_BUSY、TCP_CHRONO_RWND_LIMITED和TCP_CHRONO_SNDBUF_LIMITED。
-	 * tcp socket中，用chrono_stat保存了上面三种定时器统计的时间长度。优先级递增。
+	 * 由于对端的接收窗口限制了本端的发送，则启动 TCP_CHRONO_RWND_LIMITED 计时器，否则，停止该计时器。
 	 */
 	if (is_rwnd_limited)
 		tcp_chrono_start(sk, TCP_CHRONO_RWND_LIMITED);
@@ -4029,6 +4046,8 @@ static int tcp_send_syn_data(struct sock *sk, struct sk_buff *syn)
 	fo->copied = space;
 
 	tcp_connect_queue_skb(sk, syn_data);
+
+	/* fastopen情况下，需要启动 TCP_CHRONO_BUSY 计时器。*/
 	if (syn_data->len)
 		tcp_chrono_start(sk, TCP_CHRONO_BUSY);
 

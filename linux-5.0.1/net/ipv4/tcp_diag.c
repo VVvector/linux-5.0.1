@@ -19,6 +19,7 @@
 #include <net/netlink.h>
 #include <net/tcp.h>
 
+/* ss工具 采集tcp信息的入口 */
 static void tcp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 			      void *_info)
 {
@@ -33,6 +34,8 @@ static void tcp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 		r->idiag_rqueue = max_t(int, tp->rcv_nxt - tp->copied_seq, 0);
 		r->idiag_wqueue = tp->write_seq - tp->snd_una;
 	}
+
+	/* 获取tcp socket相关信息 */
 	if (info)
 		tcp_get_info(sk, info);
 }

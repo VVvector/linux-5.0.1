@@ -3461,6 +3461,7 @@ static int tcp_clean_rtx_queue(struct sock *sk, u32 prior_fack,
 		tcp_rtx_queue_unlink_and_free(skb, sk);
 	}
 
+	/* 清空了本端的重传队列时，需要停止 TCP_CHRONO_BUSY计数器。即发送的packet都得到了ack。 */
 	if (!skb)
 		tcp_chrono_stop(sk, TCP_CHRONO_BUSY);
 
@@ -3633,7 +3634,9 @@ static void tcp_cong_control(struct sock *sk, u32 ack, u32 acked_sacked,
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
-	/* 这里只有BBR算法有实现 ，即可以看出BBR可以忽略Recovery，Loss状态下的prr降窗处理。 */
+	/* 这里只有BBR算法有实现 ，即可以看出BBR可以忽略Recovery，Loss状态下的prr降窗处理。
+	 * BBR实现的cong_control指针函数为bbr_main，其中利用速率采样信息等进行带宽更新，设置Pacing速率和调整拥塞窗口等操作。
+	 */
 	if (icsk->icsk_ca_ops->cong_control) {
 		icsk->icsk_ca_ops->cong_control(sk, rs);
 		return;
@@ -3911,6 +3914,10 @@ static void tcp_xmit_recovery(struct sock *sk, int rexmit)
 	tcp_xmit_retransmit_queue(sk);
 }
 
+/*
+ * 如下函数tcp_newly_delivered，使用当前套接口中更新的delivered计数减去之前的旧值prior_delivered，
+ * 得到本次ACK处理，确认的报文数量。
+ */
 /* Returns the number of packets newly acked or sacked by the current ACK */
 static u32 tcp_newly_delivered(struct sock *sk, u32 prior_delivered, int flag)
 {

@@ -1784,17 +1784,44 @@ void tcp_fastopen_active_detect_blackhole(struct sock *sk, bool expired);
  */
 /*
  * https://blog.csdn.net/sinat_20184565/article/details/88325291
+ * 可在应用层通过NETLINK_SOCK_DIAG类型的netlink获取。-- diag_net_init()
  */
 enum tcp_chrono {
 	TCP_CHRONO_UNSPEC,
-	/* 主动发送数据 */
+	/* 统计socket主动发送数据的时间：
+	 * 在套接字发送tcp数据包时，内核开始计时，分为两处：
+	 * 1. 在函数 tcp_add_write_queue_tail() 中，将数据包加入到发送队列中，如果是队列中的第一个数据包，启动
+	 *	TCP_CHRONO_BUSY计时器。
+	 * 2. 在函数 tcp_send_syn_data() 中，如果需要同SYN报文一起发送数据，即tcp_fastopen情况下，也启动计时器。
+	 * 
+	 * 停止计时器也有两处：
+	 * 1. 当接收到对端的ack报文，清空本端的重传队列时 tcp_clean_rtx_queue() ，停止本计时器。
+	 * 2. 在tcp发送报文时，如果数据包的payload长度为0，检查一下发送队列是否为空，空的话，停止本计时器。
+	 *	tcp_sendmsg_locked() -> tcp_check_send_head()
+	 */
 	TCP_CHRONO_BUSY, /* Actively sending data (non-empty write queue) */
 
-	/* 表明由于接收缓存区不足而停止 */
+	/* 统计由于对端接收窗口限制，而导致的发包暂停的时间：
+	 * 在函数 tcp_write_xmit() 发送报文之前，通过 tcp_snd_wnd_test() 函数判断对端窗口是否会由于当前数据包的发送而超限？
+	 * 首先明确当前发送数据包的长度不能大于MSS，其次，计算对端窗口的最大序列号，由函数 tcp_wnd_end() 可见，其等于
+	 * 发送端已发送但还未接收到ack的最后一个字节的序列号与本端计算的可用窗口的总和。
+	 * 1. 如果由于对端接收窗口的原因不能发送数据包，启动 TCP_CHRONO_RWND_LIMITED 计时器，否则，停止此计时器。
+	 * 
+	 */
 	TCP_CHRONO_RWND_LIMITED, /* Stalled by insufficient receive window */
 
-	/* 该定时器表明由于发送缓存区不足所导致的发包暂停时间。 */
+	/* 统计由于本端发送缓存不足，而导致的发包暂停时间：
+	 * 在函数 tcp_cwnd_validate() 中，如果网络拥塞未阻塞，并且，发送队列为空，而且，应用层程序发包被设置为
+	 * SOCK_NOSPACE 标志，则启动此计时器。
+	 * 1. 函数 tcp_cwnd_validate() 在 tcp_write_xmit() 中被调用，sent_pkts表明进行了数据包发送操作。
+	 * 2. 不管在函数 tcp_sendmsg_locked() 或者 do_tcp_sendpages() 中，如果检测到了发送队列为空，则调用
+	 *	sk->sk_write_space() （对于TCP而言为函数sk_stream_write_space）进行发送队列空间的清理，
+	 *	之后停止TCP_CHRONO_SNDBUF_LIMITED计时器。
+	 * 3. 同理，在函数 tcp_data_snd_check() 中发送完数据后，进行SOCK_NOSPACE检测，如果不成立，则停止该计时器。
+	 * 
+	 */
 	TCP_CHRONO_SNDBUF_LIMITED, /* Stalled by insufficient send buffer */
+
 	__TCP_CHRONO_MAX,
 };
 
