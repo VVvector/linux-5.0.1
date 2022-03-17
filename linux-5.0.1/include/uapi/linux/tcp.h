@@ -303,7 +303,7 @@ struct tcp_info {
 	__u32	tcpi_data_segs_in;	/* RFC4898 tcpEStatsDataSegsIn */
 	__u32	tcpi_data_segs_out;	/* RFC4898 tcpEStatsDataSegsOut */
 
-	/* tcp的发送速率 */
+	/* tcp的发送速率 tcp_rate_gen() 获取*/
 	__u64   tcpi_delivery_rate;
 
 	/* 几种chrono timer的时间 __TCP_CHRONO_MAX */

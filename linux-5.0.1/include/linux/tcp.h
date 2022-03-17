@@ -313,6 +313,9 @@ struct tcp_sock {
 	u32	chrono_start;	/* Start time in jiffies of a TCP chrono */
 	u32	chrono_stat[3];	/* Time in jiffies for chrono_stat stats */
 	u8	chrono_type:2,	/* current chronograph type */
+		/* 应用受限，即应用层发送的速率不够与实际带宽比较，并没有达到拥塞窗口上限。也叫data-limited。
+		 * tcp_rate_gen() 中设置。
+		 */
 		rate_app_limited:1,  /* rate_{delivered,interval_us} limited? */
 		fastopen_connect:1, /* FASTOPEN_CONNECT sockopt */
 		fastopen_no_cookie:1, /* Allow send/recv SYN+data without a cookie */
@@ -346,7 +349,10 @@ struct tcp_sock {
 		syn_smc:1;	/* SYN includes SMC */
 	u32	tlp_high_seq;	/* snd_nxt at the time of TLP retransmit. */
 
+	/* 在 __tcp_transmit_skb() 中被更新，即表示真正发送到qdisc或者NIC时。 */
 	u64	tcp_wstamp_ns;	/* departure time for next sent data packet */
+
+	/* 在 tcp_write_xmit() -> tcp_mstamp_refresh() 中被更新，即表示尝试发送到qdisc或者NIC时。 */
 	u64	tcp_clock_cache; /* cache last tcp_clock_ns() (see tcp_mstamp_refresh()) */
 
 /* RTT measurement */
@@ -441,11 +447,13 @@ struct tcp_sock {
 	 */
 	u32	prr_delivered;	/* Number of newly delivered packets to
 				 * receiver in Recovery. */
-	/* 在Recovery状态下，一共发送的数量量。
-	 * 用于计算数据进入网络的速度。
+
+	/* 
+	 * 在Recovery状态下，一共发送的数量量。用于计算数据进入网络的速度。
 	 */
 	u32	prr_out;	/* Total number of pkts sent during Recovery. */
 
+	/* tcp_rate.c中的 tcp_rate_gen() 中更新 */
 	u32	delivered;	/* Total data packets delivered incl. rexmits */
 	u32	delivered_ce;	/* Like the above but only ECE marked packets */
 	u32	lost;		/* Total data packets lost incl. rexmits */

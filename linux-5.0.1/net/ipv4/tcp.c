@@ -751,6 +751,8 @@ static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
  * A：在tcp_push()中会检查，if (atomic_read(&sk->sk_wmem_alloc) > skb->truesize)
  * 当提交给IP层的数据包都发送出去后，sk_wmem_alloc的值就会变小，此时这个条件就为假，
  * 之后可以发送被阻塞的数据包了。
+ *
+ * https://blog.csdn.net/sinat_20184565/article/details/89341370
  */
 static bool tcp_should_autocork(struct sock *sk, struct sk_buff *skb,
 				int size_goal)
@@ -1042,7 +1044,7 @@ static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 	mss_now = tcp_current_mss(sk);
 
 	/* 计算获取skb能容纳的最大数据量，为MSS的整数倍。
-	 * 后续tcp_sendmsg()在组织skb时，就以size_goal为上界填充数据。
+	 * 后续 tcp_sendmsg() 在组织skb时，就以size_goal为上界填充数据。
 	 */
 	*size_goal = tcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
 
@@ -1304,14 +1306,14 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
  * 从用户空间读取数据，拷贝到内核skb，将skb加入到发送队列的任务，调用发送函数；
  * 函数在执行过程中会锁定控制块，避免软中断在tcp层的影响；
  * 函数核心流程：
- * 在发送数据时，查看是否能够将数据合并到发送队列中最后一个skb中，如果不能合并，
- * 则新申请一个skb；拷贝过程中，如果skb的线性区域有空间，则优先使用线性区域，
- * 线性区域空间不足，则使用分页区域；拷贝完成后，调用发送函数发送数据；
+ * 	在发送数据时，查看是否能够将数据合并到发送队列中最后一个skb中，如果不能合并，
+ * 	则新申请一个skb；拷贝过程中，如果skb的线性区域有空间，则优先使用线性区域，
+ * 	线性区域空间不足，则使用分页区域；拷贝完成后，调用发送函数发送数据；
  *
  * 注：这时不一定会真正开始发送，如果没有达到发送条件的话，很可能这次系统调用就直接返回了。
  *
- * 应用程序send()数据后，会在tcp_sendmsg()中尝试在同一个skb，
- * 保存size_goal大小的数据，然后再通过tcp_push()把这些包通过tcp_write_xmit()发出去
+ * 应用程序send()数据后，会在 tcp_sendmsg() 中尝试在同一个skb保存size_goal大小的数据，
+ * 然后再通过 tcp_push() 把这些包通过 tcp_write_xmit() 发出去
  */
 int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
@@ -1336,7 +1338,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 			goto out_err;
 		}
 
-		/* 写入skb到sk_write_queue发送队列中 */
+		/* 将sk保存到sk_write_queue发送队列中 */
 		skb = tcp_write_queue_tail(sk);
 		uarg = sock_zerocopy_realloc(sk, size, skb_zcopy(skb));
 		if (!uarg) {
@@ -1427,7 +1429,7 @@ restart:
 		goto do_error;
 
 	/* 4. 遍历用户层的数据块数组, 把用户数据全部发送出去。 */
-	/* 从用户地址空间复制数据到socket buffer，即sk->sk_write_queue */
+	/* 从用户地址空间复制数据到socket write buffer，即sk->sk_write_queue */
 	while (msg_data_left(msg)) {
 
 		/* copy 代表本次需要从用户数据块中复制的数据量。 */
@@ -1456,6 +1458,7 @@ new_segment:
 
 			/* 这里也会flush因为在memory不足而等待的这段时间里，RX方向的收包数据。
 			 * 将backlog的数据包flush给user。即调用 tcp_v4_do_rcv()
+			 * 进行收包处理。
 			 */
 			if (process_backlog && sk_flush_backlog(sk)) {
 				process_backlog = false;
@@ -1463,7 +1466,7 @@ new_segment:
 			}
 
 			/* 申请一个skb，其线性数据区的大小为：
-			 * 通过select_size()得到线性数区中TCP负荷的大小 + 最大的协议头长度。
+			 * 通过 select_size() 得到线性数区中TCP负荷的大小 + 最大的协议头长度。
 			 * 如果申请失败，就进入等待。
 			 * 注：
 			 * 这里会从TCP层面来判断发送缓存的申请是否合法。即需要判断TCP层面的内存
@@ -1531,8 +1534,9 @@ new_segment:
 			if (!sk_page_frag_refill(sk, pfrag))
 				goto wait_for_memory;
 
-			/* 判断能否往最后一个分页中追加数据 */
-			/* 如果不能追加了，就重新分配skb。 */
+			/* 判断能否往最后一个分页中追加数据，
+			 * 如果不能追加了，就重新分配skb。
+			 */
 			if (!skb_can_coalesce(skb, i, pfrag->page,
 					      pfrag->offset)) {
 				/* 检查分页数是否达到了上限，如果是，就设置PSH标志，并尽快发送出去
@@ -1569,7 +1573,7 @@ new_segment:
 			if (merge) {
 				skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
 			} else {
-				/* 初始化新增加的页 */
+				/* 将新页添加到skb中 */
 				skb_fill_page_desc(skb, i, pfrag->page,
 						   pfrag->offset, copy);
 				page_ref_inc(pfrag->page);
@@ -1695,6 +1699,7 @@ do_error:
 out_err:
 	sock_zerocopy_put_abort(uarg, true);
 	err = sk_stream_error(sk, flags, err);
+
 	/* make sure we wake any epoll edge trigger waiter */
 	if (unlikely(skb_queue_len(&sk->sk_write_queue) == 0 &&
 		     err == -EAGAIN)) {
@@ -3611,6 +3616,7 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 	info->tcpi_state = inet_sk_state_load(sk);
 
 	/* Report meaningful fields for all TCP states, including listeners */
+	/* tcp_update_pacing_rate()中更新 */
 	rate = READ_ONCE(sk->sk_pacing_rate);
 	rate64 = (rate != ~0UL) ? rate : ~0ULL;
 	info->tcpi_pacing_rate = rate64;
@@ -3697,6 +3703,8 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 	info->tcpi_data_segs_out = tp->data_segs_out;
 
 	info->tcpi_delivery_rate_app_limited = tp->rate_app_limited ? 1 : 0;
+
+	/* tcp_rate_gen()中更新相关参数 */
 	rate64 = tcp_compute_delivery_rate(tp);
 	if (rate64)
 		info->tcpi_delivery_rate = rate64;

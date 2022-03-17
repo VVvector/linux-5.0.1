@@ -2263,7 +2263,7 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 		}
 	}
 
-	/* 如果上面失败，再申请一页大小的frag page buffer */
+	/* 如果上面失败，再尝试申请一页大小的frag page buffer */
 	pfrag->page = alloc_page(gfp);
 	if (likely(pfrag->page)) {
 		pfrag->size = PAGE_SIZE;

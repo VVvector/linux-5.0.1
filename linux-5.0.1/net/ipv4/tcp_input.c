@@ -857,7 +857,8 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 	tp->srtt_us = max(1U, srtt);
 }
 
-/* https://blog.csdn.net/sinat_20184565/article/details/89385038
+/* 
+ * https://blog.csdn.net/sinat_20184565/article/details/89385038
  * pacing速率更新函数：
  * 1. 当前pacing速率的计算由三个变量组成。当前发送MSS缓存值mss_cache乘以拥塞窗口cwnd的结果，
  *	除以平滑往返时间srtt，即最大可发送的数据长度除以srtt得到当前pacing速率。
@@ -865,13 +866,13 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
  *	对于处在慢启动阶段的套接口，将得到的速率值默认增加200%倍（sysctl_tcp_pacing_ss_ratio）。
  *	对于处在拥塞避免阶段的套接口，将速率默认增加120%倍（sysctl_tcp_pacing_ca_ratio）。
  *
- * Pacing速率更新的入口有两个
+ * Pacing速率更新的入口有两个：
  * 1. 一个位于TCP服务端接收到客户端的三次握手的ACK报文之后，初始化pacing速率。tcp_rcv_state_process()
- * 前提是TCP当前采用的拥塞避免算法没有实现cong_control回调函数，目前仅有BBR算法实现了此回调。
- * 2. 如果采用BBR算法，将不在tcp_rcv_state_process函数中初始化pacing速率。BBR拥塞算法在cong_control回调（bbr_main）
- *	中设置pacing速率，如下的tcp_cong_control函数，如果cong_control有值，执行完之后就结束函数。
+ * 	前提是TCP当前采用的拥塞避免算法没有实现cong_control回调函数，目前仅有BBR算法实现了此回调。
+ * 2. 如果采用BBR算法，将不在 tcp_rcv_state_process() 函数中初始化pacing速率。BBR拥塞算法在cong_control回调（bbr_main）
+ *	中设置pacing速率，如下的 tcp_cong_control() 函数，如果cong_control有值，执行完之后就结束函数。
  *	只有在采用除BBR算法之外的其它拥塞算法时（cong_control为空指针），才会往后执行，
- *	调用pacing速率更新函数。tcp_cong_control函数在处理ACK确认报文的最后被调用。
+ *	调用pacing速率更新函数。 tcp_cong_control() 函数在处理ACK确认报文的最后被调用。
  */
 static void tcp_update_pacing_rate(struct sock *sk)
 {
@@ -3432,6 +3433,9 @@ static int tcp_clean_rtx_queue(struct sock *sk, u32 prior_fack,
 		if (sacked & TCPCB_LOST)
 			tp->lost_out -= acked_pcount;
 
+		/* 在收到了ack，就减少packets_out。
+		 * 在tcp_write_xmit()中， 成功发送给ip层就增加。
+		 */
 		tp->packets_out -= acked_pcount;
 		pkts_acked += acked_pcount;
 		tcp_rate_skb_delivered(sk, skb, sack->rate);
@@ -3741,6 +3745,10 @@ static int tcp_ack_update_window(struct sock *sk, const struct sk_buff *skb, u32
 
 			/* idle：发送端没有额外的数据等待发送，当数据发送间隔超过一个RTO时，就认为是idle。
 			 * 则就需要进行拥塞窗口校验。RFC2861
+			 * 另外还有两种：
+			 * 	network-limited: tcp的数据传输受限于拥塞窗口而不能发送更多的数据。
+			 *	application-limited: tcp的数据传输速率受限与应用层的数据写入速率，并没有达到
+			 *				拥塞窗口上限，也称为data-limited。
 			 */
 			if (!tcp_write_queue_empty(sk))
 				tcp_slow_start_after_idle_check(sk);

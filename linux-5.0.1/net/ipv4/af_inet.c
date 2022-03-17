@@ -810,7 +810,8 @@ int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 }
 EXPORT_SYMBOL(inet_getname);
 
-/* AF_INET协议族提供的通用发送函数，例如，TCP/UDP/RAW socket的发送函数都是先调用这个。 */
+/* AF_INET协议族提供的通用发送函数，例如，TCP/UDP/RAW socket的发送函数都是先调用这个。
+ */
 int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
@@ -833,7 +834,7 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	    inet_autobind(sk))
 		return -EAGAIN;
 
-	/* 根据不同的协议调用相应的接口，例，udp_sendmsg, tcp_sendmsg, raw_sendmsg */
+	/* 根据不同的协议调用相应的接口，例，udp_sendmsg(), tcp_sendmsg(), raw_sendmsg() */
 	return sk->sk_prot->sendmsg(sk, msg, size);
 }
 EXPORT_SYMBOL(inet_sendmsg);

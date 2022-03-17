@@ -439,7 +439,9 @@ struct sock {
 	/* ===== cache line for TX ===== */
 	int			sk_wmem_queued; /* 发送队列中所有报文数据的总长度，目前仅用于TCP. */
 	
-	/* 为发送而分配的所有SKB数据区的总长度 */
+	/* 已发送给ip层以下的数据量， 在TSQ检查中，会与sk_pacing_rate等数据做比较，限制发送量。
+	 * __tcp_transmit_skb()中，当成功发送给ip层以下，就会增加。
+	 */
 	refcount_t		sk_wmem_alloc;
 	unsigned long		sk_tsq_flags;
 
@@ -467,7 +469,7 @@ struct sock {
 
 	/* 两种情况会被设置为SK_PACING_NEEDED：
 	 * 1. bbr算法中， bbr_init()。
-	 * 2. 用户层的setsockopt()的SO_MAX_PACING_RATE来进行设置以及设置最大速率。
+	 * 2. 用户层的setsockopt()的 SO_MAX_PACING_RATE 来进行设置以及设置最大速率。
 	 */
 	u32			sk_pacing_status; /* see enum sk_pacing */
 	

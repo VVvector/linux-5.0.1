@@ -166,7 +166,7 @@ void tcp_rate_skb_delivered(struct sock *sk, struct sk_buff *skb,
 		scb->tx.delivered_mstamp = 0;
 }
 
-/* 生成速率样本
+/* 生成速率样本：
  * 以上的函数SACK和ACK报文处理函数都是在 tcp_ack() 函数中调用，在tcp_ack函数最后，
  * 调用 tcp_rate_gen() 生成速率样本。在此之前，由函数 tcp_newly_delivered() 计算ACK报文确认的报文数量。
  * 函数 tcp_rate_gen() 的第三个参数lost表示新推倒出来的丢失报文数量（进行了标记）。
@@ -259,7 +259,7 @@ void tcp_rate_gen(struct sock *sk, u32 delivered, u32 lost,
 	}
 
 	/*
-	 * 如果app_limited为空，记录的速率为应用程序不限制的速率。否则，app_limited有值，
+	 * 如果app_limited为空，则记录的速率为应用程序不限制的速率。
 	 * 如果当前的速率大于记录的速率（rate_delivered/rate_interval_us），进行速率更新。
 	 */
 	/* Record the last non-app-limited or the highest app-limited bw */

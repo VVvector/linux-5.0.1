@@ -1047,7 +1047,11 @@ void tcp_wfree(struct sk_buff *skb)
 		local_irq_save(flags);
 		tsq = this_cpu_ptr(&tsq_tasklet);
 		empty = list_empty(&tsq->head);
-		list_add(&tp->tsq_node, &tsq->head); //将socket加入到TSQ队列中
+
+		/*
+		 * /将socket加入到TSQ队列中，会在TSQ的tasklet中进行发包。
+		 */
+		list_add(&tp->tsq_node, &tsq->head);
 		if (empty)
 			tasklet_schedule(&tsq->tasklet);
 		local_irq_restore(flags);
@@ -1216,6 +1220,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 	 * hash值可以在其他地方使用，比如 netdev driver中也可由使用该hash值，进行skb的分类。
 	 */
 	skb_set_hash_from_sk(skb, sk);
+
+	/*
+	 * 这边就表示发送给ip层以下的数据量。
+	 */
 	refcount_add(skb->truesize, &sk->sk_wmem_alloc);
 
 	skb_set_dst_pending_confirm(skb, sk->sk_dst_pending_confirm);
@@ -1774,9 +1782,31 @@ unsigned int tcp_current_mss(struct sock *sk)
  */
 /*
  * 此函数是在网络空闲（未充分利用）RTO时长之后调整拥塞窗口。
- * 此调整不针对重传阶段，以及应用程序受到发送缓存限值的情况。首先获得窗口的使用情况，
- * 取值为初始窗口值和tcp_cwnd_validate()函数中记录的使用值snd_cwnd_used之间的较大值。
+ * 此调整不针对重传阶段，以及应用程序受到发送缓存限值的情况。
+ * 首先获得窗口的使用情况，取值为初始窗口值和tcp_cwnd_validate()函数中记录的使用值snd_cwnd_used之间的较大值。
  * 拥塞窗口值调整为原窗口值与窗口使用值之和的一半。
+ *
+ * 注意：
+ * 	慢启动和拥塞避免的过程都是基于包守恒定则 conservation of packets principle和ack自时钟 ack clockig
+ * 	建立的，cwnd代表了对网络拥塞状态的一个评估，很明显拥塞控制要根据ack来更新cwnd的前提条件是，
+ * 	当前的数据发送速率真实的反映了cwnd的状况，也就是说 当前传输状态时network-limited。
+ * 	想像一个场景，假如tcp隔了很长时间没有发送数据包，即进入了idle，那么当前真实的网络拥塞状态
+ * 	很可能就会与cwnd反映的网络状况有差距。而application-limited场景下，受限数据的ack报文
+ * 	还可能把cwnd增长到一个异常大的值，显然是不合理的。
+ * 	基于上面提到的问题，RFC2861引入了 拥塞窗口校验(CWV - Congestion Window Validation)算法。
+ * 	基本思路：
+ *	当tcp idle超过了一个RTO时，更新ssthresh = max(ssthresh, 3 * cwnd / 4)，
+ *	cwnd = max(win / 2, MSS)。
+ *	当tcp application-limited超过一个RTO时，更新ssthresh = max(ssthresh, 3 * cwnd / 4)，
+ *	cwnd = (win + w_used)/2
+ *
+ * 注意：
+ *	目前RFC2861已经被RFC7661取代了。在新CWV算法中，不区分application-limited和idle状态，
+ *	统称为rate-limited。
+ *
+ * linux中CWV功能受到 /proc/sys/net/ipv4/tcp_slow_start_after_idle 控制的，默认是打开的。
+ * 用 is_cwnd_limited标记当前为network-limited状态。
+ * is_cwnd_limited可以看成是 每个RTT更新一次。
  */
 static void tcp_cwnd_application_limited(struct sock *sk)
 {
@@ -1800,12 +1830,14 @@ static void tcp_cwnd_application_limited(struct sock *sk)
  * 第一次执行此函数时，max_packets_out和max_packets_seq均未赋值，分别为两者赋值为packets_out和SND.NXT的值。
  * 之后再次执行此函数时，只有进入下一个发送窗口期或者发送报文大于记录值时进行更新。由此可见，
  * 前者max_packets_out记录的为上一个窗口发送的最大报文数量；而后者max_packets_seq记录的为最大的发送序号。
+ *
  */
 static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 {
 	const struct tcp_congestion_ops *ca_ops = inet_csk(sk)->icsk_ca_ops;
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* 网络受限的情况，即网络拥塞cwnd限制。 */
 	/* Track the maximum number of outstanding packets in each
 	 * window, and remember whether we were cwnd-limited then.
 	 */
@@ -1816,8 +1848,8 @@ static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 		tp->is_cwnd_limited = is_cwnd_limited;
 	}
 
-	/*
-	 * 参数is_cwnd_limited记录了上一个发送窗口期是否受到了拥塞窗口的限制。
+	/* 网络受限：
+	 * 参数 is_cwnd_limited 记录了上一个发送窗口期是否受到了拥塞窗口的限制。
 	 * 函数tcp_is_cwnd_limited()判断连接的发送是否受限于拥塞窗口，为真，表明当前发送使用了全部可用网络资源，
 	 * 反之，表明存在空闲的网络资源。
 	 * 在后一种情况下，记录当前网络中报文数量到变量snd_cwnd_used中，
@@ -1829,12 +1861,24 @@ static void tcp_cwnd_validate(struct sock *sk, bool is_cwnd_limited)
 		/* Network is feed fully. */
 		tp->snd_cwnd_used = 0;
 		tp->snd_cwnd_stamp = tcp_jiffies32;
+
+	/* application-limited或idle ==> rate-limited：
+	 */
 	} else {
 		/* Network starves. */
 		if (tp->packets_out > tp->snd_cwnd_used)
 			tp->snd_cwnd_used = tp->packets_out;
 
-		/* 在网络空闲（未充分利用）RTO时长之后调整拥塞窗口。 */
+		/* application-limited的场景，经过 RTO 时长之后，调整拥塞窗口。
+		 * https://www.cnblogs.com/lshs/p/6038757.html
+		 * 注意：
+		 * 这里可以看出，application-limited场景下，只有拥塞状态处于open状态的时候才会更新ssthresh和cwnd。
+		 * 但是，另一方面，open状态下，每次收到ack反馈确认了新的数据包的时候tcp_cong_avoid()，
+		 * 又会更新snd_cwnd_stamp，这样，
+		 * linux中就很难满足 (s32)(tcp_jiffies32 - tp->snd_cwnd_stamp) >= inet_csk(sk)->icsk_rto 这个条件，
+		 * 这就导致linux在application-limited场景下的处理和RFC2861相差甚远，一般只会触发idle场景处理，而不能
+		 * 进入application-limited场景。
+		 */
 		if (sock_net(sk)->ipv4.sysctl_tcp_slow_start_after_idle &&
 		    (s32)(tcp_jiffies32 - tp->snd_cwnd_stamp) >= inet_csk(sk)->icsk_rto &&
 		    !ca_ops->cong_control)
@@ -2169,12 +2213,12 @@ static int tso_fragment(struct sock *sk, enum tcp_queue tcp_queue,
  *
  * This algorithm is from John Heffner.
  */
- /*
- * 1. 在段中有FIN标志
- * 2. 不处于open拥塞状态
- * 3. TSO段延时超过2个时钟滴答
- * 4. 拥塞窗口和发送窗口的最小值大于64K或三倍的当前有效MSS，
+/* https://www.cnblogs.com/aiwz/archive/2012/10/15/6333370.html
+ * https://github.com/spotify/linux/commit/f4805eded7d38c4e42bf473dc5eb2f34853beb06
+ *
  * 在这些情况下会立即发送，而其他情况下会延时发送，这样主要是为了减少软GSO分段的次数，以提高性能。
+ * ethtool -K ethX tso off
+ * ethtool -K ethX tso on
  */
 static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 				 bool *is_cwnd_limited,
@@ -2188,9 +2232,16 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 	int win_divisor;
 	s64 delta;
 
+	/*
+	 * 1. TCP_CA_Loss或TCP_CA_Recovery的拥塞状态下，立即发送。
+	 */
 	if (icsk->icsk_ca_state >= TCP_CA_Recovery)
 		goto send_now;
 
+	/*
+	 * 2. 该skb被延迟 1ms 以上，则不再延迟，直接发送。
+	 * 即TSO延迟不能超过1ms。
+	 */
 	/* Avoid bursty behavior by allowing defer
 	 * only if the last write was recent (1 ms).
 	 * Note that tp->tcp_wstamp_ns can be in the future if we have
@@ -2202,32 +2253,52 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 
 	in_flight = tcp_packets_in_flight(tp);
 
+	/* 如果此数据段不用分片，或者受到拥塞窗口限制，则报错。
+	 * 因为在这个函数前面已经进行了检查，理论上，这里不会遇到该情况。
+	 */
 	BUG_ON(tcp_skb_pcount(skb) <= 1);
 	BUG_ON(tp->snd_cwnd <= in_flight);
 
+	/* 对端的通告窗口的剩余大小。 */
 	send_win = tcp_wnd_end(tp) - TCP_SKB_CB(skb)->seq;
 
+	/* 拥塞窗口的剩余大小。 */
 	/* From in_flight test above, we know that cwnd > in_flight.  */
 	cong_win = (tp->snd_cwnd - in_flight) * tp->mss_cache;
 
+	/* limit表示当前可发送的数据量大小，取其小者作为最终的发送限制。 */
 	limit = min(send_win, cong_win);
 
+	/*
+	 * 3. 允许发送的数据量 超过 TSO一次能处理的最大值（一般为64KB），就立即发送。
+	 */
 	/* If a full-sized TSO skb can be sent, do it. */
 	if (limit >= max_segs * tp->mss_cache)
 		goto send_now;
 
+	/*
+	 * 4. 该skb处于发送队列中间(即不是sk->sk_write_queue的最后一个skb)，且允许整个skb一起发送。
+	 * 	处于发送队列中间的skb不能再获得新的数据，就没必要在defer。
+	 */
 	/* Middle in queue won't get any more data, full sendable already? */
 	if ((skb != tcp_write_queue_tail(sk)) && (limit >= skb->len))
 		goto send_now;
 
+	/*
+	 * 5. sysctl_tcp_tso_win_divisor --> 单个TSO段可消耗拥塞窗口的比例，默认是3。
+	 */
 	win_divisor = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tso_win_divisor);
 	if (win_divisor) {
+		/* 一个RTT内允许发送的最大字节数 */
 		u32 chunk = min(tp->snd_wnd, tp->snd_cwnd * tp->mss_cache);
 
+		/* 单个TSO段可消耗的发送量为 1/3 chunk */
 		/* If at least some fraction of a window is available,
 		 * just use it.
 		 */
 		chunk /= win_divisor;
+
+		/* 5.1 即sysctl_tcp_tso_win_divisor有设置时，limit 大于 1/3最大可发送量，需立即发送。 */
 		if (limit >= chunk)
 			goto send_now;
 	} else {
@@ -2236,22 +2307,37 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 		 * frame, so if we have space for more than 3 frames
 		 * then send now.
 		 */
+		/* 5.2 即sysctl_tcp_tso_win_divisor没有设置时，limit 大于 3个数据包，需立即发送。 */
 		if (limit > tcp_max_tso_deferred_mss(tp) * tp->mss_cache)
 			goto send_now;
 	}
 
+	/*
+	 * 注意：
+	 * 条件3,4，5(5.1/5.2)都是 limit 大于某个阈值，就可以马上发送。
+	 * 因为通过这几个条件，可以确定此时发送是受到应用程序的限制，而不是通过窗口或者拥塞窗口。
+	 * 在应用程序发送的数据量很少的情况下，不宜采用TSO Nagle，因为这会影响此类应用。
+	 */
+
+	/*
+	 * 6. 所有已经发送的skb都已经被ack了，就需要立即发送。
+	 */
 	/* TODO : use tsorted_sent_queue ? */
 	head = tcp_rtx_queue_head(sk);
 	if (!head)
 		goto send_now;
+
+	/*
+	 * 7. 如果下一个ack的来得太晚(srtt的一半)，就需要立即发送。
+	 */
 	delta = tp->tcp_clock_cache - head->tstamp;
 	/* If next ACK is likely to come too late (half srtt), do not defer */
 	if ((s64)(delta - (u64)NSEC_PER_USEC * (tp->srtt_us >> 4)) < 0)
 		goto send_now;
 
-	/* 这里表示 如果判断到拥塞窗口小于发送窗口，并且拥塞窗口小于等于报文长度时，意味着
-	 * 当前报文不能被发送，于是就设置拥塞窗口限制标志 is_cwnd_limited。（表示说受到拥塞
-	 * 窗口的限制）
+	/*
+	 * 8. 如果当前要发送的skb长度 大于等于 min(cong_win, send_win)，就不需要立即发送，
+	 * 	且表明是 拥塞窗口受限 或者是 通告窗口受限。
 	 */
 	/* Ok, it looks like it is advisable to defer.
 	 * Three cases are tracked :
@@ -2271,6 +2357,9 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 		}
 	}
 
+	/*
+	 * 9. 数据包带有FIN, 需要立即发送。
+	 */
 	/* If this packet won't get more data, do not wait. */
 	if ((TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) ||
 	    TCP_SKB_CB(skb)->eor)
@@ -2495,7 +2584,7 @@ static bool tcp_pacing_check(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
-	/* 该sock是否使能了pacing功能 */
+	/* 该sock是否使能了pacing功能：用的bbr拥塞算法或者用SO_MAX_PACING_RATE使能了pacing。 */
 	if (!tcp_needs_internal_pacing(sk))
 		return false;
 
@@ -2534,15 +2623,15 @@ static bool tcp_pacing_check(struct sock *sk)
  * 3. 高数据速率
  *
  * TSQ工作原理：
- * 1. 设置net.ipv4.tcp_limit_output_bytes内核选项来指定sysctl_tcp_limit_output_bytes的值；
- * 2. 在TCP发包时，系统调用使用tcp_write_xmit() 来调用tcp_transmit_skb() 发送skb时，
- *	会设置使得skb在释放时会调用tcp_wfree函数，并增加sk->sk_wmem_alloc的值。
+ * 1. 设置net.ipv4.tcp_limit_output_bytes内核选项来指定 sysctl_tcp_limit_output_bytes--1Mbytes 的值；
+ * 2. 在TCP发包时，系统调用使用 tcp_write_xmit() 来调用 tcp_transmit_skb() 发送skb时，
+ *	会设置使得skb在释放时会调用 tcp_wfree() 函数，并增加sk->sk_wmem_alloc的值。
  * 3. 当sk->sk_wmem_alloc达到限制时，即底层队列允许当前TCP连接放入的数据的总大小达到限制时（此时底层队列未必会满），
- *	tcp_write_xmit() 就不允许继续发送skb，而是设置标记使得在由tcp_transmit_skb() 
- *	发送的任意skb在释放时会调用tcp_wfree()，将发送skb的任务放入TSQ tasklet中，然后系统调用返回。
- * 4. 此后由TSQ tasklet在软中断上下文中驱动tcp_write_xmit()发送skb，但放入底层队列中的skb的总大小仍然不能超过限制。
- *	一旦底层队列中的skb被陆续释放使得sk->sk_wmem_alloc的值减小到低于限制时，
- *	TSQ tasklet就可以即时地发送skb到队列中。
+ *	tcp_write_xmit() 就不允许继续发送skb，而是设置socket标记为TSQ_THROTTLED，使得在由tcp_transmit_skb() 
+ *	发送的任意skb在释放时会调用 tcp_wfree()，将发送skb的任务放入TSQ tasklet - tcp_tasklet_func() 中，然后系统调用返回。
+ * 4. 此后由TSQ tasklet在软中断上下文中调用 tcp_write_xmit()发送skb，但放入底层队列中的skb的总大小仍然不能超过限制。
+ *	一旦底层队列中的skb被陆续释放，使得sk->sk_wmem_alloc的值减小到低于限制时，
+ *	TSQ tasklet就可以即时地发送skb到ip层中。
  *	这样既可以通过限制一个TCP连接向底层队列放入skb的速度来缓解队列拥堵导致的丢包问题，
  *	也能够在队列空间宽松时及时地发送数据，从而减小了TCP延时。
  * 
@@ -2554,22 +2643,24 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 	unsigned long limit;
 
 	/* 取以下两者之间的较大值：
-	 * 1）当前发送的数据报文skb结构所占用空间的两倍值（2*skb->truesize）；
-	 * 2）以及当前大约每毫秒的流量值（其通过sk_pacing_rate计算而来，内核将sk_pacing_shift变量定义为10，
+	 * 1）当前发送的数据报文skb结构所占用空间的两倍值（2 * skb->truesize）；
+	 * 2）以及当前大约每毫秒的流量值（其通过 sk_pacing_rate 计算而来，内核将 sk_pacing_shift 变量定义为10，
 	 * 将当前每秒钟的流量（sk_pacing_rate）除以2的10次方，得到大约1毫秒的流量值）。*/
 	limit = max_t(unsigned long,
 		      2 * skb->truesize,
 		      sk->sk_pacing_rate >> sk->sk_pacing_shift);
 
 	/* 其次，如果没有使能socket的pacing功能：
-	 * 则，如果此结果值大于 sysctl_tcp_limit_output_bytes（默认为1M）限定的值，
+	 * 则，如果此结果值大于 sysctl_tcp_limit_output_bytes（默认为1M = 1048576）限定的值，
 	 * 使用tcp_limit_output_bytes作为限定值。
 	 */
 	if (sk->sk_pacing_status == SK_PACING_NONE)
 		limit = min_t(unsigned long, limit,
 			      sock_net(sk)->ipv4.sysctl_tcp_limit_output_bytes);
 
-	/* 最后，如果是重传报文，即factor等于1，将最终的判定值增大一倍。 */
+	/* 最后，如果是重传报文，即factor等于1，将最终的判定值增大一倍。
+	 * 正常报文， factor为0，即不变。
+	 */
 	limit <<= factor;
 
 	/* 需要发送的buffer量大于了pacing限制值，则暂停发送到qdisc或netdev，需要等到TSQ的软中断去发送。 tcp_tsq_handler()
@@ -2704,10 +2795,10 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	/* 该变量用于统计发送的包的数量，初始化为 0。*/
 	sent_pkts = 0;
 
-	/* 即在每次发送skb时，就需要更新tcp socket的 tcp_clock_cache 时间戳。*/
+	/* 在每次尝试发送skb时，就需要更新 tp->tcp_clock_cache 时间戳。*/
 	tcp_mstamp_refresh(tp);
 
-	/* 不需要立即发送，linux 这里会做mtu探测工作。*/
+	/* __tcp_push_pending_frames() 不需要立即发送时，linux 这里会做mtu探测工作。*/
 	if (!push_one) {
 
 		/* 进行MTU探测，用于及时增大MSS, 从而可以发送更大的报文。 */
@@ -2745,8 +2836,9 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 */
 
 		/* tcp的 pacing 正在工作，需要暂停发送packet到qdisc或者netdev中，
-		 * 需要等到pacing定时器超时后，在定时器的handler tcp_pace_kick()中进行发送。
-		 * 注意：需要看该socket是否有使能tcp pacing功能。
+		 * 需要等到pacing定时器超时后，在定时器的handler tcp_pace_kick() 中进行发送。
+		 * 注意：
+		 * 	需要看该socket是否有使能tcp pacing功能。
 		 *
 		 * 限速点1：由于pacing速率的限制。
 		 */
@@ -2772,12 +2864,13 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		 */
 		cwnd_quota = tcp_cwnd_test(tp, skb);
 		if (!cwnd_quota) {
-			/* 强制发送一个包进行丢包探测 */
+			/* tcp_send_loss_probe() 时，会强制发送一个包进行丢包探测 */
 			if (push_one == 2)
 				/* Force out a loss probe pkt. */
 				cwnd_quota = 1;
+
+			/* __tcp_push_pending_frames()和tcp_push_one等其余情况，均不发送数据。 */
 			else
-				/* 如果窗口大小为0，则无法发送任何东西。*/
 				break; 
 		}
 
@@ -2792,9 +2885,9 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		}
 
 		/*
-		 * 限速点4：检查是否有nagle算法限制，或者 需要TSO的defer处理。
+		 * 限速点4：检查是否有nagle算法限制，或者 需要GSO的defer处理。
 		 */
-		/* 表示数据长度小于MSS，则是一个小包，不需要tso分段，需要继续检查是否启用nagle算法。 */
+		/* 表示数据长度小于MSS，则是一个小包，不需要GSO分段，需要继续检查是否启用nagle算法。 */
 		if (tso_segs == 1) {
 			/* 根据nagle算法，检查是否允许发送数据段 */
 			if (unlikely(!tcp_nagle_test(tp, skb, mss_now,
@@ -2821,7 +2914,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		/* 在需要分段，并且非紧急模式的条件下，重新确定分段长度限制 - 通过mss_now计算limit的值。
 		 * 以发送窗口和拥塞窗口的最小值作为分段段长。
 		 * 注意：
-		 * 	前面 tcp_init_tso_segs() 中会设置skb的gso信息，并且，后面会调用tso_fragment()进行“tcp分段”。
+		 * 	前面 tcp_init_tso_segs() 中会设置skb的GSO信息，并且，后面会调用tso_fragment()进行“tcp分段”。
 		 * 	而分段的条件是 skb->len > limit。
 		 * 	这里的关键就是limit的值，我们看到在tso_segs > 1时，也就是开启gso的时候，
 		 * 	limit的值是由tcp_mss_split_point() 得到的，也就是min(skb->len, window)，
@@ -2838,7 +2931,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 						    nonagle);
 
 		/*
-		 * 在tcp_write_xmit()中，如果skb中数据量过大，超过了发送窗口和拥塞窗口的限定，只允许发送skb的一部分，
+		 * 在 tcp_write_xmit() 中，如果skb中数据量过大，超过了发送窗口和拥塞窗口的限定，只允许发送skb的一部分，
 		 * 那么就需要将skb拆分成两段，前半段长度为len，本次可以发送，后半段保存在新分配的skb中，
 		 * 在发送队列sk_write_queue中将后半段插入到前半段的后面，这样可以保证数据的顺序发送
 		 *
@@ -2886,7 +2979,9 @@ repair:
 		/* Advance the send_head.  This one is sent out.
 		 * This call will increment packets_out.
 		 */
-		/* 发送成功了，则进行发送之后的数据更新，包括统计计数和复位重传定时器等。*/
+		/* 发送成功了，则进行发送之后的数据更新，例如：packets_out，
+		 * 包括统计计数和复位重传定时器等。
+		 */
 		tcp_event_new_data_sent(sk, skb);
 
 		
@@ -2932,7 +3027,9 @@ repair:
 		 */
 		is_cwnd_limited |= (tcp_packets_in_flight(tp) >= tp->snd_cwnd);
 
-		/* 拥塞窗口校验 */
+		/* 重要：
+		 * 	拥塞窗口校验，即CWV算法检查。
+		 */
 		tcp_cwnd_validate(sk, is_cwnd_limited);
 
 		return false;
