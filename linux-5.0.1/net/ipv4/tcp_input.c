@@ -6254,7 +6254,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 			/* Bulk data transfer: receiver */
 			__skb_pull(skb, tcp_header_len);
 
-			/* 将skb放入到sk_receive_queue队列中 */
+			/* 将skb放入到 sk->sk_receive_queue 队列中 */
 			eaten = tcp_queue_rcv(sk, skb, &fragstolen);
 
 			/* ack应答标记；RTT测量等任务 */

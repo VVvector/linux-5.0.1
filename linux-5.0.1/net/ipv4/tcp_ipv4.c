@@ -2120,22 +2120,33 @@ process:
 	sk_incoming_cpu_update(sk);
 
 	/*
-	 * 在接收 TCP 段之前，需要对传输控制块加锁，以同步对传输控制块接收队列的访问。
+	 * 在接收 TCP 段之前，获取sk->sk_lock.slock自旋锁，以同步对传输控制块接收队列的访问。
+	 *
+	 * 从这里也可以看出，如果有两个softirq同时收包，实际串行化地进行RX处理。
 	 */
 	bh_lock_sock_nested(sk);
 	tcp_segs_in(tcp_sk(sk), skb);
 	ret = 0;
 
-	/* 进程此时没有访问传输控制块，即这里可以看出：
-	 * linux的socket在进行读取或者写数据时，都会持有该sock lock，这时，这里就会走到tcp_add_backlog()。
+	/* 如果没有用户进程锁定该TCB, 将数据接收到   sk->sk_receive_queue 中
+	 * tcp_sendmsg() -> lock_sock() -- tcp.c 可能会持锁。
+	 *
+	 * 思考：
+	 * 	1. 如果用户进行持有锁（写数据或者读数据），实际下层只能将数据放入backlog中，等待用户
+	 *		进程调用 release_sock() 是在进行收包处理。即收包操作也可能运行在用户进程上下文。
+	 *	2. 如果下层正在进行收包，上层也不能进行收发数据。
+	 *
+	 *	== 即实际linux对tcp的实现是串行化的。
 	 */
 	if (!sock_owned_by_user(sk)) {
 		/* 将skb放入sk->sk_receive_queue中 */
 		ret = tcp_v4_do_rcv(sk, skb);
 
-	/* 注意： 这里可能就会有ack merge的情况，即相当于delay ack，从而，会影响拥塞算法。 */
+	/* 否则，数据将被接收到后备队列 sk->sk_backlog 中。（也会受到sk->sk_rmem_alloc的限制）
+	 * 注意：
+	 *	这里可能就会有ack merge的情况，即相当于delay ack。
+	 */
 	} else if (tcp_add_backlog(sk, skb)) {
-		/* 添加到后备队列成功 sk->sk_backlog（也会受到sk->sk_rmem_alloc的限制）*/
 		goto discard_and_relse;
 	}
 	bh_unlock_sock(sk);

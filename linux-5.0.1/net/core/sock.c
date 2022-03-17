@@ -2284,12 +2284,18 @@ bool sk_page_frag_refill(struct sock *sk, struct page_frag *pfrag)
 }
 EXPORT_SYMBOL(sk_page_frag_refill);
 
+/*
+ * __lock_sock()将进程挂到 sk->sk_lock 中的等待队列wq上，直到没有进程再持有该该传输控制块时返回。
+ * 注意：
+ * 调用时已经持有sk->sk_lock，睡眠之前释放锁，返回前再次持有锁
+ */
 static void __lock_sock(struct sock *sk)
 	__releases(&sk->sk_lock.slock)
 	__acquires(&sk->sk_lock.slock)
 {
 	DEFINE_WAIT(wait);
 
+	/* 直到没有人再持有该TCB了。 */
 	for (;;) {
 		prepare_to_wait_exclusive(&sk->sk_lock.wq, &wait,
 					TASK_UNINTERRUPTIBLE);
@@ -2840,16 +2846,27 @@ EXPORT_SYMBOL(sock_init_data);
 
 void lock_sock_nested(struct sock *sk, int subclass)
 {
+	/* 提醒该接口可能休眠，即它只能在进程上下文使用。*/
 	might_sleep();
+
+	/* 持锁并关闭下半部 */
 	spin_lock_bh(&sk->sk_lock.slock);
+
+	/* 表示当前进程已经持有该TCB，调用__lock_sock()等待。 */
 	if (sk->sk_lock.owned)
 		__lock_sock(sk);
+
+	/* 执行到此处，表示当前进程可以放心地锁定该TCB了。 */
 	sk->sk_lock.owned = 1;
+
+	/* 释放自旋锁，但是没有开启下半部 */
 	spin_unlock(&sk->sk_lock.slock);
 	/*
 	 * The sk_lock has mutex_lock() semantics here:
 	 */
 	mutex_acquire(&sk->sk_lock.dep_map, subclass, 0, _RET_IP_);
+
+	/* 启动下半部 */
 	local_bh_enable();
 }
 EXPORT_SYMBOL(lock_sock_nested);
@@ -2858,7 +2875,9 @@ void release_sock(struct sock *sk)
 {
 	spin_lock_bh(&sk->sk_lock.slock);
 
-	/* 如果backlog有packet，就会收包。 */
+	/* 如果backlog有packet，就会收包。
+	 * 实际会调用 sk_backlog_rcv()->sk->sk_prot->backlog_rcv()  / tcp_prot->backlog_rcv() -> tcp_v4_do_rcv() 
+	 */
 	if (sk->sk_backlog.tail)
 		__release_sock(sk);
 
@@ -2868,9 +2887,13 @@ void release_sock(struct sock *sk)
 	if (sk->sk_prot->release_cb)
 		sk->sk_prot->release_cb(sk);
 
+	/* 设置owned为0，即表示当前进程不再锁定该TCB。 */
 	sock_release_ownership(sk);
+
+	/* 唤醒其他等待锁定该TCB的进程 */
 	if (waitqueue_active(&sk->sk_lock.wq))
 		wake_up(&sk->sk_lock.wq);
+
 	spin_unlock_bh(&sk->sk_lock.slock);
 }
 EXPORT_SYMBOL(release_sock);
