@@ -458,7 +458,9 @@ void tcp_init_sock(struct sock *sk)
 
 	sk->sk_state = TCP_CLOSE;
 
-	/* 当套接字的写缓冲区有效时，调用该函数。 */
+	/* 当套接字的写缓冲区有效时，调用该函数。
+	 * 用于唤醒上层等待写数据的线程。
+	 */
 	sk->sk_write_space = sk_stream_write_space;
 	sock_set_flag(sk, SOCK_USE_WRITE_QUEUE);
 

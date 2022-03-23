@@ -5235,7 +5235,7 @@ void tcp_data_ready(struct sock *sk)
 	if (avail < sk->sk_rcvlowat && !sock_flag(sk, SOCK_DONE))
 		return;
 
-	/* 这里即 sock_def_readable() */
+	/* 这里即 sock_def_readable() 唤醒socket上阻塞掉的进程。*/
 	sk->sk_data_ready(sk);
 }
 
@@ -5310,6 +5310,7 @@ queue_and_out:
 		if (eaten > 0)
 			kfree_skb_partial(skb, fragstolen);
 		if (!sock_flag(sk, SOCK_DEAD))
+
 			tcp_data_ready(sk);
 		return;
 	}
@@ -5701,6 +5702,7 @@ static void tcp_new_space(struct sock *sk)
 		tp->snd_cwnd_stamp = tcp_jiffies32;
 	}
 
+	/* 唤醒上层等待写的线程。 sk_stream_write_space() */
 	sk->sk_write_space(sk);
 }
 
@@ -5710,6 +5712,8 @@ static void tcp_check_space(struct sock *sk)
 		sock_reset_flag(sk, SOCK_QUEUE_SHRUNK);
 		/* pairs with tcp_poll() */
 		smp_mb();
+
+		/* 如果socket的buffer已经用完，即可能阻塞上层了，就需要唤醒上层应用进程。 */
 		if (sk->sk_socket &&
 		    test_bit(SOCK_NOSPACE, &sk->sk_socket->flags)) {
 			tcp_new_space(sk);
@@ -5719,10 +5723,15 @@ static void tcp_check_space(struct sock *sk)
 	}
 }
 
-/* 检测发送队列中是否还有数据包需要发送，如果有，则调用tcp_write_xmit()来处理发送过程。 */
+/* 检测发送队列中是否还有数据包需要发送，如果有，则调用tcp_write_xmit()来处理发送过程。
+ * 并且尝试 唤醒上层等待写的用户进程。
+ */
 static inline void tcp_data_snd_check(struct sock *sk)
 {
+	/* 尝试发包 --     __tcp_push_pending_frames() */
 	tcp_push_pending_frames(sk);
+
+	/* 检查并唤醒等待写的用户进程。-- select()/poll()/epoll() */
 	tcp_check_space(sk);
 }
 

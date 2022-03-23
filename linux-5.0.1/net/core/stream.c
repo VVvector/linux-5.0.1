@@ -37,11 +37,23 @@ void sk_stream_write_space(struct sock *sk)
 
 		rcu_read_lock();
 		wq = rcu_dereference(sk->sk_wq);
+
+		/*
+		 * skwq_has_sleeper 对于简单的 recvfrom 系统调用来说，确实是判断是否有进程阻塞。
+		 * 但是，对于 epoll 下的 socket 只是判断等待队列不为空，不一定有进程阻塞的。
+		 */
 		if (skwq_has_sleeper(wq))
+			/*
+			 * wake_up_interruptible_poll，只是会进入到 socket 等待队列项上设置的回调函数，
+			 * 并不一定有唤醒进程的操作。
+			 * 添加wait queue时，poll_initwait() 注册的 pollwake() 。
+			 */
 			wake_up_interruptible_poll(&wq->wait, EPOLLOUT |
 						EPOLLWRNORM | EPOLLWRBAND);
+		
 		if (wq && wq->fasync_list && !(sk->sk_shutdown & SEND_SHUTDOWN))
 			sock_wake_async(wq, SOCK_WAKE_SPACE, POLL_OUT);
+
 		rcu_read_unlock();
 	}
 }

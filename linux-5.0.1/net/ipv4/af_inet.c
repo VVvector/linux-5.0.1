@@ -1033,7 +1033,25 @@ const struct proto_ops inet_stream_ops = {
 	.socketpair	   = sock_no_socketpair,
 	.accept		   = inet_accept,
 	.getname	   = inet_getname,
+
+	/* https://www.cnblogs.com/LoyenWang/p/12622904.html
+	 * 1. select系统调用，最终的核心逻辑是在 do_select() 函数中处理的，参考fs/select.c文件；
+	 * 2. do_select() 函数中，有几个关键的操作：
+	 *	a. 初始化poll_wqueues结构，包括几个关键函数指针的初始化，用于驱动中进行回调处理；
+	 *	b. 循环遍历监测的文件描述符，并且调用f_op->poll()函数，如果有监测条件满足，则会跳出循环；
+	 *	c. 在监测的文件描述符都不满足条件时，poll_schedule_timeout让当前进程进行睡眠，超时唤醒，
+	 *	   或者被所属的等待队列唤醒；
+	 * 3. do_select函数的循环退出条件有三个：
+	 *	a. 检测的文件描述符满足条件；
+	 *	b. 超时；
+	 *	c. 有信号要处理；
+	 *
+	 * 在设备驱动程序中实现的poll()函数，会在do_select()中被调用，而驱动中的poll()函数，
+	 * 需要调用 poll_wait() 函数，poll_wait函数本身很简单，就是去回调函数p->_qproc()，
+	 * 这个回调函数正是poll_initwait()函数中初始化的__pollwait()；
+	 */
 	.poll		   = tcp_poll,
+
 	.ioctl		   = inet_ioctl,
 	.listen		   = inet_listen,
 	.shutdown	   = inet_shutdown,

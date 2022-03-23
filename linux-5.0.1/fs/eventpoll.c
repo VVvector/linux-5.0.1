@@ -1137,12 +1137,20 @@ struct file *get_epoll_tfile_raw_ptr(struct file *file, int tfd,
  * mechanism. It is called by the stored file descriptors when they
  * have events to report.
  */
+/*
+ * https://zhuanlan.zhihu.com/p/361750240
+ */
 static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
 {
 	int pwake = 0;
 	unsigned long flags;
+
+	/* 获取到wait对应的epitem */
 	struct epitem *epi = ep_item_from_wait(wait);
+
+	/* 获取 epitem 对应的 eventpoll 结构体 */
 	struct eventpoll *ep = epi->ep;
+
 	__poll_t pollflags = key_to_poll(key);
 	int ewake = 0;
 
@@ -1192,6 +1200,7 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 
 	/* If this file is already in the ready list we exit soon */
 	if (!ep_is_linked(epi)) {
+		/* 1. 将当前epitem 添加到 eventpoll 的就绪队列中 */
 		list_add_tail(&epi->rdllink, &ep->rdllist);
 		ep_pm_stay_awake_rcu(epi);
 	}
@@ -1217,6 +1226,17 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 				break;
 			}
 		}
+
+		/* 查看 eventpoll 的等待队列上是否有在等待 
+		 * 调用 wake_up_locked() => __wake_up_locked() => __wake_up_common。
+		 * 在 __wake_up_common() 里， 调用 curr->func。 这里的 func 是在 epoll_wait 
+		 * 是传入的 default_wake_function() 函数。
+		 *
+		 * 将epoll_wait进程推入可运行队列，等待内核重新调度进程。然后epoll_wait对应的这个进程重新运行后，
+		 * 就从 schedule 恢复。
+		 * 当进程醒来后，继续从 epoll_wait 时暂停的代码继续执行。把 rdlist 中就绪的事件返回给用户进程。
+		 * 从用户角度来看，epoll_wait 只是多等了一会儿而已，但执行流程还是顺序的。-- 在 ep_poll() 等待。
+		 */
 		wake_up_locked(&ep->wq);
 	}
 	if (waitqueue_active(&ep->poll_wait))

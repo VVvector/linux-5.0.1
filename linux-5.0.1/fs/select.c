@@ -471,6 +471,23 @@ static inline void wait_key_set(poll_table *wait, unsigned long in,
 		wait->_key |= POLLOUT_SET;
 }
 
+/* https://www.cnblogs.com/LoyenWang/p/12622904.html
+* 1. select系统调用，最终的核心逻辑是在 do_select() 函数中处理的，参考fs/select.c文件；
+* 2. do_select函数中，有几个关键的操作：
+*      a. 初始化poll_wqueues结构，包括几个关键函数指针的初始化，用于驱动中进行回调处理；
+*      b. 循环遍历监测的文件描述符，并且调用f_op->poll() 函数，如果有监测条件满足，则会跳出循环；
+*      c. 在监测的文件描述符都不满足条件时，poll_schedule_timeout让当前进程进行睡眠，超时唤醒，
+*	  或者被所属的等待队列唤醒；
+* 3. do_select函数的循环退出条件有三个：
+*      a. 检测的文件描述符满足条件；
+*      b. 超时；
+*      c. 有信号要处理；
+*
+* select与poll本质上基本类似，其中select是由BSD UNIX引入，poll由SystemV引入；
+* select与poll需要轮询文件描述符集合，并在用户态和内核态之间进行拷贝，在文件描述符很多的情况下开销会比较大，
+* select默认支持的文件描述符数量是1024；
+*
+*/
 static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 {
 	ktime_t expire, *to = NULL;
@@ -489,6 +506,7 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 		return retval;
 	n = retval;
 
+	/* 初始化 __pollwait()，休眠函数 __pollwait()，以及唤醒函数 pollwake() 。 */
 	poll_initwait(&table);
 	wait = &table.pt;
 	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
@@ -529,6 +547,10 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 				if (f.file) {
 					wait_key_set(wait, in, out, bit,
 						     busy_flag);
+
+					/* 调用poll函数 例如： tcp_poll() -> __pollwait() 
+					 * 实际会添加等待队列。
+					 */
 					mask = vfs_poll(f.file, wait);
 
 					fdput(f);
@@ -569,6 +591,8 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 				*rexp = res_ex;
 			cond_resched();
 		}
+
+		/* 有信号要处理 */
 		wait->_qproc = NULL;
 		if (retval || timed_out || signal_pending(current))
 			break;
@@ -598,6 +622,9 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 			to = &expire;
 		}
 
+		/* 当检测的文件描述符都不满足条件时，poll_schedule_timeout() 让当前进程
+		 * 进行睡眠，超时唤醒，或者 被所属的等待队列唤醒。
+		 */
 		if (!poll_schedule_timeout(&table, TASK_INTERRUPTIBLE,
 					   to, slack))
 			timed_out = 1;

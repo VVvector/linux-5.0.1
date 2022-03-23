@@ -570,11 +570,16 @@ struct sock {
 
 	/* 当socket状态发生变化时，唤醒那些等待本套接口的进程。在创建套接口时初始化。 */
 	void			(*sk_state_change)(struct sock *sk);
+
+	/* 当收到数据时，协议成调用唤醒等待读数据的用户进程。例如：tcp_rcv_established() -> tcp_data_ready() */
 	void			(*sk_data_ready)(struct sock *sk);
 
 	/**
 	 * 在发送缓存大小发生变化时，或者套接口被释放时，唤醒等待本套接口的进程。
-	 * ipv4默认为sock_def_write_space，TCP中默认为sk_stream_write_space。
+	 * ipv4默认为 sock_def_write_space() ，TCP中默认为 sk_stream_write_space() 。
+	 * tcp:
+	 *	1. tcp_init_sock()进行初始化 sk_write_space= sk_stream_write_space()
+	 *	2. 在 tcp_data_snd_check() -> tcp_check_space() -> tcp_new_space() 中进行唤醒。
 	 */
 	void			(*sk_write_space)(struct sock *sk);
 
@@ -2247,6 +2252,11 @@ static inline void sock_poll_wait(struct file *filp, struct socket *sock,
 				  poll_table *p)
 {
 	if (!poll_does_not_wait(p)) {
+
+		/* 以select为例：
+		 * 这里实际调用 poll_initwait() 中设置的 __pollwait()。
+		 * 即添加wait queue中。
+		 */
 		poll_wait(filp, &sock->wq->wait, p);
 		/* We need to be sure we are in sync with the
 		 * socket flags modification.

@@ -2698,7 +2698,19 @@ static void sock_def_readable(struct sock *sk)
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
+
+	/* 判断等待队列不为空，而不是判断是否有阻塞的进程。
+	 * 注意：
+	 * 	skwq_has_sleeper() 对于简单的recvfrom系统调用来说，确实是判断是否有进程阻塞，
+	 * 	但是，对于epoll下的socket只是判断等待队列不为空，不一定有进程阻塞的。
+	 */
 	if (skwq_has_sleeper(wq))
+		/* 执行等待队列项上的回到函数
+		 * 注意：
+		 * 	wake_up_interruptible_sync_poll() 只是会进入到socket等待队列项上设置的回调函数，
+		 *	并不一定有唤醒进程的操作。
+		 *	实际对于epoll来说，在ep_insert()时，会把 ep_poll_callback() 设置为回调函数。
+		 */
 		wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | EPOLLPRI |
 						EPOLLRDNORM | EPOLLRDBAND);
 	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
