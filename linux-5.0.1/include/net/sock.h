@@ -441,11 +441,16 @@ struct sock {
 	
 	/* 已发送给ip层以下的数据量， 在TSQ检查中，会与sk_pacing_rate等数据做比较，限制发送量。
 	 * __tcp_transmit_skb()中，当成功发送给ip层以下，就会增加。
+	 * 如果sk_wmem_alloc大于一定值，表示发送了太多的数据到qdisc或者设备队列。
+	 * 可用于TSQ，控制本地队列的长度。
+	 * 
+	 * 如果本地队列过长，就会导致bufferbloat 和异常RTT等。
+	 * tcp_transmit_skb()中增加，加上发送的skb的truesize。
+	 * tcp_wfree()中减少，一般由网卡的tx done中进行 dev_kfree_skb_any() -> net_tx_action() -> skb->destructor() 中调用。
 	 */
 	refcount_t		sk_wmem_alloc;
 	unsigned long		sk_tsq_flags;
 
-	/*  */
 	union {
 		/* 指向发送队列中下一个要发送的数据包。
 		 * 用来跟踪哪些包还未发送的，而不是用来进行发送的，如果为空，则意味着

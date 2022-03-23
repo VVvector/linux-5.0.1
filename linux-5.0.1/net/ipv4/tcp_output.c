@@ -876,10 +876,18 @@ static void tcp_tsq_write(struct sock *sk)
 static void tcp_tsq_handler(struct sock *sk)
 {
 	bh_lock_sock(sk);
+
+	/* 没有被userspace持有该socket，就进行数据的发送。*/
 	if (!sock_owned_by_user(sk))
 		tcp_tsq_write(sk);
+
+	/* 如果被userspace持有该socket，就设置TCP_TSQ_DEFERRED，并且返回之前的值。
+	 * 等到userspace的系统调用退出时，进行检查和执行发包。
+	 * tcp_sendmsg() -> release_sock() 
+	 */
 	else if (!test_and_set_bit(TCP_TSQ_DEFERRED, &sk->sk_tsq_flags))
 		sock_hold(sk);
+
 	bh_unlock_sock(sk);
 }
 /*
@@ -914,6 +922,7 @@ static void tcp_tasklet_func(unsigned long data)
 
 		sk = (struct sock *)tp;
 		smp_mb__before_atomic();
+		
 		clear_bit(TSQ_QUEUED, &sk->sk_tsq_flags);
 
 		tcp_tsq_handler(sk);
@@ -944,11 +953,15 @@ void tcp_release_cb(struct sock *sk)
 	/* perform an atomic operation only if at least one flag is set */
 	do {
 		flags = sk->sk_tsq_flags;
+
+		/* 如果不需要任何延迟，则直接返回。 */
 		if (!(flags & TCP_DEFERRED_ALL))
 			return;
+
 		nflags = flags & ~TCP_DEFERRED_ALL;
 	} while (cmpxchg(&sk->sk_tsq_flags, flags, nflags) != flags);
 
+	/* 尝试TSQ的发包操作 */
 	if (flags & TCPF_TSQ_DEFERRED) {
 		tcp_tsq_write(sk);
 		__sock_put(sk);
@@ -964,14 +977,30 @@ void tcp_release_cb(struct sock *sk)
 	 */
 	sock_release_ownership(sk);
 
+	/* TCP发送超时延迟处理：
+	 * 如果在发送超时处理时，套接口正在被用户层的系统调用使用，将处理延后到用户层处理完成之后，
+	 * 当用户层释放套接口时，由tcp_release_cb函数进行相应处理。此处，设置标志TCP_WRITE_TIMER_DEFERRED。
+	 */
 	if (flags & TCPF_WRITE_TIMER_DEFERRED) {
 		tcp_write_timer_handler(sk);
 		__sock_put(sk);
 	}
+
+	/* 延时ACK定时器：
+	 * TCP协议的延时ACK超时处理函数tcp_delack_timer，如果在其超时调用时，检查用户层的控制流程在处理此套接口
+	 * sock_owned_by_user，设置ACK被阻止blocked标志，并且设置TCP_DELACK_TIMER_DEFERRED标志，
+	 * 表明延时ACK需要在用户调用退出时继续执行。
+	 */
 	if (flags & TCPF_DELACK_TIMER_DEFERRED) {
 		tcp_delack_timer_handler(sk);
 		__sock_put(sk);
 	}
+
+	/* ICMP分片消息延迟处理：
+	 * 在接收到ICMP错误信息后，对于IPv4而言，如果其错误码为ICMP_FRAG_NEEDED，对于IPv6而言，
+	 * 如果其类型为ICMPV6_PKT_TOOBIG，都表明发送的数据包太大，需要进行分片。此时，如果套接口被用户层系统调用使用，
+	 * 设置TCP_MTU_REDUCED_DEFERRED标志，等到用户系统调用退出时继续处理。
+	 */
 	if (flags & TCPF_MTU_REDUCED_DEFERRED) {
 		inet_csk(sk)->icsk_af_ops->mtu_reduced(sk);
 		__sock_put(sk);
@@ -1000,7 +1029,7 @@ void __init tcp_tasklet_init(void)
  */
 /*
  * 当数据报文skb释放时（如TX完成中断发生），检查其所属套接口的TSQ阻塞状态，如下发送缓存释放函数tcp_wfree。
- * 首先将发送缓存sk_wmem_alloc的值将其skb的truesize-1的值，保留1个计数是由于此函数之后或者tcp_tasklet_func函数
+ * 首先将发送缓存sk_wmem_alloc的值将其skb的 truesize-1 的值，保留1个计数是由于此函数之后或者tcp_tasklet_func函数
  * 将调用sk_free函数，如果sk_wmem_alloc为1，sk_free将释放套接口结构。其次如果当前进程上下文在ksoftirqd中，
  * 并且Qdisc或者设备队列中还有数据未发送，表明系统当前繁忙，不在进行TSQ拥塞处理，避免导致加重系统的繁忙状况，
  * 也可使此TCP流的确认ACK报文得以处理。
@@ -1028,6 +1057,10 @@ void tcp_wfree(struct sk_buff *skb)
 	 * - chance for incoming ACK (processed by another cpu maybe)
 	 *   to migrate this flow (skb->ooo_okay will be eventually set)
 	 */
+	/*
+	 * 如果当前进程上下文在ksoftirqd中，并且Qdisc或者设备队列中还有数据未发送，表明系统当前繁忙，
+	 * 不再进行TSQ拥塞处理，避免导致加重系统的繁忙状况，也可使此TCP流的确认ACK报文得以处理。
+	 */
 	if (refcount_read(&sk->sk_wmem_alloc) >= SKB_TRUESIZE(1) && this_cpu_ksoftirqd() == current)
 		goto out;
 
@@ -1035,10 +1068,14 @@ void tcp_wfree(struct sk_buff *skb)
 		struct tsq_tasklet *tsq;
 		bool empty;
 
+		/* 如果本socket没有被设置TSQF_THROTTLED，或者 已经被设置TSQF_QUEUED，则不处理。   */
 		if (!(oval & TSQF_THROTTLED) || (oval & TSQF_QUEUED))
 			goto out;
 
+		/* 清除本socket的  TSQF_THROTTLED，并设置为TSQF_QUEUED */
 		nval = (oval & ~TSQF_THROTTLED) | TSQF_QUEUED;
+
+		/* 再次对比，因为有可能在这期间socket的阻塞状态已经缓解。 */
 		nval = cmpxchg(&sk->sk_tsq_flags, oval, nval);
 		if (nval != oval)
 			continue;
@@ -1049,11 +1086,13 @@ void tcp_wfree(struct sk_buff *skb)
 		empty = list_empty(&tsq->head);
 
 		/*
-		 * /将socket加入到TSQ队列中，会在TSQ的tasklet中进行发包。
+		 * 将socket加入到TSQ队列中，会在TSQ的tasklet中进行发包。
+		 * 并且 触发tasklet。
 		 */
 		list_add(&tp->tsq_node, &tsq->head);
 		if (empty)
 			tasklet_schedule(&tsq->tasklet);
+
 		local_irq_restore(flags);
 		return;
 	}
@@ -1214,6 +1253,10 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
 
 	skb_orphan(skb);
 	skb->sk = sk;
+
+	/* 设置该skb被释放时所调用的函数，
+	 * 注意：tcp_wfree()
+	 */
 	skb->destructor = skb_is_tcp_pure_ack(skb) ? __sock_wfree : tcp_wfree;
 
 	/* 如果sock已经有计算好sk_txhash，则直接将sk->sk_txhash赋值给skb->l4_hash，并设置skb->l4_hash。
@@ -2625,7 +2668,8 @@ static bool tcp_pacing_check(struct sock *sk)
  * TSQ工作原理：
  * 1. 设置net.ipv4.tcp_limit_output_bytes内核选项来指定 sysctl_tcp_limit_output_bytes--1Mbytes 的值；
  * 2. 在TCP发包时，系统调用使用 tcp_write_xmit() 来调用 tcp_transmit_skb() 发送skb时，
- *	会设置使得skb在释放时会调用 tcp_wfree() 函数，并增加sk->sk_wmem_alloc的值。
+ *	会设置本skb在释放时会调用的 tcp_wfree() 函数（用于减小sk_wmem_alloc，以及TSQ处理），
+ *	并增加sk->sk_wmem_alloc的值。
  * 3. 当sk->sk_wmem_alloc达到限制时，即底层队列允许当前TCP连接放入的数据的总大小达到限制时（此时底层队列未必会满），
  *	tcp_write_xmit() 就不允许继续发送skb，而是设置socket标记为TSQ_THROTTLED，使得在由tcp_transmit_skb() 
  *	发送的任意skb在释放时会调用 tcp_wfree()，将发送skb的任务放入TSQ tasklet - tcp_tasklet_func() 中，然后系统调用返回。
@@ -2645,7 +2689,9 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 	/* 取以下两者之间的较大值：
 	 * 1）当前发送的数据报文skb结构所占用空间的两倍值（2 * skb->truesize）；
 	 * 2）以及当前大约每毫秒的流量值（其通过 sk_pacing_rate 计算而来，内核将 sk_pacing_shift 变量定义为10，
-	 * 将当前每秒钟的流量（sk_pacing_rate）除以2的10次方，得到大约1毫秒的流量值）。*/
+	 * 	将当前每秒钟的流量（sk_pacing_rate）除以2的10次方，得到大约1毫秒的流量值）。
+	 * 	注：sk_pacing_rate的计算是在 tcp_ack() -> tcp_update_pacing_rate()中进行。
+	 */
 	limit = max_t(unsigned long,
 		      2 * skb->truesize,
 		      sk->sk_pacing_rate >> sk->sk_pacing_shift);
@@ -2670,6 +2716,9 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 	 * 在此之前，设置sk_tsp_flags的标志位TSQ_THROTTLED，表明是由于TSQ检查结果导致的不能发送。
 	 * 另外，有可能在此函数设置TSQ_THROTTLED标志之前，发生了TX中断，进行了skb释放操作，
 	 * 导致了sk_wmem_alloc的递减，所以，在返回前再次判断sk_wmem_alloc是否超过限值limit。
+	 *
+	 * 即：已经发送到qdisc或netdev，但还没有发往网络（tx done）的skb buffer大小限制在
+	 *	当前要发送的skb的2倍或pacing rate的1ms的数据量。
 	 */
 	if (refcount_read(&sk->sk_wmem_alloc) > limit) {
 		/* Always send skb if rtx queue is empty.
@@ -2680,7 +2729,9 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 		if (tcp_rtx_queue_empty(sk))
 			return false;
 
-		/* 设置该sock为TSQ，即tcp_wfree() 才会将socket放入到TSQ队列中，等待tasklet发送。*/
+		/* 设置该sock为TSQ，当网卡tx done发生且有做skb free时，即会调用tcp_wfree()，
+		 * 才会将socket放入到TSQ队列中，并schedule tasklet继续发送数据。
+		 */
 		set_bit(TSQ_THROTTLED, &sk->sk_tsq_flags);
 
 		/* It is possible TX completion already happened

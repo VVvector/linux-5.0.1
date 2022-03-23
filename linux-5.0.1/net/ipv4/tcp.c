@@ -796,10 +796,10 @@ static void tcp_push(struct sock *sk, int flags, int mss_now,
 	tcp_mark_urg(tp, flags);
 
 	/* 当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少
-		总的发包个数。tcp_autocorking的思路是当规则队列Qdisc、或网卡的发送队列中有尚未发出的
-		数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
-		包成功发送出去为止。
-	*/
+	 * 总的发包个数。tcp_autocorking的思路是当规则队列Qdisc、或网卡的发送队列中有尚未发出的
+	 * 数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
+	 * 包成功发送出去为止。
+	 */
 	/* 如果需要自动阻塞小包, 有相关条件进行判断。*/
 	if (tcp_should_autocork(sk, skb, size_goal)) {
 

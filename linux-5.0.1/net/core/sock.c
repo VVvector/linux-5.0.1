@@ -2881,6 +2881,7 @@ void release_sock(struct sock *sk)
 	if (sk->sk_backlog.tail)
 		__release_sock(sk);
 
+	/* 对于tcp来说，实际调用的是 tcp_release_cb() */
 	/* Warning : release_cb() might need to release sk ownership,
 	 * ie call sock_release_ownership(sk) before us.
 	 */

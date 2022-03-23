@@ -4753,6 +4753,13 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 {
 	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
 
+	/*
+	 * 如果当前CPU的softnet_data中存在已完成输出待释放的数据包，则遍历
+	 * completion_queue队列，释放该队列中所有数据包，对于发送而言，
+	 * 硬中断只是通过网卡把包发走，但是回收内存的事情是通过软中断来做的，
+	 * 设备驱动发送完数据之后，会调用 dev_kfree_skb_irq() ，不过也有的设备比较个别
+	 * 自己去free，这个其实也没有什么问题的...省掉了软中断的处理。
+	*/
 	if (sd->completion_queue) {
 		struct sk_buff *clist;
 
@@ -4761,14 +4768,6 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 		sd->completion_queue = NULL;
 		local_irq_enable();
 
-		/*
-			  * 如果当前CPU的softnet_data中存在已完成
-			  * 输出待释放的数据包，则遍历
-			  * completion_queue队列，释放该队列中所有
-			  * 数据包，对于发送而言，硬中断只是通过网卡把包发走，但是回收内存的事情是通过软中断来做的，
-			*设备驱动发送完数据之后，会调用dev_kfree_skb_irq，不过也有的设备比较个别
-			*自己去free，这个其实也没有什么问题的...省掉了软中断的处理
-		*/
 		while (clist) {
 			struct sk_buff *skb = clist;
 
@@ -4790,11 +4789,10 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 	}
 
 	/*
-		  * 如果当前CPU的softnet_data中存在待处理的输出网络
-		  * 设备，则遍历output_queue队列，调用qdisc_run()来发送
-		  * 数据包或者再次调度数据包输出软中断，在
-		  * 合适的时机发送数据包。
-		  */
+	* 如果当前CPU的softnet_data中存在待处理的输出网络
+	* 设备，则遍历output_queue队列，调用qdisc_run()来发送
+	* 数据包或者再次调度数据包输出软中断，在合适的时机发送数据包。
+	*/
 
 	if (sd->output_queue) {
 		struct Qdisc *head;

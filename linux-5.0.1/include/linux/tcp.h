@@ -634,9 +634,21 @@ struct tcp_sock {
 };
 
 enum tsq_enum {
+	/* 表示已经在 tcp_write_xmit()->tcp_small_queue_check()中 检查到TSQ不过，需要暂停发送到qdisc。
+	 * 等到网卡tx done，并进行skb free时，即调用 tcp_wfree()时，才会清除，并挂入到tsq中，schedule tasklet继续发送。
+	 */
 	TSQ_THROTTLED,
+
+	/* 表示在 tcp_wfree() 中已经把该socket放入了 tsq->head 中，等待tasklet处理。 
+	 * 防止重复queue。当实际执行tcp_tsq_handler()时，在tcp_tasklet_func()才会清除。
+	 */
 	TSQ_QUEUED,
-	TCP_TSQ_DEFERRED,	   /* tcp_tasklet_func() found socket was owned */
+
+	/*
+	 * 表示在 tsq tasklet中检查到 userspace在持有该socket，暂时不能发包。
+	 * 等到userspace释放该socket时，即release_sock()->tcp_release_cb()时，会再次检查并发包。
+	 */
+	TCP_TSQ_DEFERRED,	   /* tcp_tasklet_func() found socket was owned */ 
 	TCP_WRITE_TIMER_DEFERRED,  /* tcp_write_timer() found socket was owned */
 	TCP_DELACK_TIMER_DEFERRED, /* tcp_delack_timer() found socket was owned */
 	TCP_MTU_REDUCED_DEFERRED,  /* tcp_v{4|6}_err() could not call
