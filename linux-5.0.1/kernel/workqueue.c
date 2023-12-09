@@ -4428,7 +4428,7 @@ struct workqueue_struct *__alloc_workqueue_key(const char *fmt,
 	if (alloc_and_link_pwqs(wq) < 0)
 		goto err_free_wq;
 
-	/* 如果有WQ_MEM_RECLAIM, 则需要提前创建对应的rescuer_thread()内核进程。
+	/* 如果有WQ_MEM_RECLAIM, 则需要提前创建对应的 rescuer_thread() 内核进程。
 	 * 当内存紧张时，会用代理执行workqueue中的work。
 	 */
 	if (wq_online && init_rescuer(wq) < 0)

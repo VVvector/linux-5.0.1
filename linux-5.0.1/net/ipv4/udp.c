@@ -1345,6 +1345,7 @@ back_from_confirm:
 		 *
 		 * 然后，把用户数据打包到skb中，有数据拷贝，并添加ip header。
 		 * 所有的data在一个ip packet中，因为udp是有边界的协议。
+		 *
 		 * 
 		 * 在构建skb的时候，ip_make_skb()依赖的底层代码需要使用一个corking变量和一个queue变量，
 		 * skb将通过queue变量传入。如果socket未被cork，则会传入一个假的corking变量和一个空队列。

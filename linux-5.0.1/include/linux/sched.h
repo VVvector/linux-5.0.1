@@ -1579,9 +1579,12 @@ extern void ia64_set_curr_task(int cpu, struct task_struct *p);
 void yield(void);
 
 union thread_union {
+	//x86, ubuntu: CONFIG_ARCH_TASK_STRUCT_ON_STACK is not set
 #ifndef CONFIG_ARCH_TASK_STRUCT_ON_STACK
 	struct task_struct task;
 #endif
+
+	//x86, ubunut: CONFIG_THREAD_INFO_IN_TASK=y
 #ifndef CONFIG_THREAD_INFO_IN_TASK
 	struct thread_info thread_info;
 #endif

@@ -637,15 +637,41 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
 	skb_copy_secmark(to, from);
 }
 
+/*
+ * https://blog.csdn.net/wangquan1992/article/details/109221056
+ * https://www.cnblogs.com/wanpengcoder/p/11755374.html
+ *
+ * ip_fragment函数 用于判断是否进行分片，在没有设置DF标记的情况下进入分片，如果设置了DF标记，则继续判断，
+ * 如果不允许DF分片或者收到的最大分片大于MTU大小，则回复ICMP，释放skb，其余情况仍然需要走分片。
+ *
+ * 会有两方面的IP数据包：
+ * 1. 本地产生的数据包
+ * 2. 转发的数据包
+ * 这两种数据包的长度如果超过了出口设备的MTU(或者PMTU)，网络层必须先对其进行分段，使其适配出口设备的MTU。
+ *
+ * 对于本机发送的数据包，TCP在组织skb数据时，本身就会考虑MTU的限制（MSS）, 它会尽可能的保证每个skb携带的数据不会超过MTU,
+ * 就是为了避免网络层再进行分段。
+ * UDP它不会向TCP一样有MSS的限制，但是，它会调用ip_append_data()组织skb数据，该函数在组织skb过程中，会将属于同一个IP报文
+ * 的所有分片都组织在frag_list，这样，网络层在执行分片时，会节省很多工作量。
+ *
+ * 对于转发的数据包，则无法向本地发送一样，提前做很多的工作，网络层必须依靠自己来兼容所有可能的情况。
+ *
+ * 综上，网络层在实现分段时，设计了快速路径和慢速路径两个流程来分别对应上面的两种情况。通常，本地产生的UDP大包都会调用
+ * ip_push_pending_frames()将发包队列的skb整合到frag_list上，走快速路径分发出去。
+ */
 static int ip_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 		       unsigned int mtu,
 		       int (*output)(struct net *, struct sock *, struct sk_buff *))
 {
 	struct iphdr *iph = ip_hdr(skb);
 
+	/* 如果没有DF标记，则进行分片。 */
 	if ((iph->frag_off & htons(IP_DF)) == 0)
 		return ip_do_fragment(net, sk, skb, output);
 
+	/* 有DF标记则继续判断 */
+
+	/* 不允许本地分片 || 分片最大长度>MTU，则直接报ICMP错误。 */
 	if (unlikely(!skb->ignore_df ||
 		     (IPCB(skb)->frag_max_size &&
 		      IPCB(skb)->frag_max_size > mtu))) {
@@ -656,16 +682,23 @@ static int ip_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 		return -EMSGSIZE;
 	}
 
+	/* 其他情况，继续分片 */
 	return ip_do_fragment(net, sk, skb, output);
 }
 
+
+/*
+ * ip_do_fragment() 是详细的分片流程，整个过程分为快速分片和慢速分片两种：
+ * 1. 如果存在分片列表frag_list，并且通过检查，则走快速路径，复制每个分片的ip头等信息之后，发送出去；
+ * 2. 如果不存在分片列表，或者分片列表检查失败，则走慢速路径，慢速路径会根据MTU大小，对整个数据进行重新划分，
+ *  分配skb，进行数据拷贝，设置ip头等信息，然后发送出去；
+ */
 /*
  *	This IP datagram is too large to be sent in one piece.  Break it up into
  *	smaller pieces (each of size equal to IP header plus
  *	a block of the data of the original IP data part) that will yet fit in a
  *	single device frame, and queue such a frame for sending.
  */
-
 int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 		   int (*output)(struct net *, struct sock *, struct sk_buff *))
 {
@@ -773,6 +806,7 @@ int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 				ip_send_check(iph);
 			}
 
+			/* 发送到下层 */
 			err = output(net, sk, skb);
 
 			if (!err)
@@ -1233,7 +1267,7 @@ alloc_new_skb:
 			}
 
 			copy = datalen - transhdrlen - fraggap - pagedlen;
-			/* 这里的getfrag()函数是 udplite_getfrag或之前ip_generic_getfrag，
+			/* 这里的getfrag()函数是 udplite_getfrag() 或之前ip_generic_getfrag() ，
 			 * 会做用户数据到内核buffer skb的拷贝。
 			 */
 			if (copy > 0 && getfrag(from, data + transhdrlen, offset, copy, fraggap, skb) < 0) {
@@ -1625,7 +1659,9 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 	if (!skb)
 		goto out;
 
-	/* 下面是将多个skb，采用frag_list的方式来合成一个大的skb。
+	/* upd有可能用这种方式组织 ，即当设置了   MSG_MORE下将多个data设置为一次发送出去。
+	 *
+	 * 下面是将多个skb，采用frag_list的方式来合成一个大的skb。
 	 * 该skb只有一个udp header和ip header。
 	 * 所以，要将其余的skb的header部分去掉。
 	 */

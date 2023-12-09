@@ -1787,7 +1787,7 @@ EXPORT_SYMBOL(tcp_sync_mss);
 /* Compute the current effective MSS, taking SACKs and IP options,
  * and even PMTU discovery events into account.
  */
- /* 利用SACKs, IP options， PMTU来获取当前有效的MSS。 */
+ /* 利用 SACKs, IP options， PMTU 来获取当前有效的MSS。 */
 unsigned int tcp_current_mss(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -2321,7 +2321,7 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 
 	/*
 	 * 4. 该skb处于发送队列中间(即不是sk->sk_write_queue的最后一个skb)，且允许整个skb一起发送。
-	 * 	处于发送队列中间的skb不能再获得新的数据，就没必要在defer。
+	 * 处于发送队列中间的skb不能再获得新的数据，就没必要在defer。
 	 */
 	/* Middle in queue won't get any more data, full sendable already? */
 	if ((skb != tcp_write_queue_tail(sk)) && (limit >= skb->len))
@@ -2380,7 +2380,7 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 
 	/*
 	 * 8. 如果当前要发送的skb长度 大于等于 min(cong_win, send_win)，就不需要立即发送，
-	 * 	且表明是 拥塞窗口受限 或者是 通告窗口受限。
+	 * 且表明是 拥塞窗口受限 或者是 通告窗口受限。
 	 */
 	/* Ok, it looks like it is advisable to defer.
 	 * Three cases are tracked :
@@ -2862,7 +2862,10 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		}
 	}
 
-	/* 获取一个skb的最大的tso分段数量 */
+	/* 获取一个skb的最大的tso分段数量，受拥塞控制算法，TSQ算法（1ms的数据量），sysctl_tcp_min_tso_segs等的影响。
+	 * 注意：
+	 * 这里会决定会下发多大的TSO/GSO的packet
+	 */
 	max_segs = tcp_tso_segs(sk, mss_now);
 
 	/* 不断循环发送队列数据 - 从socket的 sk_write_queue 中。 */
@@ -3017,11 +3020,11 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			break;
 
 		/* 真正地将数据包发送到ip层：
-		 * 	构造TCP header等，最终调用ip_queue_xmit() 将数据发送到网络层。
-		 * 	注意：
-		 * 	这里clone_it传入的是1，因为 TCP发送方在接收方确认收到数据之前，始终在发送队列中
-		 * 	保留一份SKB的备份。要实现这种备份，用克隆SKB的方法是最有效的。先创建一个纯数据
-		 * 	区的TCP包，然后标识该SKB已被克隆，最后 TCP发送引擎用克隆的SKB来建立TCP和IPv4首部。
+		 * 构造TCP header等，最终调用ip_queue_xmit() 将数据发送到网络层。
+		 * 注意：
+		 * 这里clone_it传入的是1，因为 TCP发送方在接收方确认收到数据之前，始终在发送队列中
+		 * 保留一份SKB的备份。要实现这种备份，用克隆SKB的方法是最有效的。先创建一个纯数据
+		 * 区的TCP包，然后标识该SKB已被克隆，最后 TCP发送引擎用克隆的SKB来建立TCP和IPv4首部。
 		 */
 		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
 			break;

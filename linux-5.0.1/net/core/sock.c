@@ -2238,6 +2238,7 @@ static void sk_leave_memory_pressure(struct sock *sk)
  */
 bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 {
+	/* 如果该page_frag还有page buffer，可直接用，不用再分配。 */
 	if (pfrag->page) {
 		if (page_ref_count(pfrag->page) == 1) {
 			pfrag->offset = 0;
@@ -2250,7 +2251,7 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 
 	pfrag->offset = 0;
 
-	/* 先申请 8 pages大小的frag page buffer */
+	/* 先申请 8 pages大小的frag page buffer：32k */
 	if (SKB_FRAG_PAGE_ORDER) {
 		/* Avoid direct reclaim but allow kswapd to wake */
 		pfrag->page = alloc_pages((gfp & ~__GFP_DIRECT_RECLAIM) |

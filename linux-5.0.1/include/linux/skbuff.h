@@ -3134,6 +3134,10 @@ static inline int skb_add_data(struct sk_buff *skb,
 	return -EFAULT;
 }
 
+/*
+ * zero copy的socket就不支持coalesce；
+ * 传入的page是该skb对应frags[i-1]的page。 
+ */
 static inline bool skb_can_coalesce(struct sk_buff *skb, int i,
 				    const struct page *page, int off)
 {

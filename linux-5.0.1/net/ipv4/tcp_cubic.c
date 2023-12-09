@@ -196,7 +196,7 @@ static inline void bictcp_hystart_reset(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
 
-	ca->round_start = ca->last_ack = bictcp_clock(); //记录时间戳
+	ca->round_start = ca->last_ack = bictcp_clock(); //记录时间戳，毫秒级。
 	ca->end_seq = tp->snd_nxt; //记录待发送的下一个序列号
 	ca->curr_rtt = 0;
 	ca->sample_cnt = 0;
@@ -212,7 +212,7 @@ static void bictcp_init(struct sock *sk)
 	if (hystart)
 		bictcp_hystart_reset(sk);
 
-	/* 设置初始值： 10 */
+	/* 慢启动阈值初始值： 10 */
 	if (!hystart && initial_ssthresh)
 		tcp_sk(sk)->snd_ssthresh = initial_ssthresh;
 }
