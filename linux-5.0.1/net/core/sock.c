@@ -2240,18 +2240,24 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 {
 	/* 如果该page_frag还有page buffer，可直接用，不用再分配。 */
 	if (pfrag->page) {
+		/* 表示第一个人用这个page，所以offset设置为0。 */
 		if (page_ref_count(pfrag->page) == 1) {
 			pfrag->offset = 0;
 			return true;
 		}
+
+		/*还有剩余空间可用 */
 		if (pfrag->offset + sz <= pfrag->size)
 			return true;
+
+		/* 不可用了 */
 		put_page(pfrag->page);
 	}
 
+	/* 没有可用的page了，需要重新申请page。 */
 	pfrag->offset = 0;
 
-	/* 先申请 8 pages大小的frag page buffer：32k */
+	/* 先尝试申请 8 个 page。 */
 	if (SKB_FRAG_PAGE_ORDER) {
 		/* Avoid direct reclaim but allow kswapd to wake */
 		pfrag->page = alloc_pages((gfp & ~__GFP_DIRECT_RECLAIM) |
@@ -2264,7 +2270,7 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 		}
 	}
 
-	/* 如果上面失败，再尝试申请一页大小的frag page buffer */
+	/* 申请高阶page失败了，则尝试申请一页大小的 page。 */
 	pfrag->page = alloc_page(gfp);
 	if (likely(pfrag->page)) {
 		pfrag->size = PAGE_SIZE;
@@ -2279,6 +2285,7 @@ bool sk_page_frag_refill(struct sock *sk, struct page_frag *pfrag)
 	if (likely(skb_page_frag_refill(32U, pfrag, sk->sk_allocation)))
 		return true;
 
+	/* 如果没有申请成功，就表示memory不足，需要memory相关的处理。*/
 	sk_enter_memory_pressure(sk);
 	sk_stream_moderate_sndbuf(sk);
 	return false;

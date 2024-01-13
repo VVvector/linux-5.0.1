@@ -778,10 +778,9 @@ static unsigned int tcp_synack_options(const struct sock *sk,
  * final wire format yet.
  */
  /*
-  * 这个函数用于计算连接已经建立的状态下， TCP 包的头部选项所占用的空间。通
-  * 过和 tcp_syn_options函数的对比我们可以直观地看到，大部分 TCP 选项都是在发起
-  * 连接的时候放在 TCP 包里的。真正开始传输后， TCP 包所需携带的选项信息就少了很
-  * 多。
+  * 这个函数用于计算连接已经建立的状态下， TCP 包的头部选项所占用的空间。
+  * 通过和 tcp_syn_options() 函数的对比我们可以直观地看到，大部分 TCP 选项都是在发起
+  * 连接的时候放在 TCP 包里的。真正开始传输后， TCP 包所需携带的选项信息就少了很多。
   */
 static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb,
 					struct tcp_out_options *opts,
@@ -1771,6 +1770,7 @@ unsigned int tcp_sync_mss(struct sock *sk, u32 pmtu)
 	if (icsk->icsk_mtup.search_high > pmtu)
 		icsk->icsk_mtup.search_high = pmtu;
 
+	/* 得到不包括IP头和TCP头的MSS, 然后，减去TCP固定的选项长度（例如，时间戳） */
 	mss_now = tcp_mtu_to_mss(sk, pmtu);
 	mss_now = tcp_bound_to_half_wnd(tp, mss_now);
 
@@ -1797,16 +1797,25 @@ unsigned int tcp_current_mss(struct sock *sk)
 	struct tcp_out_options opts;
 	struct tcp_md5sig_key *md5;
 
-	mss_now = tp->mss_cache;
+	/* 上次计算的mss值.
+	 *去除了除去SACK以外的其他选项，原因时SACK选项带不带要看报文有没有乱序，所以，不能在连接建立时确定。
+	 */
+	mss_now = tp->mss_cache; 
 
 	if (dst) {
 		u32 mtu = dst_mtu(dst);
 		if (mtu != inet_csk(sk)->icsk_pmtu_cookie)
+			/* 获取MSS */
 			mss_now = tcp_sync_mss(sk, mtu);
 	}
 
+	/*
+	 * 计算当前的TCP总的选项长度 + TCP头固定部分长度 作为TCP的头的总长度。
+	 */
 	header_len = tcp_established_options(sk, NULL, &opts, &md5) +
 		     sizeof(struct tcphdr);
+
+	/* 去掉SACK选项的长度 */
 	/* The mss_cache is sized based on tp->tcp_header_len, which assumes
 	 * some common options. If this is an odd packet (because we have SACK
 	 * blocks etc) then our calculated header_len will be different, and
@@ -1991,6 +2000,7 @@ static u32 tcp_tso_autosize(const struct sock *sk, unsigned int mss_now,
 {
 	u32 bytes, segs;
 
+	/* 1ms的数据量与sk_gso_max-size的较小值 */
 	bytes = min_t(unsigned long,
 		      sk->sk_pacing_rate >> sk->sk_pacing_shift,
 		      sk->sk_gso_max_size - 1 - MAX_TCP_HEADER);
@@ -2259,7 +2269,7 @@ static int tso_fragment(struct sock *sk, enum tcp_queue tcp_queue,
 /* https://www.cnblogs.com/aiwz/archive/2012/10/15/6333370.html
  * https://github.com/spotify/linux/commit/f4805eded7d38c4e42bf473dc5eb2f34853beb06
  *
- * 在这些情况下会立即发送，而其他情况下会延时发送，这样主要是为了减少软GSO分段的次数，以提高性能。
+ * 下面在这些情况下会立即发送，而其他情况下会延时发送，这样主要是为了减少软GSO分段的次数，以提高性能。
  * ethtool -K ethX tso off
  * ethtool -K ethX tso on
  */
@@ -2276,14 +2286,13 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 	s64 delta;
 
 	/*
-	 * 1. TCP_CA_Loss或TCP_CA_Recovery的拥塞状态下，立即发送。
+	 * 1. TCP_CA_Loss 或 TCP_CA_Recovery 的拥塞状态下，立即发送。(拥塞状态了)
 	 */
 	if (icsk->icsk_ca_state >= TCP_CA_Recovery)
 		goto send_now;
 
 	/*
-	 * 2. 该skb被延迟 1ms 以上，则不再延迟，直接发送。
-	 * 即TSO延迟不能超过1ms。
+	 * 2. 该skb被延迟 1ms 以上，则不再延迟，直接发送。即TSO延迟不能超过1ms。
 	 */
 	/* Avoid bursty behavior by allowing defer
 	 * only if the last write was recent (1 ms).
@@ -2357,7 +2366,7 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 
 	/*
 	 * 注意：
-	 * 条件3,4，5(5.1/5.2)都是 limit 大于某个阈值，就可以马上发送。
+	 * 条件3, 4，5(5.1/5.2)都是 limit 大于某个阈值，就可以马上发送。
 	 * 因为通过这几个条件，可以确定此时发送是受到应用程序的限制，而不是通过窗口或者拥塞窗口。
 	 * 在应用程序发送的数据量很少的情况下，不宜采用TSO Nagle，因为这会影响此类应用。
 	 */
@@ -2371,7 +2380,7 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 		goto send_now;
 
 	/*
-	 * 7. 如果下一个ack的来得太晚(srtt的一半)，就需要立即发送。
+	 * 7. 如果下一个ack来得太晚(srtt的一半)，就需要立即发送。
 	 */
 	delta = tp->tcp_clock_cache - head->tstamp;
 	/* If next ACK is likely to come too late (half srtt), do not defer */
@@ -2380,7 +2389,7 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 
 	/*
 	 * 8. 如果当前要发送的skb长度 大于等于 min(cong_win, send_win)，就不需要立即发送，
-	 * 且表明是 拥塞窗口受限 或者是 通告窗口受限。
+	 * 即表明是 拥塞窗口受限 或者是 对端通告窗口受限。
 	 */
 	/* Ok, it looks like it is advisable to defer.
 	 * Three cases are tracked :
@@ -2395,7 +2404,7 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 		}
 	} else {
 		if (send_win <= skb->len) {
-			*is_rwnd_limited = true; //受到当前发送窗口限制
+			*is_rwnd_limited = true; //受到对端通告窗口限制
 			return true;
 		}
 	}
@@ -2817,17 +2826,17 @@ void tcp_chrono_stop(struct sock *sk, const enum tcp_chrono type)
  * but cannot send anything now because of SWS or another problem.
  */
 /*
- * 将socket的发送队列上的skb发送出去，0表示发送成功，过程如下：
- * 1. 检查拥塞窗口大小
- * 2. 检查当前报文是否完全处于发送窗口内
- * 3. 检查报文是否使用nagle算法发送
- * 4. 通过以上检查后的skb发送出去
- * 5. 循环检查发送队列上所有未发送的skb
+ * 将socket write queue上的skb发送出去，0表示发送成功，过程如下：
+ * 1. 检查拥塞窗口大小；
+ * 2. 检查当前报文是否完全处于发送窗口内；
+ * 3. 检查报文是否使用nagle算法；
+ * 4. 通过以上检查后的skb发送出去；
+ * 5. 循环检查发送队列上所有未发送的skb；
  * 
  * 最后调用：tcp_transmit_skb() 进行发送。
  *
  * 注意：
- * 	可能TSQ或者pacing的限制导致暂定发送，然后，TSO tasklet或者pacing timer到期后，继续发送数据。
+ * 	可能TSQ或者pacing的限制导致暂定发送，然后，TSO tasklet 或者 pacing timer 到期后，继续发送数据。
  */
 /*
  * http://sunjiangang.blog.chinaunix.net/uid-9543173-id-3543419.html 
@@ -2849,7 +2858,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	/* 在每次尝试发送skb时，就需要更新 tp->tcp_clock_cache 时间戳。*/
 	tcp_mstamp_refresh(tp);
 
-	/* __tcp_push_pending_frames() 不需要立即发送时，linux 这里会做mtu探测工作。*/
+	/* 不止发送一个packet，例如：__tcp_push_pending_frames()，就不需要立即发送，可以做mtu探测工作。*/
 	if (!push_one) {
 
 		/* 进行MTU探测，用于及时增大MSS, 从而可以发送更大的报文。 */
@@ -2868,7 +2877,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 	 */
 	max_segs = tcp_tso_segs(sk, mss_now);
 
-	/* 不断循环发送队列数据 - 从socket的 sk_write_queue 中。 */
+	/* 不断循环发送sk_write_queue 中的数据。 */
 	while ((skb = tcp_send_head(sk))) {
 		unsigned int limit;
 

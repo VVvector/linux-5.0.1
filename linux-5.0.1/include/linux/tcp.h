@@ -385,7 +385,7 @@ struct tcp_sock {
 	 */
 	u32	packets_out;	/* Packets which are "in flight"	*/
 
-	/* 因为重传才发送出去，但是，还没有被确认的段的数量。*/
+	/* 因为重传而发送出去，且还没有被确认的段的数量。*/
 	u32	retrans_out;	/* Retransmitted packets out		*/
 
 	u32	max_packets_out;  /* max packets_out in last window */
@@ -500,7 +500,7 @@ struct tcp_sock {
 	/*
 	 * 启用SACK时；表示已经被SACK选项确认的段的数量。
 	 * 不启用SACK时：表示接收到的重复ACK的次数，因为重复ACK不会自动发送，一定是对端收到了数据包。
-	 *	该值在接收到确认新数据段时被清除
+	 * 该值在接收到确认新数据段时被清除
 	 */
 	u32	sacked_out;	/* SACK'd packets			*/
 

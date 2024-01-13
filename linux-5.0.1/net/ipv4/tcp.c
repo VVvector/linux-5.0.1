@@ -673,8 +673,8 @@ static inline void tcp_mark_push(struct tcp_sock *tp, struct sk_buff *skb)
 }
 
 /*
- * TCP 协议提供了 PUSH 功能，只要添加了该标志位， TCP 层会尽快地将数据发送
- * 出去。以往多用于传输程序的控制命令。在目前的多数 TCP 实现中，用户往往不会自
+ * TCP 协议提供了 PUSH 功能，只要添加了该标志位， TCP 层会尽快地将数据发送出去。
+ * 以往多用于传输程序的控制命令。在目前的多数 TCP 实现中，用户往往不会自
  * 行指定 PUSH。 TCP 的实现会根据情况自行指定 PUSH 位
 */
 static inline bool forced_push(const struct tcp_sock *tp)
@@ -737,16 +737,17 @@ static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
  */
 /*
  * 当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少
- * 总的发包个数。tcp_autocorking的思路是：当规则队列Qdisc、或网卡的发送队列中有尚未发出的
+ * 总的发包个数。
+ * tcp_autocorking的思路是：当规则队列Qdisc、或网卡的发送队列中有尚未发出的
  * 数据包时，那么就延迟小包的发送，等待应用层的后续数据，直到Qdisc或网卡发送队列的数据
  * 包成功发送出去为止。
  * 
  * 同时满足以下条件时，tcp_push()才会自动阻塞autocork：
- * 	1. 数据包为小包，即数据长度小于最大值size_goal( MSS )。
- * 	2. 使用了tcp_autocorking( /proc/sys/net/ipv4/tcp_autocorking )，这个值默认为1。
- * 	3. 当前skb不是发送队列头，表明已经有数据发送。（此数据包不是发送队列的第一个包，即前面有数据包被发送了。）
- * 	4. 当前正在发送的数据的总truesize长度大于此skb的truesize，
- * 	   表明位于Qdisc或者设备队列中的数据不是仅有ACK报文，所以TX发送处理不会被延迟。
+ * 1. 数据包为小包，即数据长度小于最大值size_goal( MSS )。
+ * 2. 使用了tcp_autocorking( /proc/sys/net/ipv4/tcp_autocorking )，这个值默认为1。
+ * 3. 当前skb不是发送队列头，表明已经有数据发送。（此数据包不是发送队列的第一个包，即前面有数据包被发送了。）
+ * 4. 当前正在发送的数据的总truesize长度大于此skb的truesize，
+ *  表明位于Qdisc或者设备队列中的数据不是仅有ACK报文，所以TX发送处理不会被延迟。
  * 
  * Q：什么时候会取消自动阻塞呢？
  * A：在tcp_push()中会检查，if (atomic_read(&sk->sk_wmem_alloc) > skb->truesize)
@@ -765,14 +766,14 @@ static bool tcp_should_autocork(struct sock *sk, struct sk_buff *skb,
 }
 
 /* 
- * tcp_sendmsg()中，在sock发送缓存不足、系统内存不足或应用层的数据都拷贝完毕等情况下，
+ * tcp_sendmsg()中，在sock发送缓存不足、系统内存不足，应用层的数据都拷贝完毕等情况下，
  * 都会调用tcp_push()来把已经拷贝到发送队列中的数据给发送出去。
- *	工作：
- *	1. 检查是否有未发送过的数据
- *	2. 检查是否需要设置PSH标志
- *	3. 检查是否使用紧急模式
- *	4. 检查是否需要使用自动阻塞
- *	5. 尽可能地把发送队列中的skb发送出去
+ * 工作：
+ * 1. 检查是否有未发送过的数据；
+ * 2. 检查是否需要设置PSH标志；
+ * 3. 检查是否使用紧急模式；
+ * 4. 检查是否需要使用自动阻塞；
+ * 5. 尽可能地把发送队列中的skb发送出去；
  *
  * 会尝试遍历整个发送队列，直到无法继续发送为止。
  */
@@ -796,22 +797,22 @@ static void tcp_push(struct sock *sk, int flags, int mss_now,
 	/* 如果设置了MSG_OOB标志，就记录紧急指针。 */
 	tcp_mark_urg(tp, flags);
 
-	/* 当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少
-	 * 总的发包个数。
-	 * tcp_autocorking的思路是当规则队列Qdisc、或网卡的发送队列中有尚未发出的数据包时，那么就延迟小包的发送，
+	/* 当应用程序连续地发送小包时，如果能够把这些小包合成一个全尺寸的包再发送，无疑可以减少总的发包个数。
+	 * tcp_autocorking的思路：
+	 * 当规则队列Qdisc、或网卡的发送队列中有尚未发出的数据包时，那么就延迟小包的发送，
 	 * 等待应用层的后续数据，直到Qdisc或网卡发送队列的数据包成功发送出去为止。
 	 */
-	/* 如果需要自动阻塞小包, 有相关条件进行判断。*/
 	if (tcp_should_autocork(sk, skb, size_goal)) {
 
-		/* 设置阻塞标志位 */
+		/* TSQ相关操作 */
 		/* avoid atomic op if TSQ_THROTTLED bit is already set */
 		if (!test_bit(TSQ_THROTTLED, &sk->sk_tsq_flags)) {
 			NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPAUTOCORKING);
 			set_bit(TSQ_THROTTLED, &sk->sk_tsq_flags);
 		}
 
-		/* 当提交给IP层的数据包都发送出去后（对应网卡驱动有tx done，做了tx skb free），
+		/* 如果本地队列(qdisc和网卡)还有很多TX数据没有free，这里，就不会继续往下发送。
+		 *当提交给IP层的数据包都发送出去后（对应网卡驱动有tx done，做了tx skb free），
 		 * sk_wmem_alloc的值就会变小，此时这个条件就为假，之后就可以发送被阻塞的数据包了。
 		 * 即 意思是当host本地没有buffer的data（qdisc,网卡），就需要立即发送数据，而不要继续cork了。
 		 * 
@@ -1038,7 +1039,7 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
 /* gso数据包长度：
  * 1. 如果是紧急数据包或者GSO/TSO都不开启的情况，则不会推迟发送，默认使用当前MSS。
  * 2. 如果是有开启GSO/TSO后，用tcp_send_mss()获取一个gso skb的大小(为MSS的整数倍)和MSS分段大小。
- * 	且不能超过接收方接收窗口的一半。
+ *  且不能超过接收方接收窗口的一半。
  */
 static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 {
@@ -1304,17 +1305,26 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	return err;
 }
 
-/* tcp 发送函数：将用户数据拷贝到 sk->sk_write_queue中。
+/* tcp 发送函数：将用户数据拷贝到 sk->sk_write_queue 中。
  *
  * sendmsg系统调用在tcp层的实现是tcp_sendmsg函数，该函数完成以下任务：
- * 从用户空间读取数据，拷贝到内核skb，将skb加入到发送队列的任务，调用发送函数；
- * 函数在执行过程中会锁定控制块，避免软中断在tcp层的影响；
- * 函数核心流程：
- * 	在发送数据时，查看是否能够将数据合并到发送队列中最后一个skb中，如果不能合并，
- * 	则新申请一个skb；拷贝过程中，如果skb的线性区域有空间，则优先使用线性区域，
- * 	线性区域空间不足，则使用分页区域；拷贝完成后，调用发送函数发送数据；
+ * 1. 从用户空间读取数据，拷贝到内核skb，将skb加入到发送队列的任务，调用发送函数；
+ * 2. 函数在执行过程中会锁定控制块，避免软中断在tcp层的影响；
+ * 3. 函数核心流程：
+ * 	1. 在发送数据时，查看是否能够将数据合并到发送队列中最后一个skb中，如果不能合并，则新申请一个skb；
+ *	2. 拷贝过程中，如果skb的线性区域有空间，则优先使用线性区域;
+ * 	3. 如果线性区域空间不足，则使用分页区域;
+ *	4. 拷贝完成后，调用发送函数发送数据;
  *
- * 注：这时不一定会真正开始发送，如果没有达到发送条件的话，很可能这次系统调用就直接返回了。
+ * 注:
+ *	这时不一定会真正开始发送，如果没有达到发送条件的话，很可能这次系统调用就直接返回了。
+ *	https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/tcp_nodelay_and_small_buffer_writes
+ *	发送条件：
+ *		1. Nagle - TCP_NODELAY 
+ *			https://cn.bing.com/search?q=tcp+nagle+nodelay&FORM=BESBTB&refig=659a34534689455ebb3083a00eb70a65&pc=LCTS&ensearch=1
+ *		2. Cork - TCP_CORK
+ *			https://baus.net/on-tcp_cork/
+ *		3. TSO/GSO影响
  *
  * 应用程序send()数据后，会在 tcp_sendmsg() 中尝试在同一个skb保存 size_goal 大小的数据，
  * 然后再通过 tcp_push() 把这些包通过 tcp_write_xmit() 发出去
@@ -1369,7 +1379,9 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 	/* 获取socket timetout时间 */
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
-	/* 检查是否是 应用层程序限制了发送速率 （即应用程序发送不够快）*/
+	/* 检查是否是应用层程序限制了发送速率 （即应用程序发送不够快）
+	 * 发送端饥饿问题探测。
+	 */
 	tcp_rate_check_app_limited(sk);  /* is sending application-limited? */
 
 	/* 2. 如果连接尚未建立好，即不处于ESTABLISHED或者CLOSE_WAIT状态，那么
@@ -1424,7 +1436,8 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 
 restart:
 	/* 3. 获取当前的MSS, 网络设备支持的最大单个skb长度size_goal,
-	 * 如果支持GSO, size_goal会是MSS的整数倍且不能超过接收方接收窗口的一半；否则，会等于mss。
+	 * 如果支持GSO, size_goal会是（dev->gso_max_size, 默认为65535）MSS的整数倍且不能超过接收方接收窗口的一半，
+	  * 否则，会等于mss。
 	 * 注意：
 	 * 最终通过 tcp_write_xmit() 下发skb时，会通过 tcp_tso_segs() 再次决定下发的gso/tso SKB的大小。
 	 */
@@ -1442,16 +1455,17 @@ restart:
 		/* copy 代表本次需要从用户数据块中复制的数据量。 */
 		int copy = 0;
 
-		/* 4.1 获取发送队列的最后一个skb，并且判断当前skb剩余空间能携带的数据量。
+		/* 4.1 获取发送队列的最后一个skb，并且判断该skb的剩余空间能携带的数据。
 		 * 如果是socket buffer的最后一个skb尚未发送，且长度尚未达到size_goal,那么可以往此skb继续追加数据。
 		 */
 		skb = tcp_write_queue_tail(sk);
 		if (skb)
 			copy = size_goal - skb->len;
 
-		/* 如果剩余空间为0，或者不能合并，则需要重新申请skb进行发送。
+		/* 申请新的SKB进行发包：
+		 * 如果当前skb已经达到预期的size(size_goal) 或者不能合并，则需要重新申请skb进行发送。
  		 * 即数据不能合并到之前的skb做gso了。MSG_EOR - end of record
- 		 * eor由userspace通过MSG_EOR进行设置。
+ 		 * eor由 userspace 通过 MSG_EOR 进行设置。
  		 */
 		if (copy <= 0 || !tcp_skb_can_collapse_to(skb)) {
 			bool first_skb;
@@ -1472,16 +1486,24 @@ new_segment:
 				goto restart;
 			}
 
-			/* 申请一个skb，其线性数据区的大小为：
-			 * 通过 select_size() 得到线性数区中TCP负荷的大小 + 最大的协议头长度。
+			/* 申请一个新的skb：
+			 * 其线性数据区的大小为：
+			 * 通过 select_size() 得到线性数区中 TCP负荷的大小 + 最大的协议头长度。
 			 * 如果申请失败，就进入等待。
 			 * 注：
 			 * 这里会从TCP层面来判断发送缓存的申请是否合法。即需要判断TCP层面的内存使用量，
 			 * 以及此socket的发送缓存使用量。
 			 * 这里会在数据区的头部预留足够的空间，即可以存放tcp, ip, ethernet的首部。
 			 */
+
+			/* 检查待ack的skb队列是否为空，且否是write queue的第一个skb */
 			first_skb = tcp_rtx_and_write_queues_empty(sk);
-			linear = select_size(first_skb, zc); //2048 - tcp header
+
+			/* 线性区：
+			 * 如果这个skb是write queue的第一个skb且不是zero copy，则线性区大小为SKB_WITH_OVERHEAD(2048 - MAX_TCP_HEADER)
+			 * 否则，为0。
+			 */
+			linear = select_size(first_skb, zc);
 			skb = sk_stream_alloc_skb(sk, linear, sk->sk_allocation,
 						  first_skb);
 			if (!skb)
@@ -1515,12 +1537,13 @@ new_segment:
 				TCP_SKB_CB(skb)->sacked |= TCPCB_REPAIRED;
 		}
 
-		/* 本次可拷贝的user数据量不能超过数据块的长度 */
+		/* 本次可拷贝的user数据量不能超过该skb预期可容纳的长度。（size_goal） */
 		/* Try to append data to the end of skb. */
 		if (copy > msg_data_left(msg))
 			copy = msg_data_left(msg);
 
-		/* 1. 如果skb的线性数据区还有剩余空间，就先复制到线性数据区 */
+		/***** 正式开始拷贝数据到skb中 *****/
+		/* 1. 如果skb的线性数据区还有剩余空间且不是zerocopy，就先复制到线性数据区。 */
 		/* Where to copy to? */
 		if (skb_availroom(skb) > 0 && !zc) {
 			/* We have some space in skb head. Superb! */
@@ -1534,14 +1557,14 @@ new_segment:
 		/* 2. 如果skb的线性数据区已经用完了，那么就使用分页区 skb->frags[] */
 		} else if (!zc) {
 			bool merge = true;
-			int i = skb_shinfo(skb)->nr_frags; //分页数
-			struct page_frag *pfrag = sk_page_frag(sk); //上次缓存的分页
+			int i = skb_shinfo(skb)->nr_frags; //当前skb的frag个数
+			struct page_frag *pfrag = sk_page_frag(sk); //当前可用的page_frag(存在于task或者socket)
 
-			/* 检查分页是否有可用空间，如果没有，就申请新的page。例如，会先尝试申请 8 pages。 32k */
+			/* 检查分页是否有可用空间，如果没有，就申请新的page。例如，会先尝试申请 8 pages - 32k */
 			if (!sk_page_frag_refill(sk, pfrag))
 				goto wait_for_memory;
 
-			/* 判断能否往最后一个分页中追加数据，如果不能追加了，就重新分配skb。
+			/* 判断能否往当前skb的最后一个分页中追加数据，如果不能追加了，就重新分配skb。
 			 * 1. 不是zero copy flow；
 			 * 2. 该page_frag中的page是本skb当前的page；
 			 */
@@ -1576,12 +1599,13 @@ new_segment:
 				goto do_error;
 
 
-			/* 如果把数据追加到最后一个分页了，更新最后一个分页的数据大小。 */
+			/* 如果新数据是追加到当前skb->frag[i-1]中的，就更新相关frag数据。 */
 			/* Update the skb. */
 			if (merge) {
+				/* 只更新frag的size就好。*/
 				skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
 			} else {
-				/* 将新页添加到skb中 */
+				/* 需要将新page buffer添加到skb->frags[]中 */
 				skb_fill_page_desc(skb, i, pfrag->page,
 						   pfrag->offset, copy);
 				page_ref_inc(pfrag->page);
@@ -1590,8 +1614,9 @@ new_segment:
 			/* 更新pfrag的page offset */
 			pfrag->offset += copy;
 
-		/* 支持零拷贝模式 */
+		/* 零拷贝模式 */
 		} else {
+			/*直接将零拷贝的page赋值给skb的frags[]。 */
 			err = skb_zerocopy_iter_stream(sk, skb, msg, copy, uarg);
 			if (err == -EMSGSIZE || err == -EEXIST) {
 				tcp_mark_push(tp, skb);
@@ -1602,7 +1627,7 @@ new_segment:
 			copy = err;
 		}
 
-		/* 如果这是第一次拷贝，就取消PSH标志 */
+		/* 如果这是第一次拷贝(即用户层下来的第一次数据操作)，就取消PSH标志 */
 		if (!copied)
 			TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_PSH;
 
@@ -1621,17 +1646,19 @@ new_segment:
 
 		/* 如果所有的用户数据都已经被copy到skb，就尝试发送。*/
 		if (!msg_data_left(msg)) {
+			/* MSG_EOR的处理，决定后续的数据能不能直接merge到本次的skb中（一个packet）。 */
 			if (unlikely(flags & MSG_EOR))
 				TCP_SKB_CB(skb)->eor = 1;
 			goto out;
 		}
 
-		/* 如果用户数据没有全部被copy到skb，即skb还可用继续填充，或者发送的是带外数据，
+		/* 如果skb没有到达预期的size(size_goal)，还可用继续填充，或者发送的是带外数据，
 		 *或者使用了TCP_REPAIR选项，就继续拷贝数据，先不发送。*/
 		if (skb->len < size_goal || (flags & MSG_OOB) || unlikely(tp->repair))
 			continue;
 
-		/* 如果本skb的数据量已经大于了size_goal，就要开始发送数据。 */
+		/****** 如果本skb的数据量已经大于等于了size_goal，就要开始发送数据。 ******/
+		/* 表示已经有一个填充充足的packe了，可以向下发送了。 */
 
 		/* 判断是否需要立即发送：
 		 * 如果待发送的数据量大于对方接收窗口的一半了，就马上发送。
@@ -1639,7 +1666,7 @@ new_segment:
 		if (forced_push(tp)) {
 			tcp_mark_push(tp, skb);
 			
-			/* 尽可能的将发送队列中的skb发送出去，禁用nalge */
+			/* 尽可能的将发送队列中的skb发送出去，且禁用nalge。 */
 			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
 
 		/* 如果sk->sk_write_queue中只有一个skb，就发送一个skb */
